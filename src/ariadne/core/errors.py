@@ -27,3 +27,7 @@ class ScopeError(EngagementError):
 
 class PolicyConfigurationError(PolicyError):
     """Raised when a policy document is malformed or fails validation."""
+
+
+class TransitionDeniedError(AriadneError):
+    """Raised when an engagement state transition is not permitted."""
