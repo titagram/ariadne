@@ -1,0 +1,204 @@
+# Base Ariadne policy — universal invariants and sensible defaults.
+# Every environment profile intersects with this document.
+# Lower layers may restrict but never expand a capability.
+name: base
+version: 1
+capabilities:
+  # ── Passive discovery (always allowed, low intensity) ──────────────────
+  passive.discovery:
+    allowed: true
+    max_rate: 10
+    max_concurrency: 2
+    max_duration_seconds: 86400
+    max_output_bytes: 10_000_000
+    allowed_tools:
+      - dig
+      - dnsrecon
+      - whois
+      - tcpdump
+
+  # ── Network scanning ──────────────────────────────────────────────────
+  scan.tcp:
+    allowed: true
+    max_rate: 500
+    max_concurrency: 10
+    max_attempts: 1
+    max_duration_seconds: 3600
+    max_output_bytes: 50_000_000
+    allowed_tools:
+      - nmap
+      - masscan
+      - naabu
+      - unicornscan
+  scan.udp:
+    allowed: true
+    max_rate: 100
+    max_concurrency: 5
+    max_attempts: 1
+    max_duration_seconds: 3600
+    max_output_bytes: 20_000_000
+    allowed_tools:
+      - nmap
+      - unicornscan
+
+  # ── Service enumeration ───────────────────────────────────────────────
+  service.enum:
+    allowed: true
+    max_rate: 50
+    max_concurrency: 5
+    max_attempts: 3
+    max_duration_seconds: 3600
+    max_output_bytes: 50_000_000
+    allowed_tools:
+      - smbclient
+      - rpcclient
+      - enum4linux-ng
+      - ldapsearch
+      - snmpwalk
+      - onesixtyone
+
+  # ── Web application testing ──────────────────────────────────────────
+  web.crawl:
+    allowed: true
+    max_rate: 20
+    max_concurrency: 3
+    max_duration_seconds: 7200
+    max_output_bytes: 50_000_000
+    allowed_tools:
+      - katana
+      - feroxbuster
+      - ffuf
+  web.passive_scan:
+    allowed: true
+    max_rate: 20
+    max_concurrency: 3
+    max_duration_seconds: 7200
+    max_output_bytes: 50_000_000
+    allowed_tools:
+      - curl
+      - httpx
+      - whatweb
+      - nuclei
+  web.active_scan:
+    allowed: true
+    max_rate: 10
+    max_concurrency: 2
+    max_attempts: 3
+    max_duration_seconds: 14400
+    max_output_bytes: 100_000_000
+    allowed_tools:
+      - zap
+      - nuclei
+  web.fuzz:
+    allowed: true
+    max_rate: 50
+    max_concurrency: 5
+    max_attempts: 1
+    max_duration_seconds: 3600
+    max_output_bytes: 50_000_000
+    allowed_tools:
+      - ffuf
+      - feroxbuster
+
+  # ── Authentication testing ───────────────────────────────────────────
+  auth.default_creds:
+    allowed: true
+    max_rate: 10
+    max_concurrency: 3
+    max_attempts: 5
+    max_duration_seconds: 1800
+    max_output_bytes: 10_000_000
+    allowed_tools:
+      - hydra
+      - medusa
+      - crackmapexec
+  auth.spray:
+    allowed: true
+    max_rate: 5
+    max_concurrency: 2
+    max_attempts: 10
+    max_duration_seconds: 3600
+    max_output_bytes: 10_000_000
+    allowed_tools:
+      - hydra
+      - kerbrute
+  auth.brute_force:
+    always_manual: true
+    allowed: true
+    max_rate: 3
+    max_concurrency: 1
+    max_attempts: 100
+    max_duration_seconds: 7200
+    max_output_bytes: 10_000_000
+    allowed_tools:
+      - hydra
+      - john
+      - hashcat
+
+  # ── Exploitation ─────────────────────────────────────────────────────
+  exploit.metasploit:
+    allowed: true
+    max_rate: 3
+    max_concurrency: 1
+    max_attempts: 3
+    max_duration_seconds: 3600
+    max_output_bytes: 50_000_000
+    allowed_tools:
+      - msfconsole
+  exploit.curated:
+    allowed: true
+    max_rate: 3
+    max_concurrency: 1
+    max_attempts: 3
+    max_duration_seconds: 3600
+    max_output_bytes: 50_000_000
+
+  # ── Unrestricted stress testing (base default is unbounded; restricted
+  # per profile) ────────────────────────────────────────────────────────
+  resource.stress:
+    allowed: true
+    always_manual: true
+    max_rate: 1000
+    max_concurrency: 50
+    max_duration_seconds: 300
+    max_output_bytes: 100_000_000
+  resource.exhaustion:
+    allowed: true
+    always_manual: true
+    max_rate: 1000
+    max_concurrency: 50
+    max_duration_seconds: 300
+    max_output_bytes: 100_000_000
+
+  # ── Base invariants (always denied) ──────────────────────────────────
+  persistence:
+    allowed: false
+  c2:
+    allowed: false
+  propagation:
+    allowed: false
+
+  # ── Host installation (requires manual approval) ─────────────────────
+  host.install:
+    allowed: true
+    always_manual: true
+  poc.uncurated:
+    allowed: true
+    always_manual: true
+
+  # ── Evidence and cleanup ─────────────────────────────────────────────
+  evidence.collect:
+    allowed: true
+    max_rate: 50
+    max_concurrency: 5
+    max_output_bytes: 500_000_000
+    allowed_tools:
+      - screenshot
+      - curl
+      - tcpdump
+  cleanup:
+    allowed: true
+    max_rate: 50
+    max_concurrency: 5
+    max_duration_seconds: 600
+    max_output_bytes: 10_000_000

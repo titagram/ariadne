@@ -23,3 +23,7 @@ class ConfirmationError(EngagementError):
 
 class ScopeError(EngagementError):
     """Raised when a scope operation is invalid."""
+
+
+class PolicyConfigurationError(PolicyError):
+    """Raised when a policy document is malformed or fails validation."""

@@ -1,0 +1,42 @@
+# Private lab environment policy.
+# This profile may raise limits and permit bounded stress testing
+# but cannot remove base invariants.
+name: private-lab
+version: 1
+capabilities:
+  # Scan rate increased for lab environments
+  scan.tcp:
+    allowed: true
+    max_rate: 2000
+    max_concurrency: 25
+    max_duration_seconds: 7200
+
+  # Bounded stress testing is permitted in lab environments
+  resource.stress:
+    allowed: true
+    always_manual: true
+    max_rate: 5000
+    max_concurrency: 50
+    max_duration_seconds: 600
+  resource.exhaustion:
+    allowed: true
+    always_manual: true
+    max_rate: 5000
+    max_concurrency: 50
+    max_duration_seconds: 600
+
+  # Increased web testing capacity
+  web.fuzz:
+    allowed: true
+    max_rate: 200
+    max_concurrency: 10
+    max_duration_seconds: 7200
+
+  # Brute force is allowed with manual approval
+  auth.brute_force:
+    always_manual: true
+    allowed: true
+    max_rate: 10
+    max_concurrency: 3
+    max_attempts: 500
+    max_duration_seconds: 14400

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ariadne-policy-schema-2026-07-27",
+  "title": "Ariadne Policy Document",
+  "description": "Schema for Ariadne YAML policy documents that define capability rules for engagement profiles.",
+  "type": "object",
+  "required": ["name", "version", "capabilities"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Unique name of this policy document (e.g. 'base', 'htb', 'private-lab')."
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonic version number for the policy schema."
+    },
+    "capabilities": {
+      "type": "object",
+      "description": "Mapping of capability names to their rules.",
+      "propertyNames": {
+        "pattern": "^[a-z0-9]+(\\.[a-z0-9_]+)*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/CapabilityRule"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "CapabilityRule": {
+      "type": "object",
+      "properties": {
+        "allowed": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether this capability is permitted. Default false (fail-closed)."
+        },
+        "always_manual": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, this capability always requires manual user approval."
+        },
+        "max_rate": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum requests per second for this capability."
+        },
+        "max_concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum concurrent operations for this capability."
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum number of attempts per target for this capability."
+        },
+        "max_duration_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum wall-clock duration in seconds for this capability."
+        },
+        "max_output_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum output size in bytes for this capability."
+        },
+        "allowed_tools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Set of allowed tool names for this capability."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

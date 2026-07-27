@@ -1,0 +1,33 @@
+# Hack The Box environment policy.
+# HTB forbids denial of service, resource exhaustion, subnet scanning,
+# and actions against other platform targets.
+name: htb
+version: 1
+capabilities:
+  # ── Resource stress explicitly denied ────────────────────────────────
+  resource.stress:
+    allowed: false
+  resource.exhaustion:
+    allowed: false
+
+  # ── Subnet scanning explicitly denied — only single-host targets ─────
+  scan.tcp:
+    allowed: true
+    max_rate: 500
+    max_concurrency: 10
+
+  # ── Lower limits for web testing under HTB ──────────────────────────
+  web.fuzz:
+    allowed: true
+    max_rate: 20
+    max_concurrency: 3
+    max_duration_seconds: 3600
+
+  # ── Brute force requires manual approval, lower limits ──────────────
+  auth.brute_force:
+    always_manual: true
+    allowed: true
+    max_rate: 2
+    max_concurrency: 1
+    max_attempts: 20
+    max_duration_seconds: 3600
