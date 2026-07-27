@@ -1,0 +1,15 @@
+manifest_version: 1
+name: ariadne
+version: 0.1.0
+kind: standalone
+description: Policy-bounded lab and CTF pentesting for Hades
+author: Gabriele
+provides_tools:
+  - ariadne_prepare_engagement
+  - ariadne_bind_engagement
+  - ariadne_status
+  - ariadne_propose_plan
+  - ariadne_execute_plan
+  - ariadne_render_report
+provides_hooks:
+  - pre_tool_call
