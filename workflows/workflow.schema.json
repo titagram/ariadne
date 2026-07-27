@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ariadne.local/workflows/schema.json",
+  "title": "Ariadne Playbook",
+  "description": "Schema for versioned Ariadne penetration-test playbooks",
+  "type": "object",
+  "properties": {
+    "id": {
+      "description": "Stable, globally unique playbook identifier (e.g. network.tcp-discovery.v1)",
+      "type": "string",
+      "pattern": "^[a-z0-9]+(\\.[a-z0-9-]+)+$"
+    },
+    "version": {
+      "description": "Monotonic version number for this playbook",
+      "type": "integer",
+      "minimum": 1
+    },
+    "stage": {
+      "description": "Engagement phase this playbook belongs to (e.g. discovery, enumeration)",
+      "type": "string"
+    },
+    "triggers": {
+      "description": "Conditions that make this playbook eligible",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": { "type": "string" },
+          "types": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["kind"]
+      }
+    },
+    "required_evidence_types": {
+      "description": "Evidence types that must exist before this playbook is eligible",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "capabilities": {
+      "description": "Capabilities this playbook requires (e.g. scan.tcp, service.enum)",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "actions": {
+      "description": "Ordered adapter operations this playbook executes",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "adapter": { "type": "string" },
+          "operation": { "type": "string" },
+          "inputs": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": ["adapter", "operation"],
+        "additionalProperties": false
+      }
+    },
+    "limits": {
+      "description": "Resource limits declared by this playbook",
+      "type": "object",
+      "properties": {
+        "max_rate": { "type": "integer", "minimum": 1 },
+        "max_concurrency": { "type": "integer", "minimum": 1 },
+        "max_attempts": { "type": "integer", "minimum": 1 },
+        "max_duration_seconds": { "type": "integer", "minimum": 1 },
+        "max_output_bytes": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "stop_conditions": {
+      "description": "Conditions that should halt plan execution",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "success_emits": {
+      "description": "Observation types this playbook emits on success",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "next_playbooks": {
+      "description": "Playbook ids that are natural successors after this one",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "report_sections": {
+      "description": "Report sections this playbook contributes to",
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": [
+    "id", "version", "stage", "triggers", "capabilities",
+    "actions", "limits", "stop_conditions",
+    "success_emits", "next_playbooks", "report_sections"
+  ],
+  "additionalProperties": false
+}

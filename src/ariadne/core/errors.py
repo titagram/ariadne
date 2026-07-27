@@ -29,5 +29,13 @@ class PolicyConfigurationError(PolicyError):
     """Raised when a policy document is malformed or fails validation."""
 
 
+class WorkflowError(AriadneError):
+    """Raised when a workflow or playbook operation fails."""
+
+
+class WorkflowConfigurationError(WorkflowError):
+    """Raised when a playbook or workflow catalog is malformed."""
+
+
 class TransitionDeniedError(AriadneError):
     """Raised when an engagement state transition is not permitted."""
