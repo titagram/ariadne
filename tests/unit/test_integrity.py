@@ -166,6 +166,3 @@ def test_integrity_result_rejects_extra_fields() -> None:
     """IntegrityResult must forbid extra fields."""
     with pytest.raises(ValueError, match="extra_forbidden"):
         IntegrityResult(valid=True, extra_field="nope")  # type: ignore[call-arg]
-
-
-

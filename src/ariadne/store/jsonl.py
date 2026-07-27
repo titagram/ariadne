@@ -147,7 +147,7 @@ def append_event(path: Path, event: JsonlEvent) -> None:
 
 
 def read_all(path: Path) -> list[JsonlEvent]:
-    """Read *all* JSONL lines from *path*, newest-first order.
+    """Read *all* JSONL lines from *path*.
 
     Returns events in file order (oldest first).
     """
