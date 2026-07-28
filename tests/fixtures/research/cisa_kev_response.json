@@ -1,0 +1,14 @@
+{
+  "vulnerabilities": [
+    {
+      "cveID": "CVE-2021-41773",
+      "vendorProject": "Apache",
+      "product": "HTTP Server",
+      "vulnerabilityName": "Apache HTTP Server Path Traversal Vulnerability",
+      "dateAdded": "2021-10-11",
+      "shortDescription": "Apache HTTP Server 2.4.49 contains a path traversal vulnerability.",
+      "requiredAction": "Apply updates per vendor instructions.",
+      "dueDate": "2021-11-01"
+    }
+  ]
+}

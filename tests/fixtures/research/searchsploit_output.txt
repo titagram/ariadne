@@ -1,0 +1,8 @@
+# SearchSploit output for Apache httpd 2.4.41
+-----------------------------------------------------------------------
+ Exploit Title                                                                  |  Path
+-----------------------------------------------------------------------
+Apache HTTP Server 2.4.41 - mod_proxy SSRF                                     | exploits/multiple/webapps/50383.py
+Apache HTTP Server 2.4.41 - mod_http2 Memory Corruption (PoC)                   | exploits/multiple/dos/49441.py
+Apache HTTP Server 2.4.41 - 'apache2ctl' Local Privilege Escalation              | exploits/linux/local/50383.sh
+-----------------------------------------------------------------------
