@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<nmaprun scanner="nmap" version="7.95" start="1743000002" xmloutputversion="1.05">
+<scaninfo type="connect" protocol="tcp" numservices="1"/>
+<host starttime="1743000002" endtime="1743000003">
+<status state="up" reason="syn-ack" reason_ttl="0"/>
+<address addr="10.10.10.20" addrtype="ipv4"/>
+<hostnames>
+<hostname name="" type="PTR"/>
+</hostnames>
+<ports>
+<port protocol="tcp" portid="31337">
+<state state="open" reason="syn-ack" reason_ttl="64"/>
+<service name="unknown" method="table" conf="3"/>
+</port>
+</ports>
+</host>
+<runstats>
+<finished time="1743000003" summary="1 IP address scanned"/>
+<hosts up="1" down="0" total="1"/>
+</runstats>
+</nmaprun>

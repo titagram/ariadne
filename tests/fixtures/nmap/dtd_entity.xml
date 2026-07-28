@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<!DOCTYPE foo [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<nmaprun scanner="nmap" version="7.95">
+<host>
+<address addr="10.10.10.10" addrtype="ipv4"/>
+<ports>
+<port protocol="tcp" portid="22">
+<state state="open"/>
+<service name="ssh"/>
+</port>
+</ports>
+</host>
+</nmaprun>

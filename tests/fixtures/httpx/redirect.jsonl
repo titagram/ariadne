@@ -1,0 +1,2 @@
+{"timestamp":"2026-03-26T12:00:01Z","url":"https://10.10.10.10/","title":"Main Site","status_code":200,"content_type":"text/html","content_length":500,"tech":["nginx"],"redirect":false}
+{"timestamp":"2026-03-26T12:00:02Z","url":"https://10.10.10.10/redirect","title":"Moved","status_code":301,"content_type":"text/html","content_length":100,"tech":[],"location":"https://external-host.com/new","redirect":true}

@@ -30,6 +30,17 @@ def test_compose_shares_netguard_namespace() -> None:
     assert "NET_ADMIN" not in services["kali"].get("cap_add", [])
 
 
+def test_netguard_image_includes_nftables() -> None:
+    """Netguard must build an image with the nft executable it invokes."""
+    compose = yaml.safe_load((_CONTAINERS / "compose.yaml").read_text())
+    build = compose["services"]["netguard"]["build"]
+    assert build["context"] == "."
+    assert build["dockerfile"] == "netguard/Dockerfile"
+
+    dockerfile = (_CONTAINERS / "netguard" / "Dockerfile").read_text()
+    assert "nftables" in dockerfile
+
+
 def test_compose_has_required_services() -> None:
     """Stack must expose kali, zap, and netguard services."""
     compose = yaml.safe_load((_CONTAINERS / "compose.yaml").read_text())
@@ -119,6 +130,20 @@ def test_netguard_entrypoint_drops_default_egress() -> None:
     assert any(
         policy in entrypoint for policy in ("policy drop", "drop")
     ), "Must drop default egress"
+
+
+def test_netguard_logs_denied_egress_without_accepting_it() -> None:
+    """The catch-all output rule must log and drop, never bypass default deny."""
+    entrypoint = (_CONTAINERS / "netguard" / "entrypoint.sh").read_text()
+    assert 'output log prefix \\"ARIADNE-DENY-OUT: \\" group 0 drop' in entrypoint
+    assert 'output log prefix "ARIADNE-DENY-OUT: " group 0 accept' not in entrypoint
+
+
+def test_netguard_rate_limit_applies_only_to_allowlisted_target_traffic() -> None:
+    """SYN limiting must not accept destinations outside the target allowlist."""
+    entrypoint = (_CONTAINERS / "netguard" / "entrypoint.sh").read_text()
+    assert 'tcp dport "$port" tcp flags syn limit rate over 100/second drop' in entrypoint
+    assert 'tcp flags syn limit rate 100/second accept' not in entrypoint
 
 
 def test_netguard_entrypoint_allows_established_and_loopback() -> None:

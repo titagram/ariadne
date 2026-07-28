@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<nmaprun scanner="nmap" version="7.95" start="1743000004" xmloutputversion="1.05">
+<scaninfo type="syn" protocol="tcp" numservices="2"/>
+<host starttime="1743000004" endtime="1743000005">
+<status state="up" reason="syn-ack" reason_ttl="0"/>
+<address addr="dead:beef::1" addrtype="ipv6"/>
+<hostnames>
+<hostname name="" type="PTR"/>
+</hostnames>
+<ports>
+<port protocol="tcp" portid="22">
+<state state="open" reason="syn-ack" reason_ttl="64"/>
+<service name="ssh" product="OpenSSH" version="9.0" method="service" conf="10"/>
+</port>
+<port protocol="tcp" portid="443">
+<state state="open" reason="syn-ack" reason_ttl="64"/>
+<service name="https" product="Apache" version="2.4.57" method="service" conf="10"/>
+</port>
+</ports>
+</host>
+<runstats>
+<finished time="1743000005" summary="1 IPv6 address scanned"/>
+<hosts up="1" down="0" total="1"/>
+</runstats>
+</nmaprun>
