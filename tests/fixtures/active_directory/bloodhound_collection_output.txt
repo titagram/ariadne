@@ -1,0 +1,19 @@
+2024-03-15T10:33:00.000Z [INFO] BloodHound Collector started for CONTOSO.LOCAL
+2024-03-15T10:33:01.000Z [INFO] SharpHound version: 2.3.0
+2024-03-15T10:33:01.000Z [INFO] Running in LDAP mode
+2024-03-15T10:33:01.000Z [INFO] Resolved domain: CONTOSO.LOCAL
+2024-03-15T10:33:02.000Z [INFO] Connecting to LDAP server: dc01.contoso.local
+2024-03-15T10:33:05.000Z [INFO] Beginning collection: Group, LocalAdmin, Session, ACL, Trusts
+2024-03-15T10:33:05.000Z [INFO] Querying group membership
+2024-03-15T10:33:10.000Z [INFO] Found 42 groups
+2024-03-15T10:33:10.000Z [INFO] Found 3 domain admins: Administrator, jdoe, svc_backup
+2024-03-15T10:33:15.000Z [INFO] Querying local admin relationships
+2024-03-15T10:33:20.000Z [INFO] Found 15 local admin mappings
+2024-03-15T10:33:25.000Z [INFO] Querying active sessions
+2024-03-15T10:33:30.000Z [INFO] Found 8 active sessions
+2024-03-15T10:33:30.000Z [INFO] Querying ACLs
+2024-03-15T10:33:45.000Z [INFO] Found 320 ACE entries
+2024-03-15T10:33:45.000Z [INFO] Querying domain trusts
+2024-03-15T10:33:50.000Z [INFO] Found 1 trust relationship
+2024-03-15T10:33:50.000Z [INFO] Collection completed
+2024-03-15T10:33:55.000Z [INFO] Output written to /tmp/bloodhound/20250315103350_bloodhound.zip

@@ -1,0 +1,5 @@
+[2024-03-15 10:37:00] Ligolo-ng route add
+[*] Adding route 172.16.5.0/24 via tunnel tun_abc123
+[*] Route added successfully
+[*] Verifying route...
+[*] Route 172.16.5.0/24 is active via interface 100.64.0.1

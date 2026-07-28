@@ -1,0 +1,5 @@
+[2024-03-15 10:39:00] Tunnel stop for tun_abc123
+[*] Sending SIGTERM to Ligolo-ng agent session
+[*] Cleaning up routes...
+[*] All routes removed
+[*] Tunnel stopped

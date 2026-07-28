@@ -1,0 +1,9 @@
+[2024-03-15 10:30:00] nltest /DSGETDC:CONTOSO.LOCAL
+DC: \\\\DC01.contoso.local
+Address: \\192.168.1.10
+Dom Guid: {12345678-1234-1234-1234-123456789abc}
+Dom Name: CONTOSO
+Forest Name: contoso.local
+Dc Site Name: Default-First-Site
+Our Site Name: Default-First-Site
+Flags: PDC GC DS LDAP KDC TIMESERV GTIMESERV WRITABLE DNS_DC DNS_DOMAIN DNS_FOREST CLOSE_SITE

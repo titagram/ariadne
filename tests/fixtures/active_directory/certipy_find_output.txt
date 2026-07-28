@@ -1,0 +1,23 @@
+Certipy v4.8.2 - AD CS enumeration
+
+[*] Finding certificate templates for contoso.local
+[*] Found 15 certificate templates
+[*] Found 1 vulnerable template
+[*] Template Name: VulnTemplate
+[*]   Template ID: {1234-5678-9012-3456}
+[*]   Issuer: contoso-DC01-CA
+[*]   CA Name: DC01.contoso.local
+[*]   Client Authentication: True
+[*]   Enrollment Rights: Domain Users
+[*]   Enabled: True
+[*]   ESC1: True
+[*]   ESC2: False
+[*]   ESC3: False
+[*]   ESC4: False
+[*]   ESC8: False
+[*]   Manager Approval: False
+[*]   Authorized Signatures: 0
+[*]   Subject Name: CN={username}
+[*]   Validity Period: 5 years
+
+[*] Done: 1 vulnerable template(s) found

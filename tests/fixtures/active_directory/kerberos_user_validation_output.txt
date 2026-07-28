@@ -1,0 +1,14 @@
+2024/03/15 10:32:00 >  Using KDC(s):
+2024/03/15 10:32:00 >   192.168.1.10:88
+
+2024/03/15 10:32:01 >  [+] VALID USERNAME:	 administrator@contoso.local
+2024/03/15 10:32:01 >  [+] VALID USERNAME:	 guest@contoso.local
+2024/03/15 10:32:01 >  [+] VALID USERNAME:	 krbtgt@contoso.local
+2024/03/15 10:32:01 >  [+] VALID USERNAME:	 svc_sql@contoso.local
+2024/03/15 10:32:01 >  [+] VALID USERNAME:	 svc_backup@contoso.local
+2024/03/15 10:32:01 >  [-] INVALID USERNAME:	 nonexistent@contoso.local
+2024/03/15 10:32:01 >  [+] VALID USERNAME:	 jdoe@contoso.local
+2024/03/15 10:32:01 >  [+] VALID USERNAME:	 asmith@contoso.local
+2024/03/15 10:32:02 >  [+] VALID USERNAME:	 sqlsa@contoso.local
+
+2024/03/15 10:32:02 >  Done! Tested 9 usernames in 2.000 seconds

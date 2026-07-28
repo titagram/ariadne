@@ -1,0 +1,10 @@
+{
+  "tunnel_id": "tun_abc123",
+  "discovered_host": "172.16.5.10",
+  "discovered_port": 445,
+  "discovered_via": "ligolo_route_discovery",
+  "source_host": "10.10.10.10",
+  "timestamp": "2024-03-15T10:36:00Z",
+  "status": "observed_only",
+  "service": "microsoft-ds"
+}

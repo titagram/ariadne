@@ -1,0 +1,9 @@
+{
+  "tunnel_id": "tun_abc123",
+  "status": "established",
+  "local_endpoint": "0.0.0.0:11601",
+  "remote_endpoint": "10.10.10.10:11601",
+  "protocol": "tcp",
+  "started_at": "2024-03-15T10:35:00Z",
+  "session": "ligolo_abc123"
+}

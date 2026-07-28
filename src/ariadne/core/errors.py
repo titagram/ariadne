@@ -47,3 +47,7 @@ class AdapterError(AriadneError):
 
 class AdapterPolicyError(AdapterError):
     """Raised when a policy constraint blocks an adapter operation."""
+
+
+class ScopeAmendmentRequiredError(EngagementError):
+    """Raised when an action requires a scope amendment before proceeding."""

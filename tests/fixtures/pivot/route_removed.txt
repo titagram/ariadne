@@ -1,0 +1,3 @@
+[2024-03-15 10:38:00] Ligolo-ng route remove
+[*] Removing route 172.16.5.0/24 from tunnel tun_abc123
+[*] Route removed successfully

@@ -1,0 +1,63 @@
+# LDAP RootDSE query results for 192.168.1.10
+dn:
+currentTime: 20240315103000Z
+subschemaSubentry: CN=Aggregate,CN=Schema,CN=Configuration,DC=contoso,DC=local
+dsServiceName: CN=NTDS Settings,CN=DC01,CN=Servers,CN=Default-First-Site,CN=Sites,CN=Configuration,DC=contoso,DC=local
+namingContexts: DC=contoso,DC=local
+namingContexts: CN=Configuration,DC=contoso,DC=local
+namingContexts: CN=Schema,CN=Configuration,DC=contoso,DC=local
+namingContexts: DC=DomainDnsZones,DC=contoso,DC=local
+namingContexts: DC=ForestDnsZones,DC=contoso,DC=local
+defaultNamingContext: DC=contoso,DC=local
+schemaNamingContext: CN=Schema,CN=Configuration,DC=contoso,DC=local
+configurationNamingContext: CN=Configuration,DC=contoso,DC=local
+rootDomainNamingContext: DC=contoso,DC=local
+supportedLDAPVersion: 3
+supportedLDAPVersion: 2
+supportedLDAPPolicies: MaxPoolThreads
+supportedLDAPPolicies: MaxDatagramRecv
+supportedLDAPPolicies: MaxReceiveBuffer
+supportedLDAPPolicies: InitRecvTimeout
+supportedLDAPPolicies: MaxConnections
+supportedLDAPPolicies: MaxConnIdleTime
+supportedLDAPPolicies: MaxPageSize
+supportedLDAPPolicies: MaxQueryDuration
+supportedLDAPPolicies: MaxTempTableSize
+supportedLDAPPolicies: MaxResultSetSize
+supportedLDAPPolicies: MinResultSets
+supportedLDAPPolicies: MaxNotificationPerConn
+supportedLDAPPolicies: MaxValRange
+supportedControl: 1.2.840.113556.1.4.801 (LDAP_SEARCH_IN_DOMAIN)
+supportedControl: 1.2.840.113556.1.4.528 (LDAP_SERVER_RANGE_OPTION)
+supportedControl: 1.2.840.113556.1.4.619 (LDAP_SERVER_QUOTA_CONTROL)
+supportedControl: 1.2.840.113556.1.4.841 (LDAP_SERVER_DIRSYNC)
+supportedControl: 1.2.840.113556.1.4.529 (LDAP_SERVER_SD_FLAGS)
+supportedControl: 1.2.840.113556.1.4.802 (LDAP_SERVER_TREE_DELETE)
+supportedControl: 1.2.840.113556.1.4.638 (LDAP_SERVER_LAZY_COMMIT)
+supportedControl: 1.2.840.113556.1.4.1413 (LDAP_SERVER_PERMISSIVE_MODIFY)
+supportedControl: 1.2.840.113556.1.4.1974 (LDAP_SERVER_SHOW_DELETED)
+supportedControl: 1.2.840.113556.1.4.1340 (LDAP_SERVER_LINKED_ATTRIBUTES)
+supportedControl: 1.2.840.113556.1.4.2064 (LDAP_SERVER_DOMAIN_SCOPE)
+supportedControl: 1.2.840.113556.1.4.1852 (LDAP_SERVER_NOTIFICATION)
+supportedControl: 1.2.840.113556.1.4.1941 (LDAP_SERVER_SD_UPDATE_IDENTIFIER)
+supportedControl: 1.2.840.113556.1.4.521 (LDAP_SERVER_CROSS_DOMAIN_MOVE)
+supportedExtension: 1.3.6.1.4.1.1466.20037 (LDAP_START_TLS)
+supportedExtension: 1.3.6.1.4.1.4203.1.11.1 (LDAP_MODIFY_PASSWD)
+supportedExtension: 1.3.6.1.4.1.4203.1.11.3 (LDAP_WHO_AM_I)
+supportedExtension: 1.2.840.113556.1.4.1781 (LDAP_SERVER_FAST_BIND)
+supportedExtension: 1.2.840.113556.1.4.2212 (LDAP_SERVER_SD_UPGRADE)
+supportedExtension: 1.2.840.113556.1.4.1670 (LDAP_SERVER_SD_GRANT_DELAY)
+supportedExtension: 1.2.840.113556.1.4.1674 (LDAP_SERVER_SD_PROTECT)
+supportedExtension: 1.2.840.113556.1.4.1791 (LDAP_SERVER_GET_STATS)
+supportedExtension: 1.3.6.1.4.1.1466.20037 (LDAP_START_TLS)
+supportedExtension: 1.2.840.113556.1.4.800 (LDAP_SERVER_VERIFY_NAME)
+supportedExtension: 1.2.840.113556.1.4.2239 (LDAP_SERVER_PASSWORD_HASH)
+serverName: CN=DC01,CN=Servers,CN=Default-First-Site,CN=Sites,CN=Configuration,DC=contoso,DC=local
+supportedSASLMechanisms: GSSAPI
+supportedSASLMechanisms: GSS-SPNEGO
+supportedSASLMechanisms: EXTERNAL
+supportedSASLMechanisms: DIGEST-MD5
+dnsHostName: DC01.contoso.local
+ldapServiceName: contoso.local:dc01$@CONTOSO.LOCAL
+serverStartTime: 20241001080000Z
+highestCommittedUSN: 123456
