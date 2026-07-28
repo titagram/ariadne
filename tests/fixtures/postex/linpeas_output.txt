@@ -26,4 +26,3 @@ uid=1001(www-data) gid=1001(www-data) groups=1001(www-data)
 
 [Capabilities] /usr/bin/python3.9 = cap_setuid+ep
 [Capabilities] /usr/bin/tar = cap_dac_read_search+ep
-
