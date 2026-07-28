@@ -1,0 +1,331 @@
+# Ariadne Windows post-exploitation playbooks.
+#
+# Provides playbooks for enumerating a compromised Windows host and
+# identifying privilege escalation vectors.  Uses the ``postex``
+# adapter with Windows-specific operations.
+
+# Windows host enumeration — user/system information
+- id: windows.host-enumeration.v1
+  version: 1
+  stage: post_exploitation
+  triggers:
+    - kind: os_type
+      types: ["windows"]
+  required_evidence_types:
+    - "foothold_established"
+  capabilities:
+    - postex.windows.enum
+  actions:
+    - adapter: postex
+      operation: identity
+      inputs:
+        source: "windows"
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "host_enumerated"
+    - "access_lost"
+  success_emits:
+    - "windows_user_info"
+    - "windows_host_info"
+  next_playbooks:
+    - windows.identity.v1
+  report_sections:
+    - "post_exploitation"
+    - "windows"
+
+# Windows identity and token privileges
+- id: windows.identity.v1
+  version: 1
+  stage: post_exploitation
+  triggers:
+    - kind: observation_type
+      types: ["windows_user_info"]
+  required_evidence_types:
+    - "windows_user_info"
+  capabilities:
+    - postex.windows.identity
+  actions:
+    - adapter: postex
+      operation: identity
+      inputs:
+        detail: "full"
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "identity_abuse_checked"
+  success_emits:
+    - "windows_privileges"
+    - "windows_groups"
+  next_playbooks:
+    - windows.token-abuse.v1
+    - windows.services.v1
+    - windows.scheduled-tasks.v1
+  report_sections:
+    - "post_exploitation"
+    - "windows"
+
+# Token privilege abuse (SeImpersonate, SeAssignPrimaryToken, etc.)
+- id: windows.token-abuse.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["windows_privileges"]
+  required_evidence_types:
+    - "windows_privileges"
+  capabilities:
+    - privesc.windows.token
+  actions:
+    - adapter: postex
+      operation: token_privileges
+      inputs:
+        check_abuse: true
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "token_abuse_checked"
+    - "token_privesc_found"
+  success_emits:
+    - "token_abuse_vector"
+    - "privesc_path_identified"
+  next_playbooks:
+    - windows.services.v1
+    - windows.scheduled-tasks.v1
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+    - "windows"
+
+# Windows services
+- id: windows.services.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["windows_host_info"]
+  required_evidence_types:
+    - "windows_host_info"
+  capabilities:
+    - privesc.windows.services
+  actions:
+    - adapter: postex
+      operation: services
+      inputs:
+        check_unquoted: true
+        check_permissions: true
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "services_checked"
+    - "service_privesc_found"
+  success_emits:
+    - "service_abuse_vector"
+    - "privesc_path_identified"
+  next_playbooks:
+    - windows.scheduled-tasks.v1
+    - windows.registry.v1
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+    - "windows"
+
+# Windows scheduled tasks
+- id: windows.scheduled-tasks.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["windows_host_info"]
+  required_evidence_types:
+    - "windows_host_info"
+  capabilities:
+    - privesc.windows.scheduled_tasks
+  actions:
+    - adapter: postex
+      operation: scheduled_tasks
+      inputs:
+        check_abuse: true
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "scheduled_tasks_checked"
+    - "task_privesc_found"
+  success_emits:
+    - "task_abuse_vector"
+    - "privesc_path_identified"
+  next_playbooks:
+    - windows.registry.v1
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+    - "windows"
+
+# Windows registry
+- id: windows.registry.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["windows_host_info"]
+  required_evidence_types:
+    - "windows_host_info"
+  capabilities:
+    - privesc.windows.registry
+  actions:
+    - adapter: postex
+      operation: registry
+      inputs:
+        check_autologon: true
+        check_always_install_elevated: true
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "registry_checked"
+    - "registry_privesc_found"
+  success_emits:
+    - "registry_abuse_vector"
+    - "privesc_path_identified"
+  next_playbooks:
+    - windows.winpeas.v1
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+    - "windows"
+
+# WinPEAS sweep
+- id: windows.winpeas.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["windows_host_info"]
+  required_evidence_types:
+    - "windows_host_info"
+  capabilities:
+    - exploit.payload_upload
+    - privesc.windows.winpeas
+  actions:
+    - adapter: postex
+      operation: winpeas
+      inputs:
+        timeout_seconds: 120
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 180
+    max_output_bytes: 20971520
+  stop_conditions:
+    - "winpeas_complete"
+    - "winpeas_privesc_found"
+    - "max_time_exceeded"
+  success_emits:
+    - "winpeas_findings"
+    - "privesc_path_identified"
+  next_playbooks:
+    - windows.privesccheck.v1
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+    - "windows"
+
+# PrivescCheck
+- id: windows.privesccheck.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["windows_host_info"]
+  required_evidence_types:
+    - "windows_host_info"
+  capabilities:
+    - exploit.payload_upload
+    - privesc.windows.privesccheck
+  actions:
+    - adapter: postex
+      operation: privesccheck
+      inputs:
+        timeout_seconds: 120
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 180
+    max_output_bytes: 20971520
+  stop_conditions:
+    - "privesccheck_complete"
+    - "privesccheck_privesc_found"
+    - "max_time_exceeded"
+  success_emits:
+    - "privesccheck_findings"
+    - "privesc_path_identified"
+  next_playbooks:
+    - windows.seatbelt.v1
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+    - "windows"
+
+# Seatbelt
+- id: windows.seatbelt.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["windows_host_info"]
+  required_evidence_types:
+    - "windows_host_info"
+  capabilities:
+    - exploit.payload_upload
+    - privesc.windows.seatbelt
+  actions:
+    - adapter: postex
+      operation: seatbelt
+      inputs:
+        command_groups:
+          - "system"
+          - "user"
+          - "misc"
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 20971520
+  stop_conditions:
+    - "seatbelt_complete"
+    - "seatbelt_privesc_found"
+    - "max_time_exceeded"
+  success_emits:
+    - "seatbelt_findings"
+    - "privesc_path_identified"
+  next_playbooks:
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+    - "windows"

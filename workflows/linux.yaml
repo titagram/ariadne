@@ -1,0 +1,319 @@
+# Ariadne Linux post-exploitation playbooks.
+#
+# Provides playbooks for enumerating a compromised Linux host and
+# identifying privilege escalation vectors.  Uses the ``postex``
+# adapter with Linux-specific operations.
+
+# Linux host enumeration — user/system information
+- id: linux.host-enumeration.v1
+  version: 1
+  stage: post_exploitation
+  triggers:
+    - kind: os_type
+      types: ["linux"]
+  required_evidence_types:
+    - "foothold_established"
+  capabilities:
+    - postex.linux.enum
+  actions:
+    - adapter: postex
+      operation: identity
+      inputs:
+        source: "linux"
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "host_enumerated"
+    - "access_lost"
+  success_emits:
+    - "linux_user_info"
+    - "linux_host_info"
+  next_playbooks:
+    - linux.identity.v1
+  report_sections:
+    - "post_exploitation"
+    - "linux"
+
+# Linux identity and sudo abuse checks
+- id: linux.identity.v1
+  version: 1
+  stage: post_exploitation
+  triggers:
+    - kind: observation_type
+      types: ["linux_user_info"]
+  required_evidence_types:
+    - "linux_user_info"
+  capabilities:
+    - postex.linux.identity
+  actions:
+    - adapter: postex
+      operation: identity
+      inputs:
+        detail: "full"
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "identity_abuse_checked"
+  success_emits:
+    - "sudo_privileges"
+    - "user_groups"
+  next_playbooks:
+    - linux.sudo-abuse.v1
+    - linux.suid-abuse.v1
+    - linux.capabilities.v1
+  report_sections:
+    - "post_exploitation"
+    - "linux"
+
+# Sudo rule abuse
+- id: linux.sudo-abuse.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["sudo_privileges"]
+  required_evidence_types:
+    - "sudo_privileges"
+  capabilities:
+    - privesc.linux.sudo
+  actions:
+    - adapter: postex
+      operation: sudo_rules
+      inputs:
+        check_abuse: true
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "sudo_abuse_checked"
+    - "sudo_privesc_found"
+  success_emits:
+    - "sudo_abuse_vector"
+    - "privesc_path_identified"
+  next_playbooks:
+    - linux.suid-abuse.v1
+    - linux.capabilities.v1
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+    - "linux"
+
+# SUID file abuse
+- id: linux.suid-abuse.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["linux_host_info"]
+  required_evidence_types:
+    - "linux_host_info"
+  capabilities:
+    - privesc.linux.suid
+  actions:
+    - adapter: postex
+      operation: suid_files
+      inputs:
+        scan_all: true
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "suid_checked"
+    - "suid_privesc_found"
+  success_emits:
+    - "suid_abuse_vector"
+    - "privesc_path_identified"
+  next_playbooks:
+    - linux.capabilities.v1
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+    - "linux"
+
+# Linux file capabilities
+- id: linux.capabilities.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["linux_host_info"]
+  required_evidence_types:
+    - "linux_host_info"
+  capabilities:
+    - privesc.linux.capabilities
+  actions:
+    - adapter: postex
+      operation: file_capabilities
+      inputs:
+        scan_all: true
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "capabilities_checked"
+    - "capabilities_privesc_found"
+  success_emits:
+    - "capability_abuse_vector"
+    - "privesc_path_identified"
+  next_playbooks:
+    - linux.scheduled-tasks.v1
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+    - "linux"
+
+# Scheduled tasks / cron jobs
+- id: linux.scheduled-tasks.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["linux_host_info"]
+  required_evidence_types:
+    - "linux_host_info"
+  capabilities:
+    - privesc.linux.scheduled_tasks
+  actions:
+    - adapter: postex
+      operation: scheduled_jobs
+      inputs: {}
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "cron_checked"
+    - "cron_privesc_found"
+  success_emits:
+    - "cron_abuse_vector"
+    - "privesc_path_identified"
+  next_playbooks:
+    - linux.services.v1
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+    - "linux"
+
+# Running services
+- id: linux.services.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["linux_host_info"]
+  required_evidence_types:
+    - "linux_host_info"
+  capabilities:
+    - privesc.linux.services
+  actions:
+    - adapter: postex
+      operation: services
+      inputs: {}
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "services_checked"
+    - "service_privesc_found"
+  success_emits:
+    - "service_abuse_vector"
+    - "privesc_path_identified"
+  next_playbooks:
+    - linux.linpeas.v1
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+    - "linux"
+
+# LinPEAS sweep
+- id: linux.linpeas.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["linux_host_info"]
+  required_evidence_types:
+    - "linux_host_info"
+  capabilities:
+    - privesc.linux.linpeas
+  actions:
+    - adapter: postex
+      operation: linpeas
+      inputs:
+        timeout_seconds: 120
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 180
+    max_output_bytes: 20971520
+  stop_conditions:
+    - "linpeas_complete"
+    - "linpeas_privesc_found"
+    - "max_time_exceeded"
+  success_emits:
+    - "linpeas_findings"
+    - "privesc_path_identified"
+  next_playbooks:
+    - linux.pspy.v1
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+    - "linux"
+
+# PSPY process monitoring
+- id: linux.pspy.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["linux_host_info"]
+  required_evidence_types:
+    - "linux_host_info"
+  capabilities:
+    - privesc.linux.pspy
+  actions:
+    - adapter: postex
+      operation: pspy_bounded
+      inputs:
+        watch_seconds: 30
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "pspy_complete"
+    - "pspy_privesc_found"
+    - "max_time_exceeded"
+  success_emits:
+    - "pspy_findings"
+    - "privesc_path_identified"
+  next_playbooks:
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+    - "linux"

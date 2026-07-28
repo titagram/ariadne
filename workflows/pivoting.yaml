@@ -1,0 +1,180 @@
+# Ariadne network pivoting playbooks.
+#
+# Covers tunnel establishment, route management, and scanning through
+# established pivots.  Uses the ``pivot`` adapter for Ligolo-ng
+# lifecycle management (start_tunnel, add_route, remove_route,
+# stop_tunnel, scan_discovered_host).
+
+# Start tunnel — establish a Ligolo-ng / Chisel tunnel to the target
+- id: pivot.start-tunnel.v1
+  version: 1
+  stage: post_exploitation
+  triggers:
+    - kind: observation_type
+      types: ["foothold_established"]
+  required_evidence_types:
+    - "foothold_established"
+  capabilities:
+    - pivot.tunnel
+  actions:
+    - adapter: pivot
+      operation: start_tunnel
+      inputs:
+        tunnel_type: "ligolo"
+        listen_port: 11601
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "tunnel_established"
+    - "tunnel_failed"
+    - "max_time_exceeded"
+  success_emits:
+    - "tunnel_established"
+    - "pivot_network"
+  next_playbooks:
+    - pivot.enumeration.v1
+    - pivot.add-route.v1
+  report_sections:
+    - "pivoting"
+    - "post_exploitation"
+
+# Add route — add a route for a confirmed network through the tunnel
+- id: pivot.add-route.v1
+  version: 1
+  stage: post_exploitation
+  triggers:
+    - kind: observation_type
+      types: ["tunnel_established"]
+  required_evidence_types:
+    - "tunnel_established"
+  capabilities:
+    - pivot.route
+  actions:
+    - adapter: pivot
+      operation: add_route
+      inputs:
+        network: "auto"
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 2097152
+  stop_conditions:
+    - "route_added"
+    - "route_failed"
+    - "scope_amendment_required"
+  success_emits:
+    - "route_added"
+    - "pivot_network_accessible"
+  next_playbooks:
+    - pivot.enumeration.v1
+  report_sections:
+    - "pivoting"
+
+# Enumeration through pivot — add route + scan discovered hosts
+- id: pivot.enumeration.v1
+  version: 1
+  stage: discovery
+  triggers:
+    - kind: observation_type
+      types: ["tunnel_established"]
+  required_evidence_types:
+    - "tunnel_established"
+  capabilities:
+    - pivot.scan
+  actions:
+    - adapter: pivot
+      operation: scan_discovered_host
+      inputs:
+        scan_technique: "ping_sweep"
+  limits:
+    max_rate: 50
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "pivot_scan_complete"
+    - "hosts_discovered"
+    - "max_time_exceeded"
+  success_emits:
+    - "pivot_host_discovered"
+    - "pivot_network_map"
+  next_playbooks:
+    - network.tcp-discovery.v1
+    - pivot.add-route.v1
+    - pivot.remove-route.v1
+  report_sections:
+    - "pivoting"
+    - "discovery"
+
+# Remove route — clean up a route when pivoting is complete
+- id: pivot.remove-route.v1
+  version: 1
+  stage: cleanup
+  triggers:
+    - kind: observation_type
+      types: ["route_added"]
+  required_evidence_types:
+    - "route_added"
+  capabilities:
+    - pivot.route
+  actions:
+    - adapter: pivot
+      operation: remove_route
+      inputs:
+        network: "auto"
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 30
+    max_output_bytes: 1048576
+  stop_conditions:
+    - "route_removed"
+    - "route_cleanup_failed"
+  success_emits:
+    - "route_removed"
+    - "pivot_route_cleanup"
+  next_playbooks:
+    - pivot.stop-tunnel.v1
+  report_sections:
+    - "pivoting"
+    - "cleanup"
+
+# Stop tunnel — terminate the tunnel and clean up all routes
+- id: pivot.stop-tunnel.v1
+  version: 1
+  stage: cleanup
+  triggers:
+    - kind: observation_type
+      types: ["route_removed"]
+  required_evidence_types:
+    - "route_removed"
+  capabilities:
+    - pivot.tunnel
+  actions:
+    - adapter: pivot
+      operation: stop_tunnel
+      inputs: {}
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 30
+    max_output_bytes: 1048576
+  stop_conditions:
+    - "tunnel_stopped"
+    - "tunnel_cleanup_failed"
+  success_emits:
+    - "pivot_cleanup_complete"
+  next_playbooks:
+    - cleanup.verify.v1
+  report_sections:
+    - "pivoting"
+    - "cleanup"

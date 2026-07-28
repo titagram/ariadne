@@ -1,0 +1,27 @@
+# Scenario: Web application testing
+#
+# Target running HTTP/S services. Follows the web fingerprinting
+# pipeline with ZAP scanning.
+# Expected playbook path includes web branches.
+description: "Web application testing scenario"
+engagements:
+  - name: "web-app"
+    targets:
+      - host: "10.10.10.20"
+    profile: "private-lab"
+    expected_playbooks:
+      - "engagement.preflight.v1"
+      - "network.tcp-discovery.v1"
+      - "network.service-fingerprint.v1"
+      - "service.protocol-routing.v1"
+      - "web.fingerprint.v1"
+      - "web.content-discovery.v1"
+      - "web.passive-zap.v1"
+      - "web.nuclei-selected.v1"
+      - "web.specialist-testing.v1"
+      - "foothold.confirmation.v1"
+      - "postex.host-enumeration.v1"
+      - "privesc.hypothesis-ranking.v1"
+      - "objective.validation.v1"
+      - "cleanup.verify.v1"
+      - "report.render.v1"

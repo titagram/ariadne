@@ -1,0 +1,255 @@
+# Ariadne web application testing playbooks.
+#
+# Covers the full web testing lifecycle: fingerprint, crawl, content
+# discovery, passive scanning (ZAP), selected Nuclei templates,
+# evidence-driven specialist testing, optional active ZAP scanning,
+# validation, and report mapping.
+
+# Web fingerprinting
+- id: web.fingerprint.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: service_type
+      types: ["http", "https", "http-proxy"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - web.fingerprint
+  actions:
+    - adapter: httpx
+      operation: scan
+      inputs:
+        follow_redirects: true
+        max_redirects: 5
+  limits:
+    max_rate: 50
+    max_concurrency: 2
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "all_endpoints_tested"
+    - "target_unreachable"
+  success_emits:
+    - "web_technologies"
+    - "web_redirect"
+    - "web_title"
+  next_playbooks:
+    - web.content-discovery.v1
+    - web.passive-zap.v1
+  report_sections:
+    - "enumeration"
+    - "web"
+
+# Web content discovery (directory/parameter fuzzing)
+- id: web.content-discovery.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["web_technologies"]
+  required_evidence_types:
+    - "web_technologies"
+  capabilities:
+    - web.content_discovery
+  actions:
+    - adapter: httpx
+      operation: scan
+      inputs:
+        path_discovery: true
+        max_paths: 200
+  limits:
+    max_rate: 30
+    max_concurrency: 2
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "discovery_exhausted"
+    - "max_duration_exceeded"
+  success_emits:
+    - "web_paths"
+    - "web_parameters"
+  next_playbooks:
+    - web.passive-zap.v1
+  report_sections:
+    - "web"
+
+# Passive ZAP scan
+- id: web.passive-zap.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["web_technologies", "web_paths"]
+  required_evidence_types:
+    - "web_technologies"
+  capabilities:
+    - web.passive_scan
+  actions:
+    - adapter: zap
+      operation: passive_scan
+      inputs:
+        scan_type: "passive"
+  limits:
+    max_rate: 20
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 180
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "passive_scan_complete"
+    - "max_time_exceeded"
+  success_emits:
+    - "zap_alerts"
+    - "zap_passive_alerts"
+  next_playbooks:
+    - web.nuclei-selected.v1
+  report_sections:
+    - "web"
+
+# Selected Nuclei scanning
+- id: web.nuclei-selected.v1
+  version: 1
+  stage: validation
+  triggers:
+    - kind: observation_type
+      types: ["web_technologies"]
+  required_evidence_types:
+    - "web_technologies"
+  capabilities:
+    - web.nuclei_scan
+  actions:
+    - adapter: nuclei
+      operation: scan
+      inputs:
+        template_ids:
+          - "tech-detect-apache"
+          - "tech-detect-nginx"
+          - "exposed-panel"
+          - "misconfig-dir-listing"
+  limits:
+    max_rate: 30
+    max_concurrency: 2
+    max_attempts: 1
+    max_duration_seconds: 180
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "nuclei_scan_complete"
+    - "critical_finding_identified"
+  success_emits:
+    - "nuclei_web_alerts"
+    - "vulnerability_candidate"
+  next_playbooks:
+    - web.specialist-testing.v1
+  report_sections:
+    - "web"
+    - "validation"
+
+# Evidence-driven specialist testing (sqlmap, dalfox, testssl.sh)
+- id: web.specialist-testing.v1
+  version: 1
+  stage: validation
+  triggers:
+    - kind: observation_type
+      types: ["vulnerability_candidate"]
+  required_evidence_types:
+    - "vulnerability_candidate"
+  capabilities:
+    - web.specialist_test
+  actions:
+    - adapter: nmap
+      operation: service_fingerprint
+      inputs:
+        protocol: "http"
+        version_intensity: "9"
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "specialist_testing_complete"
+    - "vulnerability_confirmed"
+    - "no_relevant_specialist"
+  success_emits:
+    - "specialist_findings"
+    - "vulnerability_validated"
+  next_playbooks:
+    - web.active-zap.v1
+    - web.validation.v1
+  report_sections:
+    - "web"
+    - "validation"
+
+# Optional active ZAP scan
+- id: web.active-zap.v1
+  version: 1
+  stage: validation
+  triggers:
+    - kind: observation_type
+      types: ["vulnerability_candidate"]
+  required_evidence_types:
+    - "vulnerability_candidate"
+  capabilities:
+    - web.active_scan
+  actions:
+    - adapter: zap
+      operation: active_scan
+      inputs:
+        scan_type: "active"
+        max_attack_duration_seconds: 600
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 600
+    max_output_bytes: 20971520
+  stop_conditions:
+    - "active_scan_complete"
+    - "max_time_exceeded"
+    - "vulnerability_confirmed"
+  success_emits:
+    - "zap_active_alerts"
+    - "vulnerability_validated"
+  next_playbooks:
+    - web.validation.v1
+  report_sections:
+    - "web"
+    - "validation"
+
+# Web validation — capture proof of exploitation
+- id: web.validation.v1
+  version: 1
+  stage: validation
+  triggers:
+    - kind: observation_type
+      types: ["vulnerability_validated"]
+  required_evidence_types:
+    - "vulnerability_validated"
+  capabilities:
+    - exploit.validation
+  actions:
+    - adapter: screenshot
+      operation: capture
+      inputs:
+        proof_kind: "web_exploit"
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 2
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "web_exploit_confirmed"
+    - "web_exploit_failed"
+  success_emits:
+    - "vulnerability_validated"
+    - "web_exploit_proof"
+  next_playbooks:
+    - foothold.confirmation.v1
+  report_sections:
+    - "web"
+    - "validation"

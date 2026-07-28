@@ -1,0 +1,853 @@
+# Ariadne core engagement sequence playbooks.
+#
+# Defines the mandatory workflow from engagement setup through cleanup
+# and reporting.  Protocol-specific branches (DNS, HTTP/S, SSH, etc.)
+# are referenced from service.protocol-routing.v1.
+#
+# Every playbook in this file is part of the base sequence that every
+# engagement must follow.
+
+# ---------------------------------------------------------------------------
+# 1. Preflight — verify environment readiness
+# ---------------------------------------------------------------------------
+- id: engagement.preflight.v1
+  version: 1
+  stage: environment_preflight
+  triggers:
+    - kind: engagement_state
+      types: ["snapshot_locked"]
+  required_evidence_types: []
+  capabilities:
+    - preflight.check
+  actions:
+    - adapter: research
+      operation: investigate
+      inputs:
+        product: "preflight"
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 1048576
+  stop_conditions:
+    - "engagement_plan_discarded"
+    - "preflight_failed"
+  success_emits:
+    - "preflight_passed"
+  next_playbooks:
+    - network.tcp-discovery.v1
+  report_sections:
+    - "scope"
+
+# ---------------------------------------------------------------------------
+# 2. TCP discovery — find open ports on the target
+# ---------------------------------------------------------------------------
+- id: network.tcp-discovery.v1
+  version: 1
+  stage: discovery
+  triggers:
+    - kind: observation_type
+      types: ["preflight_passed"]
+  required_evidence_types:
+    - "preflight_passed"
+  capabilities:
+    - scan.tcp
+  actions:
+    - adapter: nmap
+      operation: tcp_discovery
+      inputs:
+        ports: "1-10000"
+  limits:
+    max_rate: 500
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "all_ports_checked"
+    - "target_unreachable"
+    - "max_time_exceeded"
+  success_emits:
+    - "port_open"
+    - "port_filtered"
+  next_playbooks:
+    - network.service-fingerprint.v1
+  report_sections:
+    - "discovery"
+
+# ---------------------------------------------------------------------------
+# 3. Service fingerprint — identify services on open ports
+# ---------------------------------------------------------------------------
+- id: network.service-fingerprint.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["port_open"]
+  required_evidence_types:
+    - "port_open"
+  capabilities:
+    - service.enum
+  actions:
+    - adapter: nmap
+      operation: service_fingerprint
+      inputs:
+        version_intensity: "7"
+  limits:
+    max_rate: 200
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 600
+    max_output_bytes: 20971520
+  stop_conditions:
+    - "all_services_identified"
+    - "target_unreachable"
+    - "max_time_exceeded"
+  success_emits:
+    - "service_discovered"
+    - "service_fingerprinted"
+  next_playbooks:
+    - service.protocol-routing.v1
+  report_sections:
+    - "discovery"
+    - "enumeration"
+
+# ---------------------------------------------------------------------------
+# 4. Protocol routing — dispatch to protocol-specific playbooks
+# ---------------------------------------------------------------------------
+- id: service.protocol-routing.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["service_fingerprinted"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - service.routing
+  actions:
+    - adapter: nmap
+      operation: service_fingerprint
+      inputs:
+        version_intensity: "7"
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 30
+    max_output_bytes: 1048576
+  stop_conditions:
+    - "routing_complete"
+  success_emits:
+    - "protocol_routed"
+  next_playbooks:
+    - dns.enumeration.v1
+    - web.fingerprint.v1
+    - ssh.enumeration.v1
+    - ftp.enumeration.v1
+    - smtp.enumeration.v1
+    - smb.enumeration.v1
+    - ldap.enumeration.v1
+    - kerberos.enumeration.v1
+    - winrm.enumeration.v1
+    - rdp.enumeration.v1
+    - snmp.enumeration.v1
+    - database.enumeration.v1
+    - service.unknown.v1
+  report_sections:
+    - "enumeration"
+
+# ---------------------------------------------------------------------------
+# 5. Research — mandatory service-to-CVE/exploit research
+# ---------------------------------------------------------------------------
+- id: research.service-vulnerability.v1
+  version: 1
+  stage: hypothesis
+  triggers:
+    - kind: observation_type
+      types: ["service_fingerprinted"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - research.vulnerability
+  actions:
+    - adapter: research
+      operation: investigate
+      inputs:
+        full_chain: true
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "all_sources_exhausted"
+    - "critical_finding_identified"
+    - "no_known_vulnerabilities"
+  success_emits:
+    - "research_complete"
+    - "cve_reference"
+    - "exploit_candidate"
+  next_playbooks:
+    - validation.bounded-check.v1
+  report_sections:
+    - "enumeration"
+    - "hypotheses"
+
+# ---------------------------------------------------------------------------
+# 6. Validation — bounded check or exploitation
+# ---------------------------------------------------------------------------
+- id: validation.bounded-check.v1
+  version: 1
+  stage: validation
+  triggers:
+    - kind: observation_type
+      types: ["research_complete"]
+  required_evidence_types:
+    - "research_complete"
+  capabilities:
+    - exploit.validation
+  actions:
+    - adapter: nuclei
+      operation: scan
+      inputs:
+        template_ids:
+          - "cve-2024-1234"
+          - "vuln-sql-error"
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "validation_success"
+    - "validation_failed"
+    - "max_attempts_exceeded"
+  success_emits:
+    - "vulnerability_validated"
+    - "exploit_succeeded"
+  next_playbooks:
+    - foothold.confirmation.v1
+  report_sections:
+    - "validation"
+
+# ---------------------------------------------------------------------------
+# 7. Foothold — confirm initial access
+# ---------------------------------------------------------------------------
+- id: foothold.confirmation.v1
+  version: 1
+  stage: foothold
+  triggers:
+    - kind: observation_type
+      types: ["vulnerability_validated"]
+  required_evidence_types:
+    - "vulnerability_validated"
+  capabilities:
+    - foothold.confirm
+  actions:
+    - adapter: screenshot
+      operation: capture
+      inputs:
+        proof_kind: "initial_access"
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 2
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "foothold_confirmed"
+    - "foothold_failed"
+  success_emits:
+    - "foothold_established"
+  next_playbooks:
+    - postex.host-enumeration.v1
+    - linux.host-enumeration.v1
+    - windows.host-enumeration.v1
+    - pivot.start-tunnel.v1
+  report_sections:
+    - "initial_access"
+
+# ---------------------------------------------------------------------------
+# 8. Post-exploitation — host enumeration
+# ---------------------------------------------------------------------------
+- id: postex.host-enumeration.v1
+  version: 1
+  stage: post_exploitation
+  triggers:
+    - kind: observation_type
+      types: ["foothold_established"]
+  required_evidence_types:
+    - "foothold_established"
+  capabilities:
+    - postex.enum
+  actions:
+    - adapter: postex
+      operation: identity
+      inputs:
+        source: "local"
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "host_enumerated"
+    - "access_lost"
+  success_emits:
+    - "host_info_collected"
+  next_playbooks:
+    - linux.host-enumeration.v1
+    - windows.host-enumeration.v1
+    - privesc.hypothesis-ranking.v1
+    - ad.ntlm-poisoning.v1
+  report_sections:
+    - "post_exploitation"
+
+# ---------------------------------------------------------------------------
+# 9. Privilege escalation — rank and test hypotheses
+# ---------------------------------------------------------------------------
+- id: privesc.hypothesis-ranking.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["host_info_collected"]
+  required_evidence_types:
+    - "host_info_collected"
+  capabilities:
+    - privesc.enum
+  actions:
+    - adapter: postex
+      operation: sudo_rules
+      inputs:
+        check_abuse: true
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 180
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "privesc_found"
+    - "no_privesc_path"
+    - "max_time_exceeded"
+  success_emits:
+    - "privesc_path_identified"
+  next_playbooks:
+    - linux.sudo-abuse.v1
+    - linux.suid-abuse.v1
+    - linux.capabilities.v1
+    - linux.scheduled-tasks.v1
+    - linux.services.v1
+    - linux.linpeas.v1
+    - linux.pspy.v1
+    - windows.token-abuse.v1
+    - windows.services.v1
+    - windows.scheduled-tasks.v1
+    - windows.registry.v1
+    - windows.winpeas.v1
+    - windows.privesccheck.v1
+    - windows.seatbelt.v1
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+
+# ---------------------------------------------------------------------------
+# 10. Objective validation — check mission objectives
+# ---------------------------------------------------------------------------
+- id: objective.validation.v1
+  version: 1
+  stage: objective_validation
+  triggers:
+    - kind: observation_type
+      types: ["privesc_path_identified"]
+  required_evidence_types:
+    - "privesc_path_identified"
+  capabilities:
+    - objective.check
+  actions:
+    - adapter: screenshot
+      operation: capture
+      inputs:
+        proof_kind: "objective"
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 3
+    max_duration_seconds: 120
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "all_objectives_met"
+    - "objective_failed"
+    - "max_attempts_exceeded"
+  success_emits:
+    - "objective_proven"
+  next_playbooks:
+    - cleanup.verify.v1
+  report_sections:
+    - "objectives"
+
+# ---------------------------------------------------------------------------
+# 11. Cleanup — verify removal of artifacts
+# ---------------------------------------------------------------------------
+- id: cleanup.verify.v1
+  version: 1
+  stage: cleanup
+  triggers:
+    - kind: observation_type
+      types: ["objective_proven"]
+  required_evidence_types:
+    - "objective_proven"
+  capabilities:
+    - cleanup.execute
+  actions:
+    - adapter: nmap
+      operation: tcp_discovery
+      inputs:
+        ports: "22,80,443,445,3389"
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 2097152
+  stop_conditions:
+    - "cleanup_verified"
+    - "cleanup_failed"
+  success_emits:
+    - "cleanup_complete"
+  next_playbooks:
+    - report.render.v1
+  report_sections:
+    - "cleanup"
+
+# ---------------------------------------------------------------------------
+# 12. Report — render walkthrough and professional report
+# ---------------------------------------------------------------------------
+- id: report.render.v1
+  version: 1
+  stage: reporting
+  triggers:
+    - kind: observation_type
+      types: ["cleanup_complete"]
+  required_evidence_types:
+    - "cleanup_complete"
+  capabilities:
+    - report.render
+  actions:
+    - adapter: screenshot
+      operation: capture
+      inputs:
+        proof_kind: "report_summary"
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 52428800
+  stop_conditions:
+    - "report_rendered"
+    - "report_failed"
+  success_emits:
+    - "report_ready"
+  next_playbooks: []
+  report_sections:
+    - "reporting"
+
+# ---------------------------------------------------------------------------
+# Protocol-specific enumeration branches
+# ---------------------------------------------------------------------------
+
+# DNS
+- id: dns.enumeration.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: service_type
+      types: ["domain", "dns"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - service.dns
+  actions:
+    - adapter: nmap
+      operation: service_fingerprint
+      inputs:
+        protocol: "dns"
+  limits:
+    max_rate: 20
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "dns_enumerated"
+    - "zone_transfer_denied"
+  success_emits:
+    - "dns_records"
+  next_playbooks:
+    - research.service-vulnerability.v1
+  report_sections:
+    - "enumeration"
+
+# SSH
+- id: ssh.enumeration.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: service_type
+      types: ["ssh"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - service.ssh
+  actions:
+    - adapter: nmap
+      operation: service_fingerprint
+      inputs:
+        protocol: "ssh"
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "ssh_enumerated"
+  success_emits:
+    - "ssh_banner"
+    - "ssh_key_algorithms"
+  next_playbooks:
+    - research.service-vulnerability.v1
+  report_sections:
+    - "enumeration"
+
+# FTP
+- id: ftp.enumeration.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: service_type
+      types: ["ftp"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - service.ftp
+  actions:
+    - adapter: nmap
+      operation: service_fingerprint
+      inputs:
+        protocol: "ftp"
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "ftp_enumerated"
+    - "anonymous_login_tested"
+  success_emits:
+    - "ftp_banner"
+    - "anonymous_ftp_status"
+  next_playbooks:
+    - research.service-vulnerability.v1
+  report_sections:
+    - "enumeration"
+
+# SMTP
+- id: smtp.enumeration.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: service_type
+      types: ["smtp"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - service.smtp
+  actions:
+    - adapter: nmap
+      operation: service_fingerprint
+      inputs:
+        protocol: "smtp"
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "smtp_enumerated"
+    - "vrfy_tested"
+  success_emits:
+    - "smtp_banner"
+    - "smtp_users"
+  next_playbooks:
+    - research.service-vulnerability.v1
+  report_sections:
+    - "enumeration"
+
+# SMB / RPC
+- id: smb.enumeration.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: service_type
+      types: ["smb", "rpc", "netbios"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - service.smb
+  actions:
+    - adapter: active_directory
+      operation: smb_enumeration
+      inputs: {}
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "smb_enumerated"
+    - "smb_not_available"
+  success_emits:
+    - "smb_shares"
+    - "smb_os_info"
+  next_playbooks:
+    - ldap.enumeration.v1
+    - research.service-vulnerability.v1
+    - ad.domain-discovery.v1
+  report_sections:
+    - "enumeration"
+
+# LDAP
+- id: ldap.enumeration.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: service_type
+      types: ["ldap", "ldaps", "ldap_ssl"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - service.ldap
+  actions:
+    - adapter: active_directory
+      operation: ldap_rootdse
+      inputs: {}
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "ldap_enumerated"
+    - "ldap_not_available"
+  success_emits:
+    - "ldap_base_dn"
+    - "ldap_naming_contexts"
+  next_playbooks:
+    - research.service-vulnerability.v1
+    - ad.domain-discovery.v1
+  report_sections:
+    - "enumeration"
+
+# Kerberos
+- id: kerberos.enumeration.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: service_type
+      types: ["kerberos", "kdc"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - service.kerberos
+  actions:
+    - adapter: active_directory
+      operation: kerberos_user_validation
+      inputs: {}
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "kerberos_enumerated"
+    - "kerberos_not_available"
+  success_emits:
+    - "kerberos_domain_info"
+    - "validated_users"
+  next_playbooks:
+    - research.service-vulnerability.v1
+    - ad.domain-discovery.v1
+  report_sections:
+    - "enumeration"
+
+# WinRM
+- id: winrm.enumeration.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: service_type
+      types: ["winrm"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - service.winrm
+  actions:
+    - adapter: nmap
+      operation: service_fingerprint
+      inputs:
+        protocol: "winrm"
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "winrm_enumerated"
+  success_emits:
+    - "winrm_config"
+  next_playbooks:
+    - research.service-vulnerability.v1
+  report_sections:
+    - "enumeration"
+
+# RDP
+- id: rdp.enumeration.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: service_type
+      types: ["rdp", "ms-wbt-server"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - service.rdp
+  actions:
+    - adapter: nmap
+      operation: service_fingerprint
+      inputs:
+        protocol: "rdp"
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "rdp_enumerated"
+  success_emits:
+    - "rdp_banner"
+    - "rdp_ssl_config"
+  next_playbooks:
+    - research.service-vulnerability.v1
+  report_sections:
+    - "enumeration"
+
+# SNMP
+- id: snmp.enumeration.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: service_type
+      types: ["snmp"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - service.snmp
+  actions:
+    - adapter: nmap
+      operation: service_fingerprint
+      inputs:
+        protocol: "snmp"
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "snmp_enumerated"
+  success_emits:
+    - "snmp_info"
+  next_playbooks:
+    - research.service-vulnerability.v1
+  report_sections:
+    - "enumeration"
+
+# Databases (MySQL, PostgreSQL, MSSQL, Oracle, MongoDB, etc.)
+- id: database.enumeration.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: service_type
+      types:
+        ["mysql", "postgresql", "mssql", "oracle-db", "mongodb", "redis"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - service.database
+  actions:
+    - adapter: nmap
+      operation: service_fingerprint
+      inputs:
+        protocol: "database"
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "database_enumerated"
+  success_emits:
+    - "database_banner"
+    - "database_version"
+  next_playbooks:
+    - research.service-vulnerability.v1
+  report_sections:
+    - "enumeration"
+
+# Unknown service — terminates in research-only state
+- id: service.unknown.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: service_type
+      types: ["unknown"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - service.research_only
+  actions:
+    - adapter: nmap
+      operation: service_fingerprint
+      inputs:
+        protocol: "unknown"
+        version_intensity: "9"
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 2097152
+  stop_conditions:
+    - "identification_exhausted"
+  success_emits:
+    - "service_unidentified"
+  next_playbooks:
+    - research.service-vulnerability.v1
+  report_sections:
+    - "enumeration"

@@ -1,0 +1,480 @@
+# Ariadne Active Directory playbooks.
+#
+# Covers discovery, enumeration, and high-impact operations against
+# Active Directory environments.  Discovery operations are lower-risk
+# and use general AD capabilities; high-impact operations (credential
+# dumping, relay attacks, ticket manipulation, etc.) each require
+# their own exact capability and must pass the engagement policy.
+
+# AD domain discovery — identify domain controller and realm
+- id: ad.domain-discovery.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: service_type
+      types: ["ldap", "kerberos", "smb", "dns"]
+  required_evidence_types:
+    - "service_fingerprinted"
+  capabilities:
+    - ad.discovery
+  actions:
+    - adapter: active_directory
+      operation: domain_discovery
+      inputs: {}
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "domain_discovered"
+    - "domain_not_found"
+  success_emits:
+    - "domain_info"
+    - "domain_controller"
+  next_playbooks:
+    - ad.ldap-enumeration.v1
+    - ad.smb-enumeration.v1
+    - ad.kerberos-enumeration.v1
+  report_sections:
+    - "enumeration"
+    - "active_directory"
+
+# LDAP enumeration — base DN, naming contexts, users and groups
+- id: ad.ldap-enumeration.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["domain_info"]
+  required_evidence_types:
+    - "domain_info"
+  capabilities:
+    - ad.enum
+  actions:
+    - adapter: active_directory
+      operation: ldap_rootdse
+      inputs: {}
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "ldap_enumerated"
+    - "ldap_not_available"
+  success_emits:
+    - "ldap_base_dn"
+    - "ad_users"
+    - "ad_groups"
+  next_playbooks:
+    - ad.bloodhound.v1
+    - ad.certipy.v1
+    - ad.password-spray.v1
+    - ad.ticket-manipulation.v1
+  report_sections:
+    - "enumeration"
+    - "active_directory"
+
+# SMB enumeration — shares, OS info, SMB signing
+- id: ad.smb-enumeration.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["domain_info"]
+  required_evidence_types:
+    - "domain_info"
+  capabilities:
+    - ad.enum
+  actions:
+    - adapter: active_directory
+      operation: smb_enumeration
+      inputs: {}
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "smb_enumerated"
+    - "smb_not_available"
+  success_emits:
+    - "smb_shares"
+    - "smb_os_info"
+    - "smb_signing_status"
+  next_playbooks:
+    - ad.kerberos-enumeration.v1
+    - ad.bloodhound.v1
+  report_sections:
+    - "enumeration"
+    - "active_directory"
+
+# Kerberos enumeration — user validation and AS-REP roasting
+- id: ad.kerberos-enumeration.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["domain_info"]
+  required_evidence_types:
+    - "domain_info"
+  capabilities:
+    - ad.enum
+  actions:
+    - adapter: active_directory
+      operation: kerberos_user_validation
+      inputs: {}
+  limits:
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "kerberos_enumerated"
+    - "kerberos_not_available"
+  success_emits:
+    - "validated_users"
+    - "asrep_users"
+  next_playbooks:
+    - ad.bloodhound.v1
+    - ad.certipy.v1
+    - ad.password-spray.v1
+    - ad.ticket-manipulation.v1
+  report_sections:
+    - "enumeration"
+    - "active_directory"
+
+# BloodHound collection — AD relationship mapping
+- id: ad.bloodhound.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["domain_info"]
+  required_evidence_types:
+    - "domain_info"
+  capabilities:
+    - ad.bloodhound
+  actions:
+    - adapter: active_directory
+      operation: bloodhound_collection
+      inputs:
+        collection_methods:
+          - "all"
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 52428800
+  stop_conditions:
+    - "bloodhound_collected"
+    - "bloodhound_collection_failed"
+    - "max_time_exceeded"
+  success_emits:
+    - "bloodhound_data"
+    - "ad_attack_paths"
+  next_playbooks:
+    - ad.certipy.v1
+    - research.service-vulnerability.v1
+    - ad.object-modification.v1
+  report_sections:
+    - "enumeration"
+    - "active_directory"
+
+# Certipy — AD CS discovery and exploitation
+- id: ad.certipy.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["domain_info"]
+  required_evidence_types:
+    - "domain_info"
+  capabilities:
+    - ad.certipy_find
+  actions:
+    - adapter: active_directory
+      operation: certipy_find
+      inputs: {}
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "certipy_find_complete"
+    - "certipy_find_failed"
+  success_emits:
+    - "ad_cs_services"
+    - "ad_cs_vulnerabilities"
+  next_playbooks:
+    - research.service-vulnerability.v1
+    - ad.adcs-abuse.v1
+  report_sections:
+    - "enumeration"
+    - "active_directory"
+
+# AD high-impact operations
+#
+# Each of the following requires its exact capability in the policy.
+# These are NOT enabled by generic ``ad.enum`` capability.
+
+# Password spraying
+- id: ad.password-spray.v1
+  version: 1
+  stage: validation
+  triggers:
+    - kind: observation_type
+      types: ["validated_users"]
+  required_evidence_types:
+    - "validated_users"
+  capabilities:
+    - ad.password_spray
+  actions:
+    - adapter: active_directory
+      operation: password_spray
+      inputs:
+        delay_seconds: 30
+        max_attempts_per_user: 1
+  limits:
+    max_rate: 2
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "spray_complete"
+    - "credential_found"
+    - "lockout_risk_detected"
+  success_emits:
+    - "password_spray_results"
+    - "compromised_credentials"
+  next_playbooks:
+    - foothold.confirmation.v1
+  report_sections:
+    - "active_directory"
+    - "validation"
+
+# Credential dumping (NTDS.dit, DCSync, SAM)
+- id: ad.credential-dump.v1
+  version: 1
+  stage: execution
+  triggers:
+    - kind: observation_type
+      types: ["domain_admin_access"]
+  required_evidence_types:
+    - "domain_admin_access"
+  capabilities:
+    - ad.credential_dump
+  actions:
+    - adapter: active_directory
+      operation: credential_dump
+      inputs:
+        dump_method: "dcsync"
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 52428800
+  stop_conditions:
+    - "dump_complete"
+    - "dump_failed"
+    - "detected"
+  success_emits:
+    - "credential_dump_results"
+    - "domain_hashes"
+  next_playbooks:
+    - objective.validation.v1
+  report_sections:
+    - "active_directory"
+    - "validation"
+
+# NTLM poisoning (Responder, Inveigh)
+- id: ad.ntlm-poisoning.v1
+  version: 1
+  stage: execution
+  triggers:
+    - kind: observation_type
+      types: ["foothold_established"]
+  required_evidence_types:
+    - "foothold_established"
+  capabilities:
+    - ad.ntlm_poisoning
+  actions:
+    - adapter: active_directory
+      operation: ntlm_poisoning
+      inputs:
+        poison_protocols:
+          - "llmnr"
+          - "nbns"
+          - "mdns"
+        listen_minutes: 5
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 360
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "poisoning_complete"
+    - "hash_captured"
+    - "max_time_exceeded"
+  success_emits:
+    - "ntlm_hashes"
+    - "challenge_messages"
+  next_playbooks:
+    - ad.ntlm-relay.v1
+    - foothold.confirmation.v1
+  report_sections:
+    - "active_directory"
+    - "validation"
+
+# NTLM relay
+- id: ad.ntlm-relay.v1
+  version: 1
+  stage: execution
+  triggers:
+    - kind: observation_type
+      types: ["ntlm_hashes"]
+  required_evidence_types:
+    - "ntlm_hashes"
+  capabilities:
+    - ad.ntlm_relay
+  actions:
+    - adapter: active_directory
+      operation: ntlm_relay
+      inputs:
+        relay_target: "auto"
+        smb2_support: true
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 20971520
+  stop_conditions:
+    - "relay_complete"
+    - "relay_successful"
+    - "relay_failed"
+  success_emits:
+    - "relay_results"
+    - "looted_hashes"
+  next_playbooks:
+    - foothold.confirmation.v1
+  report_sections:
+    - "active_directory"
+    - "validation"
+
+# Ticket manipulation (Kerberoasting / AS-REP roasting / Golden ticket)
+- id: ad.ticket-manipulation.v1
+  version: 1
+  stage: execution
+  triggers:
+    - kind: observation_type
+      types: ["validated_users"]
+  required_evidence_types:
+    - "validated_users"
+  capabilities:
+    - ad.ticket_manipulation
+  actions:
+    - adapter: active_directory
+      operation: ticket_manipulation
+      inputs:
+        technique: "kerberoasting"
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 180
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "ticket_ops_complete"
+    - "ticket_extracted"
+    - "detected"
+  success_emits:
+    - "ticket_hashes"
+    - "kerberos_tickets"
+  next_playbooks:
+    - foothold.confirmation.v1
+  report_sections:
+    - "active_directory"
+    - "validation"
+
+# Object modification (ACL abuse, permission escalation)
+- id: ad.object-modification.v1
+  version: 1
+  stage: execution
+  triggers:
+    - kind: observation_type
+      types: ["bloodhound_data"]
+  required_evidence_types:
+    - "bloodhound_data"
+  capabilities:
+    - ad.object_modification
+  actions:
+    - adapter: active_directory
+      operation: object_modification
+      inputs:
+        target_acl: "dcsync"
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 120
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "modification_complete"
+    - "modification_successful"
+    - "modification_failed"
+  success_emits:
+    - "acl_modification_results"
+    - "escalated_privileges"
+  next_playbooks:
+    - ad.credential-dump.v1
+    - objective.validation.v1
+  report_sections:
+    - "active_directory"
+    - "validation"
+
+# AD CS relay (Certipy relay)
+- id: ad.adcs-abuse.v1
+  version: 1
+  stage: execution
+  triggers:
+    - kind: observation_type
+      types: ["ad_cs_vulnerabilities"]
+  required_evidence_types:
+    - "ad_cs_vulnerabilities"
+  capabilities:
+    - ad.adcs_abuse
+  actions:
+    - adapter: active_directory
+      operation: certipy_relay
+      inputs:
+        relay_target: "domain_controller"
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 20971520
+  stop_conditions:
+    - "adcs_relay_complete"
+    - "certificate_obtained"
+    - "adcs_relay_failed"
+  success_emits:
+    - "adcs_exploit_results"
+    - "domain_admin_certificate"
+  next_playbooks:
+    - objective.validation.v1
+  report_sections:
+    - "active_directory"
+    - "validation"

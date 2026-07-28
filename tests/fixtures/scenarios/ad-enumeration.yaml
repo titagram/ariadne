@@ -1,0 +1,29 @@
+# Scenario: Active Directory engagement
+#
+# Windows domain-joined targets with AD services (LDAP, Kerberos, SMB).
+# Follows AD discovery and enumeration playbooks.
+description: "Active Directory enumeration scenario"
+engagements:
+  - name: "ad-enum"
+    targets:
+      - host: "10.10.10.40"
+    profile: "private-lab"
+    expected_playbooks:
+      - "engagement.preflight.v1"
+      - "network.tcp-discovery.v1"
+      - "network.service-fingerprint.v1"
+      - "service.protocol-routing.v1"
+      - "ad.domain-discovery.v1"
+      - "ad.ldap-enumeration.v1"
+      - "ad.smb-enumeration.v1"
+      - "ad.kerberos-enumeration.v1"
+      - "ad.bloodhound.v1"
+      - "ad.certipy.v1"
+      - "research.service-vulnerability.v1"
+      - "validation.bounded-check.v1"
+      - "foothold.confirmation.v1"
+      - "postex.host-enumeration.v1"
+      - "privesc.hypothesis-ranking.v1"
+      - "objective.validation.v1"
+      - "cleanup.verify.v1"
+      - "report.render.v1"

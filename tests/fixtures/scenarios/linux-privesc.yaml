@@ -1,0 +1,31 @@
+# Scenario: Linux privilege escalation
+#
+# Linux target with LINUX/UNIX services. Follows Linux
+# post-exploitation and privilege escalation playbooks.
+description: "Linux privilege escalation scenario"
+engagements:
+  - name: "linux-privesc"
+    targets:
+      - host: "10.10.10.30"
+    profile: "htb"
+    expected_playbooks:
+      - "engagement.preflight.v1"
+      - "network.tcp-discovery.v1"
+      - "network.service-fingerprint.v1"
+      - "service.protocol-routing.v1"
+      - "ssh.enumeration.v1"
+      - "research.service-vulnerability.v1"
+      - "validation.bounded-check.v1"
+      - "foothold.confirmation.v1"
+      - "linux.host-enumeration.v1"
+      - "linux.identity.v1"
+      - "linux.sudo-abuse.v1"
+      - "linux.suid-abuse.v1"
+      - "linux.capabilities.v1"
+      - "linux.scheduled-tasks.v1"
+      - "linux.services.v1"
+      - "linux.linpeas.v1"
+      - "linux.pspy.v1"
+      - "objective.validation.v1"
+      - "cleanup.verify.v1"
+      - "report.render.v1"

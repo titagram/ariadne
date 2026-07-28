@@ -1,0 +1,35 @@
+# Scenario: Basic TCP discovery
+#
+# Simplified engagement with a single target on a basic network.
+# Expected playbook path:
+#   engagement.preflight.v1
+#   -> network.tcp-discovery.v1
+#   -> network.service-fingerprint.v1
+#   -> service.protocol-routing.v1
+#   -> research.service-vulnerability.v1
+#   -> validation.bounded-check.v1
+#   -> foothold.confirmation.v1
+#   -> postex.host-enumeration.v1
+#   -> privesc.hypothesis-ranking.v1
+#   -> objective.validation.v1
+#   -> cleanup.verify.v1
+#   -> report.render.v1
+description: "Basic TCP discovery scenario"
+engagements:
+  - name: "basic-tcp"
+    targets:
+      - host: "10.10.10.10"
+    profile: "htb"
+    expected_playbooks:
+      - "engagement.preflight.v1"
+      - "network.tcp-discovery.v1"
+      - "network.service-fingerprint.v1"
+      - "service.protocol-routing.v1"
+      - "research.service-vulnerability.v1"
+      - "validation.bounded-check.v1"
+      - "foothold.confirmation.v1"
+      - "postex.host-enumeration.v1"
+      - "privesc.hypothesis-ranking.v1"
+      - "objective.validation.v1"
+      - "cleanup.verify.v1"
+      - "report.render.v1"

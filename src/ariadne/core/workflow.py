@@ -150,39 +150,62 @@ class WorkflowCatalog(BaseModel):
         for path in sorted(directory.iterdir()):
             if path.suffix not in (".yaml", ".yml"):
                 continue
+            if path.name == "workflow.schema.json":
+                continue
 
-            raw = cls._read_file(path)
-            cls._reject_shell_keys(raw, path)
-            cls._reject_extra_keys(raw, path)
-            playbook = cls._parse_playbook(raw, path)
+            for i, raw in enumerate(cls._read_file(path)):
+                cls._reject_shell_keys(raw, path)
+                cls._reject_extra_keys(raw, path)
+                playbook = cls._parse_playbook(raw, path)
 
-            if playbook.id in playbooks:
-                raise WorkflowConfigurationError(
-                    f"Duplicate playbook id {playbook.id!r} in {path}"
-                )
-            playbooks[playbook.id] = playbook
+                if playbook.id in playbooks:
+                    raise WorkflowConfigurationError(
+                        f"Duplicate playbook id {playbook.id!r} in {path}"
+                    )
+                playbooks[playbook.id] = playbook
 
         return cls(playbooks=playbooks)
 
     # ── Internal helpers ─────────────────────────────────────────────────
 
     @staticmethod
-    def _read_file(path: Path) -> dict[str, Any]:
-        """Read and parse a YAML playbook file."""
+    def _read_file(path: Path) -> list[dict[str, Any]]:
+        """Read and parse a YAML playbook file.
+
+        Returns a list of playbook dicts.  A file may contain:
+        - a single mapping (one playbook), or
+        - a sequence of mappings (multiple playbooks), or
+        - ``---``-separated YAML documents (each a playbook).
+        """
         try:
             raw = path.read_text(encoding="utf-8")
-            data = yaml.safe_load(raw)
+            documents = list(yaml.safe_load_all(raw))
         except (OSError, yaml.YAMLError) as exc:
             raise WorkflowConfigurationError(
                 f"Failed to read or parse {path}: {exc}"
             ) from exc
 
-        if not isinstance(data, dict):
+        # Filter out None documents (trailing --- produces a None).
+        documents = [d for d in documents if d is not None]
+
+        if not documents:
             raise WorkflowConfigurationError(
-                f"Playbook file {path} must contain a mapping, "
-                f"got {type(data).__name__}"
+                f"Playbook file {path} is empty or contains no playbook data"
             )
-        return data
+
+        # Flatten: a document that is itself a list of playbooks.
+        result: list[dict[str, Any]] = []
+        for doc in documents:
+            if isinstance(doc, list):
+                result.extend(doc)
+            elif isinstance(doc, dict):
+                result.append(doc)
+            else:
+                raise WorkflowConfigurationError(
+                    f"Playbook file {path} contains unexpected "
+                    f"YAML type: {type(doc).__name__}"
+                )
+        return result
 
     @staticmethod
     def _reject_shell_keys(data: dict[str, Any], path: Path) -> None:
