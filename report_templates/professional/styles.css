@@ -1,0 +1,139 @@
+/* Ariadne Professional Report Styles */
+
+:root {
+  --primary: #1a1a2e;
+  --accent: #e94560;
+  --bg: #ffffff;
+  --text: #333333;
+  --muted: #666666;
+  --border: #cccccc;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 11pt;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.report-container {
+  max-width: 210mm;
+  margin: 0 auto;
+  padding: 20mm 15mm;
+}
+
+/* Cover page */
+.cover-page {
+  text-align: center;
+  padding: 40mm 0 20mm;
+  border-bottom: 3px solid var(--accent);
+  margin-bottom: 20mm;
+  page-break-after: always;
+}
+
+.cover-page h1 {
+  font-size: 24pt;
+  color: var(--primary);
+  margin-bottom: 8pt;
+}
+
+.subtitle {
+  font-size: 12pt;
+  color: var(--muted);
+  margin-bottom: 15mm;
+}
+
+.meta-table {
+  margin: 0 auto;
+  border-collapse: collapse;
+}
+.meta-table th, .meta-table td {
+  padding: 4pt 12pt;
+  text-align: left;
+  border: 1px solid var(--border);
+}
+.meta-table th { background: #f5f5f5; font-weight: 600; }
+
+/* Section headings */
+section { margin-bottom: 10mm; page-break-inside: avoid; }
+h2 {
+  font-size: 16pt;
+  color: var(--primary);
+  border-bottom: 2px solid var(--accent);
+  padding-bottom: 3pt;
+  margin-bottom: 5mm;
+}
+h3 { font-size: 13pt; margin: 4mm 0 2mm; }
+h4 { font-size: 11pt; margin: 3mm 0 1mm; }
+
+/* Risk table */
+.risk-table, .findings-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 4mm 0;
+}
+.risk-table th, .risk-table td,
+.findings-table th, .findings-table td {
+  padding: 4pt 8pt;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+.risk-table th, .findings-table th {
+  background: var(--primary);
+  color: white;
+  font-weight: 600;
+}
+
+/* Severity colours */
+.severity-critical { color: #cc0000; font-weight: bold; }
+.severity-high { color: #e68a00; font-weight: bold; }
+.severity-medium { color: #cca300; }
+.severity-low { color: #669900; }
+.severity-informational { color: #3366cc; }
+
+/* Finding details */
+.finding-detail {
+  border: 1px solid var(--border);
+  border-radius: 4pt;
+  padding: 4mm;
+  margin-bottom: 4mm;
+}
+.finding-meta {
+  width: auto;
+  margin-bottom: 3mm;
+}
+.finding-meta th, .finding-meta td {
+  padding: 2pt 6pt;
+  border: none;
+  text-align: left;
+}
+.finding-meta th { width: 80px; color: var(--muted); }
+
+/* Lists */
+ul, ol { padding-left: 6mm; margin-bottom: 2mm; }
+li { margin-bottom: 1mm; }
+
+/* Objectives */
+.achieved { color: #008800; font-weight: bold; margin-left: 4pt; }
+
+/* Footer */
+footer {
+  margin-top: 15mm;
+  padding-top: 3mm;
+  border-top: 1px solid var(--border);
+  font-size: 9pt;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* Print */
+@page {
+  size: A4;
+  margin: 20mm 15mm;
+}
+@media print {
+  .report-container { padding: 0; }
+}
