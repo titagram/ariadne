@@ -39,3 +39,7 @@ class WorkflowConfigurationError(WorkflowError):
 
 class TransitionDeniedError(AriadneError):
     """Raised when an engagement state transition is not permitted."""
+
+
+class AdapterError(AriadneError):
+    """Raised when a tool adapter operation fails."""

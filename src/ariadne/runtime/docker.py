@@ -24,35 +24,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ariadne.core.engagement import EngagementSnapshot
 
-# ── Forward-reference types (canonical versions in Task 13) ─────────────
+# ── Canonical types (re-exported from Task 13's process module) ──────────
+# These were forward references before Task 13.  Now they're defined in
+# runtime/process.py and re-exported here for backward compatibility.
 
-
-class ProcessLimits(BaseModel):
-    """Bounded execution limits for ``DockerRuntime.exec``.
-
-    Task 13 will define the canonical ``ProcessSpec``; this is the
-    subset relevant to Docker container execution.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    timeout_seconds: int = Field(default=300, ge=1, le=3600)
-    max_output_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=100_000_000)
-
-
-class ProcessResult(BaseModel):
-    """Result of executing a command in a Docker service.
-
-    Task 13 will define the canonical result; this lightweight version
-    covers the fields every Docker subprocess produces.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    exit_code: int
-    stdout: str
-    stderr: str
-    timed_out: bool = False
+from ariadne.runtime.process import ProcessLimits as ProcessLimits  # noqa: F811
+from ariadne.runtime.process import ProcessResult as ProcessResult  # noqa: F811
 
 
 @dataclass(frozen=True)
