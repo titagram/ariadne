@@ -153,7 +153,7 @@ class WorkflowCatalog(BaseModel):
             if path.name == "workflow.schema.json":
                 continue
 
-            for i, raw in enumerate(cls._read_file(path)):
+            for _, raw in enumerate(cls._read_file(path)):
                 cls._reject_shell_keys(raw, path)
                 cls._reject_extra_keys(raw, path)
                 playbook = cls._parse_playbook(raw, path)
