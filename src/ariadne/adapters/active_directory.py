@@ -252,8 +252,8 @@ class ActiveDirectoryAdapter:
         domain: str,
     ) -> ProcessSpec:
         return ProcessSpec(
-            argv=("certipy", "find", "-u", inputs.get("username", ""),
-                   "-p", inputs.get("password", ""),
+            argv=("certipy", "find", "-u", str(inputs.get("username", "")),
+                   "-p", str(inputs.get("password", "")),
                    "-dc-ip", str(context.target.host),
                    "-target", domain or "contoso.local"),
             timeout_seconds=120,
