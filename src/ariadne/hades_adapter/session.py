@@ -239,3 +239,17 @@ class ChallengeLedger:
         return any(
             b.session_id == session_id for b in self._bindings.values()
         )
+
+    def get_session_binding(self, session_id: str) -> SessionBinding | None:
+        """Retrieve the binding for a Hades session, if any.
+
+        Args:
+            session_id: The Hades session identifier.
+
+        Returns:
+            The ``SessionBinding`` if the session is bound, or ``None``.
+        """
+        for b in self._bindings.values():
+            if b.session_id == session_id:
+                return b
+        return None

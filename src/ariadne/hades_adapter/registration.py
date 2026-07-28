@@ -27,7 +27,7 @@ def register_plugin(ctx: object, services: ServiceContainer) -> None:
     _register_skill(ctx)
     _register_tools(ctx, services)
     _register_command(ctx, services)
-    _register_hook(ctx)
+    _register_hook(ctx, services)
 
 
 # ── internal helpers ───────────────────────────────────────────────────
@@ -76,10 +76,13 @@ def _register_command(ctx: object, services: ServiceContainer) -> None:
     )
 
 
-def _register_hook(ctx: object) -> None:
+def _register_hook(ctx: object, services: ServiceContainer) -> None:
+    from ariadne.hades_adapter.guard_hook import GuardHook
+
+    hook = GuardHook(services.ledger)
     ctx.register_hook(
         name="pre_tool_call",
-        callback=None,  # placeholder — real hook from guard_hook in Task 10
+        callback=hook,
     )
 
 
