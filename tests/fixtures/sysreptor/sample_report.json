@@ -1,0 +1,18 @@
+{
+  "engagement_id": "e1a2b3c4-1234-5678-9abc-def012345678",
+  "targets": [{"host": "10.0.0.1"}],
+  "objectives": [{"kind": "proof", "description": "Capture root flag"}],
+  "findings": [
+    {
+      "finding_id": "f1a2b3c4-1234-5678-9abc-def012345678",
+      "title": "Open port 80",
+      "severity": "medium",
+      "status": "validated",
+      "description": "HTTP service running on port 80",
+      "evidence": ["nmap_result.txt"],
+      "remediation": "Restrict access to port 80"
+    }
+  ],
+  "profile": "private-lab",
+  "snapshot_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+}

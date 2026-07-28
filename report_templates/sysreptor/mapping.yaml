@@ -1,0 +1,64 @@
+# SysReptor field mapping for Ariadne penetration test reports.
+#
+# Maps Ariadne report model fields to SysReptor project fields.
+# Used by SysReptorExporter.preview() to validate field mapping before push.
+
+mapping_version: "1.0"
+project_type: "pentest"
+
+fields:
+  # Project-level fields
+  project_name:
+    source: "engagement_id"
+    format: "Ariadne-{engagement_id[:8]}"
+  project_overview:
+    source: "objectives"
+    template: "Penetration test against {target_count} target(s): {targets_text}"
+
+  # Report-level fields
+  report_title:
+    source: "profile"
+    template: "Ariadne Penetration Test Report — {profile}"
+  report_date:
+    source: "generated_at"
+
+  # Finding-level fields
+  finding_id:
+    source: "finding.finding_id"
+  finding_title:
+    source: "finding.title"
+  finding_severity:
+    source: "finding.severity"
+    mapping:
+      critical: "critical"
+      high: "high"
+      medium: "medium"
+      low: "low"
+      informational: "info"
+  finding_status:
+    source: "finding.status"
+    mapping:
+      candidate: "draft"
+      validated: "confirmed"
+      exploited: "confirmed"
+      false_positive: "false_positive"
+      informational: "info"
+      not_tested_due_to_policy: "out_of_scope"
+  finding_description:
+    source: "finding.description"
+  finding_evidence:
+    source: "finding.evidence"
+  finding_remediation:
+    source: "finding.remediation"
+
+  # Asset fields
+  asset_host:
+    source: "target.host"
+  asset_service:
+    source: "finding.service"  # optional, populated by target context
+
+  # Attachment mapping for evidence files
+  evidence_attachments:
+    source: "evidence_assets"
+    type: "file"
+    base_path: "evidence/"
