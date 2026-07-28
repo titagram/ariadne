@@ -190,6 +190,83 @@ def test_allowed_tools_are_intersected() -> None:
     assert effective.rule("scan.tcp").allowed_tools == {"nmap"}
 
 
+def test_allowed_tools_unrestricted_lower_layer_does_not_empty_restriction() -> None:
+    """A lower layer that omits allowed_tools (empty = unrestricted) must NOT
+    erase an upper layer's explicit tool allow-list.
+
+    Empty allowed_tools means 'no restriction on this layer' — analogous to
+    None for numeric bounds. Intersection of {'nmap'} with unrestricted
+    should stay {'nmap'}, not become empty.
+
+    Regression test for finding F1: masscan must be denied even when the
+    lower layer does not specify any tool restriction.
+    """
+    base = PolicyDocument(
+        name="base",
+        version=1,
+        capabilities={
+            "scan.tcp": CapabilityRule(
+                allowed=True,
+                allowed_tools=frozenset({"nmap"}),
+            ),
+        },
+    )
+    # Lower layer with default (empty) allowed_tools — means unrestricted
+    lower = PolicyDocument(
+        name="lower",
+        version=1,
+        capabilities={
+            "scan.tcp": CapabilityRule(allowed=True),
+        },
+    )
+    effective = intersect_policies(base, lower)
+
+    # The tool restriction must survive: {'nmap'} ∩ unrestricted = {'nmap'}
+    rule = effective.rule("scan.tcp")
+    assert rule.allowed_tools == {"nmap"}, (
+        f"Expected {{'nmap'}} but got {rule.allowed_tools}"
+    )
+
+    # authorize() must deny masscan, which is not nmap
+    decision = authorize(effective, make_request(tool="masscan"))
+    assert decision.allowed is False, (
+        f"masscan should be denied by monotonic intersection, "
+        f"got allowed={decision.allowed} reason={decision.reason_code}"
+    )
+    assert decision.reason_code == "tool_not_allowed"
+
+
+def test_allowed_tools_fully_unrestricted_stays_unrestricted() -> None:
+    """When every layer leaves allowed_tools empty (unrestricted),
+    the effective policy should also have no tool restriction."""
+    a = PolicyDocument(
+        name="a",
+        version=1,
+        capabilities={
+            "scan.tcp": CapabilityRule(allowed=True),
+        },
+    )
+    b = PolicyDocument(
+        name="b",
+        version=1,
+        capabilities={
+            "scan.tcp": CapabilityRule(allowed=True),
+        },
+    )
+    effective = intersect_policies(a, b)
+    rule = effective.rule("scan.tcp")
+    # Empty = unrestricted
+    assert rule.allowed_tools == frozenset(), (
+        f"Expected unrestricted (empty frozenset), got {rule.allowed_tools}"
+    )
+    # authorize() must allow any tool through
+    decision = authorize(effective, make_request(tool="masscan"))
+    assert decision.allowed is True, (
+        f"Any tool should be allowed when no layer restricts tools, "
+        f"got allowed={decision.allowed} reason={decision.reason_code}"
+    )
+
+
 # ── Missing capability is denied ────────────────────────────────────────────
 
 

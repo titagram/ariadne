@@ -141,6 +141,29 @@ class TestWindowsPostexPlan:
         assert spec.timeout_seconds <= 900
         assert spec.max_output_bytes >= 1024
 
+    def test_winpeas_argv_sequence(
+        self, adapter: PostExAdapter, windows_context_with_capability: AdapterContext
+    ) -> None:
+        """Regression: argv must be ``&&, cmd, /c, remote_path`` with no extra
+        ``remote_path`` between ``&&`` and ``cmd``."""
+        spec = adapter.plan(action("winpeas"), windows_context_with_capability)
+        argv = spec.argv
+        # Find the && position and verify the sequence that follows
+        and_idx = argv.index("&&")
+        assert and_idx + 3 < len(argv), "argv too short after &&"
+        assert argv[and_idx + 1] == "cmd", (
+            f"Expected 'cmd' immediately after '&&', got {argv[and_idx + 1]!r}"
+        )
+        assert argv[and_idx + 2] == "/c", (
+            f"Expected '/c' after 'cmd', got {argv[and_idx + 2]!r}"
+        )
+        remote_path = argv[and_idx + 3]
+        assert remote_path.endswith(".exe"), (
+            f"Expected remote_path ending with .exe after /c, got {remote_path!r}"
+        )
+        # The copy-and-run pattern must have exactly one remote_path per phase
+        assert "&&" not in argv[and_idx + 1:], "unexpected second && in argv"
+
     def test_privesccheck_requires_capability(
         self, adapter: PostExAdapter, windows_context: AdapterContext
     ) -> None:

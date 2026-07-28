@@ -22,6 +22,10 @@ The first release targets one explicit entry IP address or FQDN. The internal
 asset model nevertheless supports Active Directory, pivoting, and multi-host
 attack paths. Hosts discovered beyond the confirmed scope remain
 `observed_only` until the user explicitly amends the engagement contract.
+The project owner has approved HTTP redirect traversal for discovery: httpx
+may follow redirect chains, but every host discovered through a redirect still
+remains `observed_only`. This exception is limited to retrieving the redirect;
+it does not authorize additional playbooks or active actions against that host.
 
 The project supersedes the architectural role originally considered for
 HexStrike. HexStrike is not a dependency, compatibility target, or planned

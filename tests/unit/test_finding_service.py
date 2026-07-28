@@ -14,7 +14,6 @@ from ariadne.evidence.findings import (
 )
 from ariadne.evidence.records import EvidenceRecord
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

@@ -46,7 +46,11 @@ if [ -n "${ARIADNE_ALLOW_TARGETS:-}" ]; then
             *:*)
                 addr="${entry%:*}"
                 port="${entry##*:}"
-                # Allow TCP egress to the confirmed target/port
+                # Rate-limit only explicitly confirmed TCP targets.  This
+                # rule drops over-limit SYNs; it never permits a new target.
+                $NFT add rule inet "$TABLE" output \
+                    ip daddr "$addr" tcp dport "$port" tcp flags syn limit rate over 100/second drop
+                # Allow TCP egress to the confirmed target/port.
                 $NFT add rule inet "$TABLE" output \
                     ip daddr "$addr" tcp dport "$port" accept
                 # Allow UDP as well (DNS queries to target, etc.)
@@ -57,12 +61,8 @@ if [ -n "${ARIADNE_ALLOW_TARGETS:-}" ]; then
     done
 fi
 
-# ── Rate ceilings ──
-$NFT add rule inet "$TABLE" output tcp flags syn limit rate 100/second accept
-$NFT add rule inet "$TABLE" forward tcp flags syn limit rate 100/second accept
-
 # ── Log denied egress (no payloads) ──
-$NFT add rule inet "$TABLE" output log prefix "ARIADNE-DENY-OUT: " group 0 accept
+$NFT add rule inet "$TABLE" output log prefix \"ARIADNE-DENY-OUT: \" group 0 drop
 
 # ── Default drop (already set by chain policy, but explicit never hurts) ──
 # Input, forward, and output chain policies are all "drop" from declaration above.

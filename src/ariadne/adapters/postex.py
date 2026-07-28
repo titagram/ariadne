@@ -485,7 +485,6 @@ class PostExAdapter:
                 "/opt/tools/winPEASx64.exe",
                 remote_path,
                 "&&",
-                remote_path,
                 "cmd",
                 "/c",
                 remote_path,

@@ -1482,8 +1482,9 @@ otherwise use `-sT`. The parser rejects any XML containing `<!DOCTYPE` or
 
 httpx receives targets through a bounded stdin file, outputs JSONL, disables
 automatic probing of unrelated hostnames, and records redirects as new
-observations. A redirect to an unconfirmed host is marked `observed_only` and
-is not followed.
+observations. The project owner has approved `-fr` redirect traversal for
+discovery; a redirect to an unconfirmed host remains marked `observed_only`
+after retrieval and is not eligible for additional active actions.
 
 - [ ] **Step 4: Run adapter and policy suites**
 

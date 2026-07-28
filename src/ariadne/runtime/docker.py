@@ -20,14 +20,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from pydantic import BaseModel, ConfigDict, Field
-
 from ariadne.core.engagement import EngagementSnapshot
 
 # ── Canonical types (re-exported from Task 13's process module) ──────────
 # These were forward references before Task 13.  Now they're defined in
 # runtime/process.py and re-exported here for backward compatibility.
-
 from ariadne.runtime.process import ProcessLimits as ProcessLimits  # noqa: F811
 from ariadne.runtime.process import ProcessResult as ProcessResult  # noqa: F811
 

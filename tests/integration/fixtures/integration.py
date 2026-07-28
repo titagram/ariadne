@@ -79,13 +79,21 @@ def integration_runtime() -> object:
     class _IntegrationRuntime:
         @staticmethod
         def tcp_reachable(host: str, port: int = 80) -> bool:
-            """Check whether TCP *port* on *host* is reachable from Kali."""
+            """Check whether TCP *port* on *host* is reachable from Kali.
+
+            Uses a Python one-liner (available via python:3.11-alpine image)
+            for a pure-TCP connection probe — succeeds when a TCP handshake
+            completes, fails on timeout, connection refused, or packet drop
+            (as when netguard's default-drop policy denies egress).
+            """
             result = subprocess.run(
                 [
                     "docker", "compose", "-f", str(_COMPOSE_FILE),
                     "exec", "-T", "kali",
-                    "sh", "-c",
-                    f"echo >/dev/null/tcp/{host}/{port} 2>/dev/null && echo ok || echo fail",
+                    "python3", "-c",
+                    "import socket; s=socket.socket(); "
+                    f"s.settimeout(3); s.connect(('{host}', {port})); "
+                    "s.close(); print('ok')",
                 ],
                 capture_output=True,
                 text=True,
@@ -95,12 +103,20 @@ def integration_runtime() -> object:
 
         @staticmethod
         def http_get(path: str = "/") -> str:
-            """Perform an HTTP GET from inside Kali, returning response body."""
+            """Perform an HTTP GET from inside Kali, returning response body.
+
+            Uses Python's urllib (available via python:3.11-alpine image).
+            Target is ``allowed.ariadne.test`` (resolves to 10.10.10.10
+            inside the Docker bridge network).
+            """
             result = subprocess.run(
                 [
                     "docker", "compose", "-f", str(_COMPOSE_FILE),
                     "exec", "-T", "kali",
-                    "curl", "-s", f"http://allowed.ariadne.test{path}",
+                    "python3", "-c",
+                    "import urllib.request; "
+                    f"print(urllib.request.urlopen('http://allowed.ariadne.test"
+                    f"{path}', timeout=5).read().decode())",
                 ],
                 capture_output=True,
                 text=True,

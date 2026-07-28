@@ -158,8 +158,11 @@ def _intersect_rule(left: CapabilityRule, right: CapabilityRule) -> CapabilityRu
     * ``always_manual``: boolean OR (any layer requiring manual wins).
     * Numeric fields: ``min`` of non-``None`` values. If both are
       ``None``, the intersected field is ``None`` (no restriction).
-    * ``allowed_tools``: set intersection.
+    * ``allowed_tools``: set intersection, but an empty (unrestricted)
+      layer preserves the other side's restriction. Fully unrestricted
+      across all layers stays unrestricted.
     """
+    allowed_tools = _intersect_nonempty(left.allowed_tools, right.allowed_tools)
     return CapabilityRule(
         allowed=left.allowed and right.allowed,
         always_manual=left.always_manual or right.always_manual,
@@ -168,7 +171,7 @@ def _intersect_rule(left: CapabilityRule, right: CapabilityRule) -> CapabilityRu
         max_attempts=_min_or_none(left.max_attempts, right.max_attempts),
         max_duration_seconds=_min_or_none(left.max_duration_seconds, right.max_duration_seconds),
         max_output_bytes=_min_or_none(left.max_output_bytes, right.max_output_bytes),
-        allowed_tools=left.allowed_tools & right.allowed_tools,
+        allowed_tools=allowed_tools,
     )
 
 
@@ -181,6 +184,23 @@ def _min_or_none(a: int | None, b: int | None) -> int | None:
     if b is None:
         return a
     return min(a, b)
+
+
+def _intersect_nonempty(
+    a: frozenset[str], b: frozenset[str]
+) -> frozenset[str]:
+    """Intersect two allowed_tools sets treating empty as unrestricted.
+
+    * Both non-empty → intersection (most restrictive wins).
+    * Either empty → the other side's value (empty = unrestricted preserves
+      the explicit restriction or passes through unrestricted).
+    * Both empty → empty (no restriction across layers).
+    """
+    if a and b:
+        return a & b
+    if a:
+        return a
+    return b
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

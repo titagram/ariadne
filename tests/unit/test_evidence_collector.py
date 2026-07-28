@@ -8,9 +8,8 @@ import pytest
 
 from ariadne.core.engagement import TargetSpec
 from ariadne.evidence.collector import EvidenceCollector, evidence_context
-from ariadne.evidence.records import EvidenceRecord, TransformationRecord
-from ariadne.runtime.process import ProcessResult, ProcessSpec
-
+from ariadne.evidence.records import TransformationRecord
+from ariadne.runtime.process import ProcessResult
 
 # ---------------------------------------------------------------------------
 # Fixtures

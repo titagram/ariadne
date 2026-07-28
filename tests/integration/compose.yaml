@@ -149,6 +149,59 @@ services:
         python3 /tmp/blocked.py
     restart: "no"
 
+  # ── Netguard egress firewall ────────────────────────────────────────
+  # Builds from the real netguard Dockerfile; runs its entrypoint to
+  # install nftables rules, then exits (the network namespace persists
+  # as long as the kali container shares it).
+  netguard:
+    build:
+      context: ../..
+      dockerfile: containers/netguard/Dockerfile
+      args:
+        NETGUARD_BASE_REF: ${NETGUARD_BASE_REF:-sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc}
+    container_name: ariadne-int-netguard
+    cap_add:
+      - NET_ADMIN
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        /entrypoint.sh
+        # Keep the container running so the network namespace persists
+        # for containers sharing it (kali).
+        while true; do sleep 3600; done
+    volumes:
+      - ../../containers/netguard/entrypoint.sh:/entrypoint.sh:ro
+    environment:
+      # Only the allowed target (target-http on port 80) is in the
+      # egress allowlist; the blocked neighbor is denied by default-drop.
+      - ARIADNE_ALLOW_TARGETS=10.10.10.10:80
+    networks:
+      testnet:
+        ipv4_address: 10.10.10.2
+    restart: "no"
+
+  # ── Kali test runner (shares netguard's network namespace) ───────────
+  # Lightweight Python/Alpine container that shares netguard's network
+  # namespace so all egress passes through the nftables rules.  Uses
+  # python:3.11-alpine (already pulled for the other services) so we
+  # don't need external package downloads that netguard would block.
+  kali:
+    image: python:3.11-alpine
+    container_name: ariadne-int-kali
+    network_mode: "service:netguard"
+    depends_on:
+      netguard:
+        condition: service_started
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        trap 'exit 0' TERM
+        echo "Kali test container ready"
+        while true; do sleep 3600; done
+    restart: "no"
+
 networks:
   testnet:
     driver: bridge

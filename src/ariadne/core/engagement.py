@@ -4,7 +4,7 @@ import hashlib
 import ipaddress
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -199,8 +199,15 @@ def lock_engagement(
             f"got {confirmation.challenge_digest}"
         )
 
-    # Validate expiry
+    # Validate freshness (confirmations older than five minutes are rejected)
     now = datetime.now(UTC)
+    if now - confirmation.confirmed_at > timedelta(minutes=5):
+        raise ConfirmationError(
+            f"Confirmation is older than 5 minutes (confirmed_at: "
+            f"{confirmation.confirmed_at.isoformat()}, now: {now.isoformat()})"
+        )
+
+    # Validate expiry
     if confirmation.expires_at < now:
         raise ConfirmationError(
             f"Confirmation expired at {confirmation.expires_at.isoformat()} "
@@ -260,6 +267,12 @@ def amend_scope(
         raise ScopeError("Amendment requires at least one target")
 
     now = datetime.now(UTC)
+    if now - confirmation.confirmed_at > timedelta(minutes=5):
+        raise ConfirmationError(
+            f"Confirmation is older than 5 minutes (confirmed_at: "
+            f"{confirmation.confirmed_at.isoformat()}, now: {now.isoformat()})"
+        )
+
     if confirmation.expires_at < now:
         raise ConfirmationError("Confirmation has expired")
 

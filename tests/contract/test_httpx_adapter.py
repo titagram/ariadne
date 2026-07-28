@@ -18,6 +18,8 @@ from ariadne.adapters.base import (
 from ariadne.adapters.httpx import HttpxAdapter
 from ariadne.core.engagement import TargetSpec
 from ariadne.core.errors import AdapterError
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
 from ariadne.runtime.process import ProcessResult
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -88,6 +90,15 @@ class TestHttpxPlan:
         # Should avoid automatic hostname resolution of unrelated targets
         assert "-no-fallback" in argv_str or "-no-scan" in argv_str or "nh" in argv_str
 
+    def test_scan_plan_follows_redirects_with_owner_approval(self, context: AdapterContext) -> None:
+        """The owner-approved policy retains httpx redirect following."""
+        spec = HttpxAdapter().plan(
+            action("scan", ports=(80,)),
+            context,
+        )
+        argv_str = " ".join(spec.argv)
+        assert "-fr" in argv_str
+
     def test_scan_plan_fqdn_uses_target_in_stdin(
         self, context_fqdn: AdapterContext
     ) -> None:
@@ -151,12 +162,29 @@ class TestHttpxParse:
             stderr="",
         )
         obs = HttpxAdapter().parse(result)
-        # Should produce at least 2 observations
-        assert len(obs) >= 2
-        # The redirect observation should have a location field
+        # Should produce at least 3 observations:
+        #   original page + redirect response + synthetic external-host obs
+        assert len(obs) >= 3
+
+        # At least one observation must target the external host directly
+        ext_obs = [o for o in obs if o.target.host == "external-host.com"]
+        assert len(ext_obs) >= 1, (
+            "Expected a synthetic observation targeting the external "
+            "redirect host external-host.com"
+        )
+
+        # The synthetic external-host observation must carry an explicit
+        # observed_only marker so downstream scope enforcement can reject
+        # active probing of this unconfirmed host.
+        for o in ext_obs:
+            assert o.data.get("observed_only") is True, (
+                f"External-host observation {o.observation_id} is missing "
+                f"observed_only=True marker"
+            )
+
+        # The redirect observation should still reference the location
         redirect_obs = [o for o in obs if o.data.get("redirect") is True]
         assert len(redirect_obs) >= 1
-        # The external host should be referenced in the observation
         assert "external-host.com" in str(redirect_obs[0].data.get("location", ""))
 
     def test_incomplete_jsonl_handles_gracefully(self, load_fixture) -> None:

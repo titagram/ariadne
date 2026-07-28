@@ -8,8 +8,8 @@ Safety invariants
 - Targets are fed through stdin (bounded file), not argv, to avoid
   argument-length limits and injection.
 - Automatic probing of unrelated hostnames is disabled.
-- Redirects to unconfirmed hosts are marked as ``observed_only``
-  and are not followed.
+- Owner-approved HTTP redirects are followed, while unconfirmed redirect hosts
+  are marked as ``observed_only`` for all subsequent actions.
 - Malformed JSONL lines are skipped, not fatal.
 - No shell interpolation: every argument is in the argv tuple.
 - Timeout and output size are bounded by ``ProcessSpec``.
@@ -91,6 +91,29 @@ def _parse_httpx_jsonl(stdout: str) -> list[Observation]:
         )
         observations.append(obs)
 
+        # If this record is a redirect to an external host, emit a
+        # synthetic observation for the redirect target marked as
+        # observed_only so downstream scope enforcement can recognise
+        # the host is unconfirmed and reject active probing.
+        is_redirect = record.get("redirect", False)
+        location = record.get("location", "")
+        if is_redirect and location and isinstance(location, str):
+            loc_parsed = urlparse(location)
+            loc_host = loc_parsed.hostname or ""
+            if loc_host and loc_host != host:
+                ext_obs = Observation(
+                    observation_id=uuid4(),
+                    target=TargetSpec(host=loc_host),
+                    source="httpx",
+                    data={
+                        "url": location,
+                        "redirect_source": url,
+                        "redirect_source_host": host,
+                        "observed_only": True,
+                    },
+                )
+                observations.append(ext_obs)
+
     return observations
 
 
@@ -129,15 +152,15 @@ class HttpxAdapter:
         # Build bounded argv:
         # - targets piped through stdin (-l -)
         # - JSONL output (-json)
-        # - follow host redirects (-fr) but don't probe unrelated hostnames
+        # - don't probe unrelated hostnames; follow owner-approved redirects
         # - limited threads
         argv = [
             "httpx",
             "-l", "-",
             "-p", port_str,
             "-json",
-            "-fr",         # follow redirects
             "-no-fallback", # don't fall back to unrelated hostnames
+            "-fr",          # owner-approved redirect traversal
             "-t", "10",    # 10 threads max
             "-timeout", str(inputs.get("timeout", 10)),
         ]

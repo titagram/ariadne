@@ -5,11 +5,10 @@ from __future__ import annotations
 import pytest
 
 from ariadne.evidence.cvss import (
+    CvssParsingError,
     CvssVector,
     vector_to_score,
-    CvssParsingError,
 )
-
 
 # ---------------------------------------------------------------------------
 # Vector parsing

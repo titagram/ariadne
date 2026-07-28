@@ -16,7 +16,7 @@ from ariadne.core.engagement import (
     lock_engagement,
 )
 from ariadne.core.enums import AutonomyMode, EnvironmentProfile
-from ariadne.core.errors import ConfirmationError
+from ariadne.core.errors import ConfirmationError, ScopeError
 
 
 @pytest.fixture
@@ -73,15 +73,32 @@ def test_lock_rejects_digest_mismatch(
         lock_engagement(confirmed_draft, bad)
 
 
+def test_lock_rejects_stale_confirmation_with_far_future_expiry(
+    confirmed_draft: EngagementDraft, confirmation: Confirmation
+) -> None:
+    """A confirmation whose confirmed_at is older than 5 minutes must be
+    rejected even when expires_at is far in the future."""
+    stale = Confirmation(
+        challenge_id=confirmation.challenge_id,
+        challenge_digest=confirmation.challenge_digest,
+        confirmed_at=datetime.now(UTC) - timedelta(minutes=10),
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        actor=confirmation.actor,
+    )
+    with pytest.raises(ConfirmationError, match="older than 5 minutes"):
+        lock_engagement(confirmed_draft, stale)
+
+
 def test_lock_rejects_expired_confirmation(
     confirmed_draft: EngagementDraft, confirmation: Confirmation
 ) -> None:
     """A confirmation whose expires_at is in the past must be rejected."""
+    now = datetime.now(UTC)
     expired = Confirmation(
         challenge_id=confirmation.challenge_id,
         challenge_digest=confirmation.challenge_digest,
-        confirmed_at=datetime.now(UTC) - timedelta(minutes=10),
-        expires_at=datetime.now(UTC) - timedelta(minutes=5),
+        confirmed_at=now - timedelta(minutes=3),
+        expires_at=now - timedelta(minutes=1),
         actor=confirmation.actor,
     )
     with pytest.raises(ConfirmationError, match="expired"):
@@ -241,3 +258,46 @@ def test_scope_amendment_adds_targets(
     second = amend_scope(first, targets=(new_target,), confirmation=confirmation)
     assert len(second.targets) == 1
     assert second.targets[0].host == "10.10.10.20"
+
+
+def test_amend_scope_rejects_empty_targets(
+    confirmed_draft: EngagementDraft, confirmation: Confirmation
+) -> None:
+    """An empty targets tuple must raise ScopeError."""
+    snap = lock_engagement(confirmed_draft, confirmation)
+    with pytest.raises(ScopeError, match="requires at least one target"):
+        amend_scope(snap, targets=(), confirmation=confirmation)
+
+
+def test_amend_scope_rejects_expired_confirmation(
+    confirmed_draft: EngagementDraft, confirmation: Confirmation
+) -> None:
+    """A confirmation whose expires_at is in the past must be rejected."""
+    snap = lock_engagement(confirmed_draft, confirmation)
+    now = datetime.now(UTC)
+    expired = Confirmation(
+        challenge_id=confirmation.challenge_id,
+        challenge_digest=confirmation.challenge_digest,
+        confirmed_at=now - timedelta(minutes=3),
+        expires_at=now - timedelta(minutes=1),
+        actor=confirmation.actor,
+    )
+    with pytest.raises(ConfirmationError, match="has expired"):
+        amend_scope(snap, targets=snap.targets, confirmation=expired)
+
+
+def test_amend_scope_rejects_stale_confirmation(
+    confirmed_draft: EngagementDraft, confirmation: Confirmation
+) -> None:
+    """A confirmation whose confirmed_at is older than 5 minutes must be
+    rejected even when expires_at is far in the future."""
+    snap = lock_engagement(confirmed_draft, confirmation)
+    stale = Confirmation(
+        challenge_id=confirmation.challenge_id,
+        challenge_digest=confirmation.challenge_digest,
+        confirmed_at=datetime.now(UTC) - timedelta(minutes=10),
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        actor=confirmation.actor,
+    )
+    with pytest.raises(ConfirmationError, match="older than 5 minutes"):
+        amend_scope(snap, targets=snap.targets, confirmation=stale)
