@@ -1,0 +1,55 @@
+# Ariadne Docker Compose — pinned Kali, ZAP, and netguard egress firewall.
+#
+# Kali and ZAP share netguard's network namespace so all egress from both
+# containers passes through nftables rules. Only netguard carries NET_ADMIN.
+# The Docker socket is deliberately not mounted into any container.
+name: ariadne
+
+services:
+  netguard:
+    image: alpine:3.20
+    container_name: ariadne-netguard
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ["/entrypoint.sh"]
+    volumes:
+      - ./netguard/entrypoint.sh:/entrypoint.sh:ro
+    environment:
+      - ARIADNE_ALLOW_TARGETS=${ARIADNE_ALLOW_TARGETS:-}
+    restart: "no"
+
+  kali:
+    build:
+      context: .
+      dockerfile: kali/Dockerfile
+      args:
+        KALI_BASE_REF: ${KALI_BASE_REF:-sha256:1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a}
+    container_name: ariadne-kali
+    network_mode: "service:netguard"
+    depends_on:
+      - netguard
+    volumes:
+      - ariadne-evidence:/evidence
+      - ariadne-engagement:/engagement:ro
+    environment:
+      - ENGAGEMENT_DIR=/engagement
+      - EVIDENCE_DIR=/evidence
+    restart: "no"
+
+  zap:
+    image: softwaresecurityproject/zap-stable@${ZAP_IMAGE_REF:-sha256:b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c}
+    container_name: ariadne-zap
+    network_mode: "service:netguard"
+    depends_on:
+      - netguard
+    volumes:
+      - ariadne-evidence:/evidence
+      - ariadne-engagement:/engagement:ro
+    environment:
+      - ENGAGEMENT_DIR=/engagement
+      - EVIDENCE_DIR=/evidence
+    restart: "no"
+
+volumes:
+  ariadne-evidence:
+  ariadne-engagement:
