@@ -1,0 +1,16 @@
+=== Seatbelt v2.0.0 ===
+
+=== Windows Security ===
+
+[*] Token Privileges
+    SeImpersonatePrivilege: Enabled
+    SeAssignPrimaryTokenPrivilege: Disabled
+
+[*] LAPS Settings
+    LAPS Enabled: False
+
+[*] PowerShell History
+    C:\Users\user\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt
+    > whoami
+    > net user
+    > net localgroup administrators

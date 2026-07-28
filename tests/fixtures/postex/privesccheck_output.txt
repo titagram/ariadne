@@ -1,0 +1,17 @@
+[*] PrivescCheck v1.0.0
+[*] Running as target\user
+
+[+] Service Binary Permissions
+    Service: VulnService
+    Path: C:\Program Files\VulnService\service.exe
+    WeakPermission: Everyone [R W] -> Modify
+
+[+] Unquoted Service Path
+    Service: UnquotedSvc
+    Path: C:\Program Files\My App\service.exe
+    Status: Vulnerable
+
+[+] AlwaysInstallElevated
+    Key: HKLM\SOFTWARE\Policies\Microsoft\Windows\Installer\AlwaysInstallElevated
+    Value: 1
+    Status: Vulnerable

@@ -39,3 +39,36 @@ packages:
   - iproute2
   - iptables
   - nftables
+
+# Post-exploitation tools (PEASS-ng, pspy, PrivescCheck, Seatbelt)
+postex_binaries:
+  linpeas:
+    url: "https://github.com/peass-ng/PEASS-ng/releases/download/20250101/linpeas.sh"
+    version: "20250101"
+    license: "GPL-2.0"
+    arch: "linux/amd64"
+    container_path: "/opt/tools/linpeas.sh"
+  pspy:
+    url: "https://github.com/DominicBreuker/pspy/releases/download/v1.2.1/pspy64"
+    version: "1.2.1"
+    license: "MIT"
+    arch: "linux/amd64"
+    container_path: "/opt/tools/pspy64"
+  winpeas:
+    url: "https://github.com/peass-ng/PEASS-ng/releases/download/20250101/winPEASx64.exe"
+    version: "20250101"
+    license: "GPL-2.0"
+    arch: "windows/amd64"
+    container_path: "/opt/tools/winPEASx64.exe"
+  privesccheck:
+    url: "https://raw.githubusercontent.com/itm4n/PrivescCheck/refs/heads/master/PrivescCheck.ps1"
+    version: "latest"
+    license: "MIT"
+    arch: "windows/any"
+    container_path: "/opt/tools/PrivescCheck.ps1"
+  seatbelt:
+    url: "https://github.com/GhostPack/Seatbelt/releases/download/v1.0.0/Seatbelt.exe"
+    version: "1.0.0"
+    license: "BSD-3-Clause"
+    arch: "windows/amd64"
+    container_path: "/opt/tools/Seatbelt.exe"

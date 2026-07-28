@@ -1,0 +1,4 @@
+2024/01/15 10:00:01 CMD: UID=0    PID=1234  | /usr/sbin/CRON -f
+2024/01/15 10:00:01 CMD: UID=1001 PID=5678  | /bin/bash /opt/backup.sh
+2024/01/15 10:01:01 CMD: UID=0    PID=9012  | /usr/sbin/CRON -f
+2024/01/15 10:01:01 CMD: UID=1001 PID=3456  | /usr/bin/php /var/www/html/cron.php

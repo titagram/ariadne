@@ -1,0 +1,29 @@
+╔══════════╗
+║ LinPEAS  ║
+╚══════════╝
+Linux Privesc Toolkit by PEASS-ng v1.0.0
+
+╔══════════╗
+║ System Information ║
+╚══════════╝
+╔══════════╗
+║ Basic information ║
+╚══════════╝
+Linux target 5.10.0-28-amd64 #1 SMP Debian 5.10.209-2 (2024-01-31) x86_64 GNU/Linux
+PRETTY_NAME="Debian GNU/Linux 11 (bullseye)"
+
+╔══════════╗
+║ User/Group ║
+╚══════════╝
+uid=1001(www-data) gid=1001(www-data) groups=1001(www-data)
+
+╔══════════╗
+║ Interesting Files ║
+╚══════════╝
+[SUID] /usr/bin/su ---  -rwsr-xr-x
+[SUID] /usr/bin/sudo ---  -rwsr-xr-x
+[SUID] /usr/bin/pkexec ---  -rwsr-xr-x
+
+[Capabilities] /usr/bin/python3.9 = cap_setuid+ep
+[Capabilities] /usr/bin/tar = cap_dac_read_search+ep
+

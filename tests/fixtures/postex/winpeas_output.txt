@@ -1,0 +1,17 @@
+  ╔══════════╗
+  ║ WinPEAS  ║
+  ╚══════════╝
+  Windows Privesc Toolkit by PEASS-ng v2.0.0
+
+  [-] System Information
+      Hostname: TARGET-PC
+      Domain: WORKGROUP
+      OS Version: Windows 10 Pro 10.0.19045
+
+  [-] Current User
+      Username: target\user
+      CheckIfAdmin: False
+
+  [-] Interesting Processes
+      PID: 1234 - C:\Program Files\VulnService\service.exe
+      PID: 5678 - C:\Windows\System32\taskhostw.exe
