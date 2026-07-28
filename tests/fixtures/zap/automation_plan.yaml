@@ -1,0 +1,27 @@
+{
+  "env": {
+    "contexts": [
+      {
+        "name": "ariadne",
+        "urls": ["https://10.10.10.10"],
+        "includePaths": ["https://10\\.10\\.10\\.10/.*"],
+        "excludePaths": []
+      }
+    ]
+  },
+  "jobs": [
+    {
+      "type": "passiveScan-config",
+      "parameters": {
+        "maxAlertsPerRule": 10
+      }
+    },
+    {
+      "type": "spider",
+      "parameters": {
+        "maxDepth": 2,
+        "maxDuration": 5
+      }
+    }
+  ]
+}

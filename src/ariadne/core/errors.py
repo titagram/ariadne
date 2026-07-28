@@ -43,3 +43,7 @@ class TransitionDeniedError(AriadneError):
 
 class AdapterError(AriadneError):
     """Raised when a tool adapter operation fails."""
+
+
+class AdapterPolicyError(AdapterError):
+    """Raised when a policy constraint blocks an adapter operation."""

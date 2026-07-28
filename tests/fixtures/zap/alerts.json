@@ -1,0 +1,28 @@
+[
+  {
+    "alert": "Cross-Domain Misconfiguration",
+    "risk": "Medium",
+    "confidence": "Medium",
+    "url": "https://10.10.10.10/",
+    "param": "",
+    "attack": "",
+    "evidence": "Access-Control-Allow-Origin: *",
+    "description": "CORS allows all origins",
+    "solution": "Configure CORS correctly",
+    "alertRef": "10098",
+    "pluginId": "10098"
+  },
+  {
+    "alert": "Missing X-Content-Type-Options",
+    "risk": "Low",
+    "confidence": "High",
+    "url": "https://10.10.10.10/",
+    "param": "X-Content-Type-Options",
+    "attack": "",
+    "evidence": "",
+    "description": "Missing anti-MIME-sniffing header",
+    "solution": "Set X-Content-Type-Options: nosniff",
+    "alertRef": "10021",
+    "pluginId": "10021"
+  }
+]
