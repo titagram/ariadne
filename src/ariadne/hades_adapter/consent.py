@@ -6,6 +6,7 @@ consume this typed gateway and never accept a requester from model tool input.
 
 from __future__ import annotations
 
+import asyncio
 from enum import StrEnum
 from inspect import isawaitable
 from typing import Any, Protocol, runtime_checkable
@@ -42,10 +43,29 @@ class UnavailableConsentGateway:
 class HadesConsentGateway:
     """Adapter for Hades' ContextVar-scoped public elicitation API."""
 
-    def __init__(self, requester: Any) -> None:
+    def __init__(
+        self,
+        requester: Any,
+        *,
+        requester_timeout_seconds: float = 120,
+        external_timeout_seconds: float | None = None,
+    ) -> None:
         if not callable(requester):
             raise TypeError("Hades consent requester must be callable")
+        if requester_timeout_seconds <= 0:
+            raise ValueError("Requester timeout must be positive")
+        external_timeout = (
+            requester_timeout_seconds + 5
+            if external_timeout_seconds is None
+            else external_timeout_seconds
+        )
+        if external_timeout <= requester_timeout_seconds:
+            raise ValueError(
+                "External timeout must exceed the requester timeout"
+            )
         self._requester = requester
+        self._requester_timeout_seconds = requester_timeout_seconds
+        self._external_timeout_seconds = external_timeout
 
     async def request_plan(self, plan: Plan) -> ConsentDecision:
         import json
@@ -74,15 +94,21 @@ class HadesConsentGateway:
             },
             sort_keys=True,
         )
-        try:
-            outcome = self._requester(
+        async def invoke() -> object:
+            outcome = await asyncio.to_thread(
+                self._requester,
                 message=message,
                 description=description,
-                timeout_seconds=120,
+                timeout_seconds=self._requester_timeout_seconds,
                 surface="ariadne-plan",
             )
-            if isawaitable(outcome):
-                outcome = await outcome
+            return await outcome if isawaitable(outcome) else outcome
+
+        try:
+            outcome = await asyncio.wait_for(
+                invoke(),
+                timeout=self._external_timeout_seconds,
+            )
         except TimeoutError:
             return ConsentDecision.CANCEL
         except Exception:

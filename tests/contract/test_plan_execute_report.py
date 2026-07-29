@@ -1427,6 +1427,58 @@ class TestExecutePlanHandler:
         assert counting.plan_calls == 0
         assert fake_runtime.calls == 0
 
+    async def test_legacy_plan_executed_event_is_terminal_after_restart(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+    ) -> None:
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "legacy execution"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        assert "approved" in command.handle(
+            f"approve {proposed['plan_id']}",
+            trusted_session_id=session_id,
+        ).lower()
+        binding = command.get_session_binding(session_id)
+        assert binding is not None and binding.engagement_id is not None
+        handle = command.store.open(binding.engagement_id)
+        assert handle is not None
+        command.store.append_event(
+            handle,
+            Event(
+                event_type="plan_executed",
+                payload={
+                    "plan_id": proposed["plan_id"],
+                    "playbook_id": proposed["playbook_id"],
+                    "action": "legacy-adapter",
+                    "operation": "legacy-operation",
+                    "status": "executed",
+                    "target": "10.10.10.10",
+                },
+                timestamp=datetime.now(UTC),
+            ),
+        )
+
+        restarted = AriadneCommand(ChallengeLedger(), command.store)
+        claim = restarted.claim_plan_execution(
+            proposed["plan_id"],
+            trusted_session_id=session_id,
+        )
+
+        assert claim.claimed is False
+        assert "executed" in claim.message.lower()
+        assert not any(
+            event["event_type"] == "plan_execution_claimed"
+            for event in command.store.read_events(handle)
+        )
+
     @pytest.mark.parametrize("failure_mode", ["policy_drift", "tamper"])
     async def test_change_between_consent_and_claim_has_no_side_effect(
         self,

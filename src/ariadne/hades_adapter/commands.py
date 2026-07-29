@@ -92,6 +92,7 @@ class PlanRecord:
         rejected: Whether the user has rejected this plan.
         claimed: Whether execution has been durably claimed.
         claimed_at: When the execution claim was persisted.
+        executed: Whether a verified legacy/current execution event exists.
     """
 
     plan: Plan
@@ -104,6 +105,7 @@ class PlanRecord:
     rejected: bool = False
     claimed: bool = False
     claimed_at: float | None = None
+    executed: bool = False
 
 
 @dataclass(frozen=True)
@@ -507,6 +509,8 @@ class AriadneCommand:
             return f"Error: Unknown plan: {plan_id!r}"
         if record.rejected:
             return f"Plan {plan_id!r} was already rejected."
+        if record.executed:
+            return f"Error: Plan {plan_id!r} was already executed."
         if record.claimed:
             return f"Error: Plan {plan_id!r} is already execution-claimed."
 
@@ -631,11 +635,20 @@ class AriadneCommand:
 
         proposal: dict[str, Any] | None = None
         approvals: list[tuple[str, dict[str, Any]]] = []
+        legacy_execution_times: list[datetime] = []
         for event in self.store.read_events(handle):
             payload = event.get("payload", {})
             if payload.get("plan_id") != plan_id:
                 continue
             event_type = event.get("event_type")
+            if event_type == "plan_executed":
+                try:
+                    legacy_execution_times.append(
+                        datetime.fromisoformat(event["timestamp"])
+                    )
+                except (KeyError, TypeError, ValueError):
+                    return None
+                continue
             if event_type == "plan_proposed":
                 if proposal is not None:
                     return None
@@ -742,6 +755,13 @@ class AriadneCommand:
             record.approved = True
             record.approved_at = approved_at.timestamp()
             record.approval_source = str(source)
+        if legacy_execution_times:
+            record.executed = True
+            record.claimed = True
+            record.claimed_at = max(
+                timestamp.timestamp()
+                for timestamp in legacy_execution_times
+            )
         return record
 
     def claim_plan_execution(
@@ -771,6 +791,12 @@ class AriadneCommand:
                 return PlanClaimResult(
                     claimed=False,
                     message="Plan is missing or its durable chain is invalid.",
+                )
+            if record.executed:
+                return PlanClaimResult(
+                    claimed=False,
+                    message="Plan was already executed.",
+                    record=record,
                 )
             if record.rejected:
                 return PlanClaimResult(
