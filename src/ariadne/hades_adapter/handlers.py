@@ -27,9 +27,12 @@ from ariadne.core.policy import EffectivePolicy
 from ariadne.core.workflow import PlanningContext, WorkflowCatalog
 from ariadne.evidence.collector import EvidenceCollector
 from ariadne.execution.contracts import (
+    AuthorizationReason,
     ExecutionContractRegistry,
+    ExecutionCoordinator,
     ExecutionEnvelope,
     GuardedRuntime,
+    ProcessAuthorizationError,
 )
 from ariadne.hades_adapter.commands import AriadneCommand
 from ariadne.hades_adapter.consent import ConsentDecision, ConsentGateway
@@ -126,6 +129,17 @@ def _get_execution_contract_registry(
             "No trusted composition execution contract registry is available."
         )
     return registry
+
+
+def _get_execution_coordinator(
+    context: dict[str, Any],
+) -> ExecutionCoordinator:
+    coordinator = context.get("execution_coordinator")
+    if not isinstance(coordinator, ExecutionCoordinator):
+        raise TypeError(
+            "No trusted composition execution coordinator is available."
+        )
+    return coordinator
 
 
 def _determine_engagement_state(
@@ -831,10 +845,11 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
 
     try:
         execution_contracts = _get_execution_contract_registry(context)
-    except TypeError as exc:
+        execution_coordinator = _get_execution_coordinator(context)
+    except TypeError:
         return {
             "status": "blocked",
-            "message": str(exc),
+            "message": "Trusted execution boundary is unavailable.",
             "plan_id": plan_id,
             "actions_executed": 0,
             "actions_failed": len(record.plan.actions),
@@ -868,7 +883,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                         "policy_source_digests": list(
                             execution_policy.source_digests
                         ),
-                        "reason": "no_curated_execution_contract",
+                        "reason_code": AuthorizationReason.CONTRACT_MISSING,
                     },
                     timestamp=datetime.now(UTC),
                 ),
@@ -893,6 +908,32 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                         "target": record.plan.target.host,
                     },
                     timestamp=now,
+                ),
+            )
+            continue
+        try:
+            execution_contracts.verify_adapter(contract, adapter)
+        except Exception:
+            actions_failed += 1
+            cmd.store.append_event(
+                run_handle,
+                Event(
+                    event_type="process_authorization_blocked",
+                    payload={
+                        "plan_id": plan_id,
+                        "action_index": action_index,
+                        "action_digest": envelope.action_digest,
+                        "adapter": action.adapter,
+                        "operation": action.operation,
+                        "target": record.plan.target.host,
+                        "policy_source_digests": list(
+                            execution_policy.source_digests
+                        ),
+                        "reason_code": (
+                            AuthorizationReason.IMPLEMENTATION_MISMATCH
+                        ),
+                    },
+                    timestamp=datetime.now(UTC),
                 ),
             )
             continue
@@ -921,7 +962,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             envelope.verify_action(action)
 
             def audit_block(
-                reason: str,
+                reason: AuthorizationReason,
                 blocked_spec: Any,
                 attempts: int,
                 *,
@@ -944,15 +985,10 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                             "policy_source_digests": list(
                                 execution_policy.source_digests
                             ),
-                            "reason": reason,
+                            "reason_code": reason,
                             "attempts_consumed": attempts,
                             "process_spec_digest": (
                                 canonical_digest(blocked_spec)
-                                if blocked_spec is not None
-                                else None
-                            ),
-                            "executable_id": (
-                                blocked_spec.argv[0]
                                 if blocked_spec is not None
                                 else None
                             ),
@@ -966,6 +1002,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 envelope=envelope,
                 contract=contract,
                 policy=execution_policy,
+                coordinator=execution_coordinator,
                 on_block=audit_block,
             )
             guarded_runtime.authorize_initial(process_spec)
@@ -978,20 +1015,34 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
 
             # Parse observations from output
             parse_for_target = getattr(adapter, "parse_for_target", None)
-            observations = (
-                parse_for_target(process_result, record.plan.target)
-                if callable(parse_for_target)
-                else adapter.parse(process_result)
+            parse_for_operation = getattr(
+                adapter,
+                "parse_for_operation",
+                None,
             )
+            if callable(parse_for_target):
+                observations = parse_for_target(
+                    process_result,
+                    record.plan.target,
+                )
+            elif callable(parse_for_operation):
+                observations = parse_for_operation(
+                    process_result,
+                    action.operation,
+                )
+            else:
+                observations = adapter.parse(process_result)
             if any(
                 observation.target != record.plan.target
                 for observation in observations
             ):
                 audit_block(
-                    "Adapter observation target differs from the "
-                    "execution envelope",
+                    AuthorizationReason.TARGET_MISMATCH,
                     process_spec,
                     guarded_runtime.attempts,
+                )
+                raise ProcessAuthorizationError(
+                    AuthorizationReason.TARGET_MISMATCH
                 )
 
             # Classify the result
@@ -1085,7 +1136,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                         "artifact": ev_result,
                     })
 
-        except Exception as exc:
+        except Exception:
             actions_failed += 1
             cmd.store.append_event(
                 run_handle,
@@ -1097,7 +1148,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                         "action": action.adapter,
                         "operation": action.operation,
                         "status": "error",
-                        "error": str(exc),
+                        "error_code": "adapter_execution_error",
                         "target": record.plan.target.host,
                     },
                     timestamp=now,

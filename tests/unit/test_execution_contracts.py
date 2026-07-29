@@ -2,16 +2,19 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
 from ariadne.adapters.nmap import NmapAdapter
+from ariadne.adapters.research import ResearchAdapter
 from ariadne.core.engagement import TargetSpec
 from ariadne.core.planner import Plan, PlannedAction
 from ariadne.core.policy import CapabilityRule, EffectivePolicy
 from ariadne.core.workflow import PlaybookLimits
 from ariadne.execution.contracts import (
     ExecutionContractRegistry,
+    ExecutionCoordinator,
     ExecutionEnvelope,
     GuardedRuntime,
     ProcessAuthorizationError,
@@ -169,6 +172,24 @@ def test_registry_contains_only_current_live_slice() -> None:
     assert registry.get("nmap", "unknown") is None
 
 
+def test_contract_registry_is_immutable_and_binds_exact_adapter_type() -> None:
+    registry = ExecutionContractRegistry.curated()
+    contract = registry.require("nmap", "tcp_discovery")
+
+    assert isinstance(registry.contracts, MappingProxyType)
+    with pytest.raises(TypeError):
+        registry.contracts[("nmap", "tcp_discovery")] = contract  # type: ignore[index]
+    registry.verify_adapter(contract, NmapAdapter())
+    with pytest.raises(ProcessAuthorizationError, match="implementation"):
+        registry.verify_adapter(contract, ResearchAdapter())
+
+    class SubclassedNmap(NmapAdapter):
+        pass
+
+    with pytest.raises(ProcessAuthorizationError, match="implementation"):
+        registry.verify_adapter(contract, SubclassedNmap())
+
+
 def test_envelope_is_bound_to_canonical_action_digest(tmp_path: Path) -> None:
     plan = _plan()
     envelope = _envelope(tmp_path, plan)
@@ -203,11 +224,11 @@ async def test_malicious_tool_and_other_target_are_denied_before_runtime(
     [
         (
             "nmap", "-n", "-Pn", "-sS", "--max-rate", "10",
-            "-p", "22", "-oX", "-", "--", "10.10.10.11",
+            "-p", "22,80", "-oX", "-", "--", "10.10.10.11",
         ),
         (
             "nmap", "-n", "-Pn", "-sS", "--max-rate", "10",
-            "-p", "22", "-oX", "-", "10.10.10.11", "--", "10.10.10.10",
+            "-p", "22,80", "-oX", "-", "10.10.10.11", "--", "10.10.10.10",
         ),
     ],
 )
@@ -218,6 +239,45 @@ def test_nmap_target_swap_or_extra_destination_is_denied(
     guard = _guard(tmp_path, RecordingRuntime())
 
     with pytest.raises(ProcessAuthorizationError, match="target|template"):
+        guard.authorize_initial(
+            ProcessSpec(
+                argv=argv,
+                timeout_seconds=30,
+                max_output_bytes=4096,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        (
+            "nmap", "-n", "-Pn", "-sT", "--max-rate", "10",
+            "--max-rate", "10", "-p", "22,80", "-oX", "-",
+            "--", "10.10.10.10",
+        ),
+        (
+            "nmap", "-n", "-Pn", "-sT", "--max-rate", "10",
+            "-p", "22,80", "-p", "22,80", "-oX", "-",
+            "--", "10.10.10.10",
+        ),
+        (
+            "nmap", "-n", "-Pn", "-sT", "-sT", "--max-rate", "10",
+            "-p", "22,80", "-oX", "-", "--", "10.10.10.10",
+        ),
+        (
+            "nmap", "-n", "-Pn", "-sT", "--max-rate", "10",
+            "-p", "443", "-oX", "-", "--", "10.10.10.10",
+        ),
+    ],
+)
+def test_nmap_duplicate_semantic_flags_or_port_mutation_is_denied(
+    tmp_path: Path,
+    argv: tuple[str, ...],
+) -> None:
+    guard = _guard(tmp_path, RecordingRuntime())
+
+    with pytest.raises(ProcessAuthorizationError):
         guard.authorize_initial(
             ProcessSpec(
                 argv=argv,
@@ -296,6 +356,84 @@ async def test_nmap_fallback_consumes_second_attempt_and_honours_budget(
         await NmapAdapter().execute(spec, guard)
 
     assert len(runtime.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_nested_results_consume_combined_output_budget(
+    tmp_path: Path,
+) -> None:
+    runtime = RecordingRuntime([
+        ProcessResult(exit_code=0, stdout="a" * 3000, stderr="b" * 500),
+        ProcessResult(exit_code=0, stdout="c" * 700, stderr="",),
+    ])
+    guard = _guard(tmp_path, runtime)
+    spec = _nmap_spec()
+    guard.authorize_initial(spec)
+
+    await guard.run(spec)
+    with pytest.raises(ProcessAuthorizationError, match="output"):
+        await guard.run(spec.model_copy(update={"argv": tuple(
+            "-sT" if value == "-sS" else value for value in spec.argv
+        )}))
+
+    assert len(runtime.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_elapsed_time_reduces_nested_timeout_budget(
+    tmp_path: Path,
+) -> None:
+    now = [0.0]
+    runtime = RecordingRuntime([
+        ProcessResult(exit_code=0, stdout="", stderr=""),
+    ])
+    envelope = _envelope(tmp_path)
+    contract = ExecutionContractRegistry.curated().require(
+        envelope.adapter,
+        envelope.operation,
+    )
+    guard = GuardedRuntime(
+        runtime=runtime,
+        envelope=envelope,
+        contract=contract,
+        policy=_policy(),
+        clock=lambda: now[0],
+    )
+    spec = _nmap_spec()
+    guard.authorize_initial(spec)
+    now[0] = 5.0
+
+    with pytest.raises(ProcessAuthorizationError, match="timeout"):
+        await guard.run(spec)
+
+    assert runtime.calls == []
+
+
+@pytest.mark.asyncio
+async def test_execution_coordinator_never_exceeds_shared_concurrency() -> None:
+    import asyncio
+
+    coordinator = ExecutionCoordinator(max_concurrency=1)
+    entered = 0
+    peak = 0
+    release = asyncio.Event()
+
+    async def worker() -> None:
+        nonlocal entered, peak
+        async with coordinator.slot():
+            entered += 1
+            peak = max(peak, entered)
+            await release.wait()
+            entered -= 1
+
+    first = asyncio.create_task(worker())
+    await asyncio.sleep(0)
+    second = asyncio.create_task(worker())
+    await asyncio.sleep(0)
+    assert peak == 1
+    release.set()
+    await first
+    await second
 
 
 def test_process_spec_rejects_absolute_shell_invocation() -> None:

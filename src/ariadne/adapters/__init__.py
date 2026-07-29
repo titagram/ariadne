@@ -22,20 +22,35 @@ class AdapterRegistry:
     def __init__(self) -> None:
         self._adapters: dict[str, ToolAdapter] = {}
         self._default_runtime: Runtime = ProcessRunner()
+        self._frozen = False
 
-    def register(self, name: str, adapter: Any) -> None:
+    def register(
+        self,
+        name: str,
+        adapter: Any,
+        *,
+        override: bool = False,
+    ) -> None:
         """Register a ToolAdapter by name.
 
         Args:
             name: The adapter name used in playbook actions (e.g. ``nmap``).
             adapter: An instance implementing the ``ToolAdapter`` protocol.
         """
+        if self._frozen:
+            raise RuntimeError("Adapter registry is frozen")
         if not isinstance(adapter, ToolAdapter):
             raise TypeError(
                 f"Adapter {name!r} does not implement ToolAdapter protocol. "
                 f"Got {type(adapter).__name__}"
             )
+        if name in self._adapters and not override:
+            raise ValueError(f"Adapter {name!r} is already registered")
         self._adapters[name] = adapter
+
+    def freeze(self) -> None:
+        """Prevent adapter and runtime replacement after composition."""
+        self._frozen = True
 
     def get(self, name: str) -> ToolAdapter | None:
         """Look up an adapter by name.
@@ -50,6 +65,8 @@ class AdapterRegistry:
 
     @default_runtime.setter
     def default_runtime(self, runtime: Runtime) -> None:
+        if self._frozen:
+            raise RuntimeError("Adapter registry is frozen")
         self._default_runtime = runtime
 
     def __contains__(self, name: str) -> bool:
@@ -141,4 +158,5 @@ def build_default_registry() -> AdapterRegistry:
     for name in ("nuclei", "screenshot", "postex", "pivot", "httpx", "zap", "metasploit"):
         registry.register(name, noop)
 
+    registry.freeze()
     return registry

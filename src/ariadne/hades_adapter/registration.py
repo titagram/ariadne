@@ -154,6 +154,7 @@ def _handler_for(tool_name: str, services: ServiceContainer) -> object:
         context["execution_contract_registry"] = (
             services.execution_contract_registry
         )
+        context["execution_coordinator"] = services.execution_coordinator
         result = await raw(args, **context)
         return json.dumps(result)
 

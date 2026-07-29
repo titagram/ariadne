@@ -134,6 +134,10 @@ class ProcessRunner:
     """
 
     _KILL_GRACE_SECONDS: float = 2.0
+    # TODO(runner-hardening): stop the process while streaming as soon as the
+    # combined stdout+stderr byte budget is exhausted.
+    # TODO(runner-hardening): resolve and attest argv[0] against a curated
+    # executable realpath instead of trusting ambient PATH lookup.
 
     async def run(self, spec: ProcessSpec) -> ProcessResult:
         """Execute *spec* and return a bounded ``ProcessResult``.

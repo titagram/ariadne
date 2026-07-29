@@ -123,6 +123,33 @@ class TestNmapPlan:
         with pytest.raises(AdapterError):
             NmapAdapter().plan(action("tcp_discovery", ports=()), context)
 
+    @pytest.mark.parametrize(
+        "ports",
+        ("0", "65536", "80-22", "22,abc", (22, 0), (True,)),
+    )
+    def test_rejects_invalid_port_values(
+        self,
+        context: AdapterContext,
+        ports: object,
+    ) -> None:
+        with pytest.raises(AdapterError):
+            NmapAdapter().plan(
+                action("tcp_discovery", ports=ports),
+                context,
+            )
+
+    def test_normalizes_and_caps_large_port_range(
+        self,
+        context: AdapterContext,
+    ) -> None:
+        spec = NmapAdapter().plan(
+            action("tcp_discovery", ports="1-10000"),
+            context,
+        )
+
+        port_index = spec.argv.index("-p")
+        assert spec.argv[port_index + 1] == "1-200"
+
     def test_sets_bounded_timeout_and_output(
         self, context: AdapterContext
     ) -> None:

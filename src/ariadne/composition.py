@@ -4,7 +4,10 @@ from pathlib import Path
 from ariadne.adapters import AdapterRegistry, build_default_registry
 from ariadne.core.planner import Planner
 from ariadne.core.workflow import WorkflowCatalog
-from ariadne.execution.contracts import ExecutionContractRegistry
+from ariadne.execution.contracts import (
+    ExecutionContractRegistry,
+    ExecutionCoordinator,
+)
 from ariadne.hades_adapter.commands import AriadneCommand
 from ariadne.hades_adapter.consent import (
     ConsentGateway,
@@ -32,11 +35,15 @@ class ServiceContainer:
     execution_contract_registry: ExecutionContractRegistry = field(
         default_factory=ExecutionContractRegistry.curated
     )
+    execution_coordinator: ExecutionCoordinator = field(
+        default_factory=lambda: ExecutionCoordinator(max_concurrency=1)
+    )
     command: AriadneCommand = field(init=False)
     planner: Planner = field(init=False)
 
     def __post_init__(self) -> None:
         """Load the workflow catalog if not provided."""
+        self.adapter_registry.freeze()
         if self.catalog is None:
             wf_dir = _DEFAULT_WORKFLOW_DIR
             object.__setattr__(

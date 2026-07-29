@@ -25,12 +25,16 @@ import pytest
 from ariadne.adapters import AdapterRegistry, build_default_registry
 from ariadne.adapters.base import ProcessResult, ProcessSpec
 from ariadne.adapters.nmap import NmapAdapter
+from ariadne.adapters.research import ResearchAdapter
 from ariadne.composition import ServiceContainer
 from ariadne.core.errors import PolicyConfigurationError
 from ariadne.core.planner import Planner
 from ariadne.core.policy import CapabilityRule, EffectivePolicy
 from ariadne.core.workflow import WorkflowCatalog
-from ariadne.execution.contracts import ExecutionContractRegistry
+from ariadne.execution.contracts import (
+    ExecutionContractRegistry,
+    ExecutionCoordinator,
+)
 from ariadne.hades_adapter.commands import CURRENT_DISCLAIMER_VERSION, AriadneCommand
 from ariadne.hades_adapter.consent import (
     ConsentDecision,
@@ -65,6 +69,20 @@ class FakeRuntime:
             stdout=self._stdout,
             stderr="",
         )
+
+
+class PausingRuntime(FakeRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = ThreadEvent()
+        self.release = ThreadEvent()
+
+    async def run(self, spec: ProcessSpec) -> ProcessResult:
+        import asyncio
+
+        self.started.set()
+        await asyncio.to_thread(self.release.wait, 5)
+        return await super().run(spec)
 
 
 class FakeConsent:
@@ -312,6 +330,9 @@ class TestCompositionOwnership:
 
         composed_gateway = FakeConsentGateway(ConsentDecision.DECLINE)
         malicious_gateway = FakeConsentGateway(ConsentDecision.ACCEPT)
+        registry = AdapterRegistry()
+        registry.register("nmap", NmapAdapter())
+        registry.register("research", ResearchAdapter())
         registry.default_runtime = fake_runtime
         services = ServiceContainer(
             profile_name="test",
@@ -729,6 +750,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
             consent_gateway=consent,
         )
@@ -771,6 +793,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
             consent_gateway=consent,
         )
@@ -810,6 +833,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
             consent_gateway=accepted,
         )
@@ -822,6 +846,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
             consent_gateway=must_not_run,
         )
@@ -869,6 +894,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
         )
         assert result["status"] == "blocked"
@@ -921,6 +947,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
             consent_gateway=UnavailableConsentGateway(),
             yolo=True,
@@ -956,6 +983,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
             consent_gateway=consent,
             yolo=True,
@@ -1010,6 +1038,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
         )
 
@@ -1087,6 +1116,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
         )
 
@@ -1139,6 +1169,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
         )
         assert result["status"] in ("executed", "partial"), f"Expected executed, got {result}"
@@ -1170,7 +1201,6 @@ class TestExecutePlanHandler:
         )
         counting = BlockingNmapAdapter()
         counting.release_execute.set()
-        registry.register("research", counting)
 
         result = await handle_execute_plan(
             {"plan_id": proposed["plan_id"]},
@@ -1179,6 +1209,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry({}),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
         )
 
@@ -1227,6 +1258,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
         )
 
@@ -1273,6 +1305,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
         )
 
         assert result["status"] == "error"
@@ -1312,6 +1345,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
         )
 
@@ -1372,6 +1406,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
         )
         assert result["status"] in ("executed", "partial")
@@ -1424,6 +1459,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
         )
 
@@ -1496,7 +1532,6 @@ class TestExecutePlanHandler:
 
         counting = BlockingNmapAdapter()
         counting.release_execute.set()
-        registry.register("research", counting)
         restarted = AriadneCommand(ChallengeLedger(), command.store)
         result = await handle_execute_plan(
             {"plan_id": proposed["plan_id"]},
@@ -1505,6 +1540,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
             consent_gateway=FakeConsentGateway(ConsentDecision.ACCEPT),
         )
@@ -1621,7 +1657,6 @@ class TestExecutePlanHandler:
 
         counting = BlockingNmapAdapter()
         counting.release_execute.set()
-        registry.register("research", counting)
         gateway = CallbackConsentGateway(
             ConsentDecision.ACCEPT,
             break_after_consent,
@@ -1633,6 +1668,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
             consent_gateway=gateway,
         )
@@ -1666,7 +1702,6 @@ class TestExecutePlanHandler:
         )
         counting = BlockingNmapAdapter()
         counting.release_execute.set()
-        registry.register("research", counting)
         gateway = PausingConsentGateway(ConsentDecision.ACCEPT)
         execution = asyncio.create_task(handle_execute_plan(
             {"plan_id": proposed["plan_id"]},
@@ -1675,6 +1710,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
             consent_gateway=gateway,
         ))
@@ -1715,19 +1751,19 @@ class TestExecutePlanHandler:
             f"approve {proposed['plan_id']}",
             trusted_session_id=session_id,
         ).lower()
-        blocking = BlockingNmapAdapter()
-        registry.register("research", blocking)
+        pausing_runtime = PausingRuntime()
         execution = asyncio.create_task(handle_execute_plan(
             {"plan_id": proposed["plan_id"]},
             session_id=session_id,
             ariadne_command=command,
             adapter_registry=registry,
-            runtime=fake_runtime,
+            runtime=pausing_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
             consent_gateway=UnavailableConsentGateway(),
         ))
-        await asyncio.to_thread(blocking.execute_started.wait, 5)
+        await asyncio.to_thread(pausing_runtime.started.wait, 5)
 
         rejected = command.handle(
             f"reject {proposed['plan_id']}",
@@ -1738,19 +1774,20 @@ class TestExecutePlanHandler:
             session_id=session_id,
             ariadne_command=command,
             adapter_registry=registry,
-            runtime=fake_runtime,
+            runtime=pausing_runtime,
             execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
             catalog=catalog,
             consent_gateway=UnavailableConsentGateway(),
         )
-        blocking.release_execute.set()
+        pausing_runtime.release.set()
         first = await execution
 
         assert "claimed" in rejected.lower()
         assert second["status"] == "blocked"
         assert "claimed" in second["message"].lower()
         assert first["status"] in ("executed", "partial")
-        assert blocking.plan_calls == 1
+        assert pausing_runtime.calls == 1
 
     async def test_claim_and_reject_share_one_serialized_transition(
         self,

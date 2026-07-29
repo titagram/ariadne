@@ -3,6 +3,7 @@
 from ariadne.execution.contracts import (
     ExecutionContract,
     ExecutionContractRegistry,
+    ExecutionCoordinator,
     ExecutionEnvelope,
     GuardedRuntime,
     ProcessAuthorizationError,
@@ -11,6 +12,7 @@ from ariadne.execution.contracts import (
 __all__ = [
     "ExecutionContract",
     "ExecutionContractRegistry",
+    "ExecutionCoordinator",
     "ExecutionEnvelope",
     "GuardedRuntime",
     "ProcessAuthorizationError",

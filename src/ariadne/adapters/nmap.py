@@ -32,6 +32,7 @@ from ariadne.adapters.base import (
     ToolProbe,
 )
 from ariadne.core.observations import Observation
+from ariadne.execution.contracts import normalize_nmap_ports
 
 _OPERATIONS: frozenset = frozenset({"tcp_discovery", "service_fingerprint", "udp_targeted"})
 
@@ -145,9 +146,6 @@ class NmapAdapter:
 
     name: ClassVar[str] = "nmap"
 
-    def __init__(self) -> None:
-        self._current_operation: str = ""
-
     # ── ToolAdapter protocol ─────────────────────────────────────────────
 
     async def probe(self, runtime: Runtime) -> ToolProbe:
@@ -159,7 +157,6 @@ class NmapAdapter:
         context: AdapterContext,
     ) -> ProcessSpec:
         op = action.operation
-        self._current_operation = op  # track for parse()
         if op not in _OPERATIONS:
             raise AdapterError(
                 f"Unknown Nmap operation: {op!r}. "
@@ -167,32 +164,10 @@ class NmapAdapter:
             )
 
         inputs = action.inputs
-        ports = inputs.get("ports", ())
-        if not ports:
-            # Fall back to common ports when none specified (service_fingerprint
-            # after tcp_discovery knows which ports were found)
-            ports = ("22,80,443,445,3389,8080,8443",) if op == "service_fingerprint" else ()
-        if not ports:
-            raise AdapterError("ports must be non-empty")
-        if isinstance(ports, str):
-            port_str = ports
-        elif isinstance(ports, (list, tuple)):
-            port_str = ",".join(str(p) for p in ports)
-        else:
-            raise AdapterError("ports must be a string, list, or tuple")
-        # Cap large port ranges to prevent excessive scan times.
-        # A full 1-65535 TCP connect scan can take hours; 1-1000 is a
-        # reasonable default for discovery.  Use a specific port list or
-        # "--top-ports N" if you need more granularity.
-        if "-" in port_str:
-            parts = port_str.split("-")
-            if len(parts) == 2:
-                try:
-                    lo, hi = int(parts[0]), int(parts[1])
-                    if hi - lo > 200:
-                        port_str = f"{lo}-{lo + 199}"
-                except (ValueError, TypeError):
-                    pass  # non-numeric range, pass through as-is
+        try:
+            port_str = normalize_nmap_ports(op, inputs)
+        except Exception as exc:
+            raise AdapterError("ports are invalid") from exc
         target = str(context.target.host)
 
         # Common base arguments
@@ -268,15 +243,21 @@ class NmapAdapter:
         self,
         result: ProcessResult,
     ) -> tuple[Observation, ...]:
+        return self.parse_for_operation(result, "nmap")
+
+    def parse_for_operation(
+        self,
+        result: ProcessResult,
+        operation: str,
+    ) -> tuple[Observation, ...]:
         stdout = result.stdout
         if not stdout.strip():
             return ()
         # Map operation to the evidence type expected by downstream playbooks
-        op = self._current_operation
         source = {
             "tcp_discovery": "port_open",
             "service_fingerprint": "service_fingerprinted",
-        }.get(op, op or "nmap")
+        }.get(operation, operation or "nmap")
         return tuple(_parse_nmap_xml(stdout, source=source))
 
     def classify(
