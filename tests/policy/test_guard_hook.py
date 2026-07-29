@@ -85,7 +85,15 @@ def test_bound_session_allows_ariadne_tools(
 
 @pytest.mark.parametrize(
     "tool_name",
-    ("read_file", "search_files", "web_search", "clarify", "session_search"),
+    (
+        "read_file",
+        "search_files",
+        "web_search",
+        "clarify",
+        "session_search",
+        "skill_view",
+        "skills_list",
+    ),
 )
 def test_bound_session_allows_explicit_read_only_tools(
     guard: GuardHook,
@@ -94,7 +102,10 @@ def test_bound_session_allows_explicit_read_only_tools(
     assert guard(tool_name=tool_name, args={}, session_id="active-session") is None
 
 
-@pytest.mark.parametrize("tool_name", ("unknown_tool", "browser", "database_query"))
+@pytest.mark.parametrize(
+    "tool_name",
+    ("unknown_tool", "browser", "database_query", "skill_manage"),
+)
 def test_bound_session_blocks_unknown_or_ambiguous_tools(
     guard: GuardHook,
     tool_name: str,

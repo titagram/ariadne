@@ -242,6 +242,8 @@ class OnDemandKaliRuntime:
         compose_dir: Path = _COMPOSE_DIR,
         command_runtime: Runtime | None = None,
         docker_locator: Callable[[str], str | None] = shutil.which,
+        kali_image_ref: str | None = None,
+        netguard_image_ref: str | None = None,
     ) -> None:
         self._snapshot = snapshot
         self._run_root = run_root.resolve()
@@ -265,6 +267,16 @@ class OnDemandKaliRuntime:
         self._nuclei_index_sha256 = str(nuclei.get("index_sha256", ""))
         self._kali_base_ref = self._platform_image_digest("kalilinux/kali-rolling")
         self._netguard_base_ref = self._platform_image_digest("alpine")
+        self._kali_image_ref = (
+            self._platform_image_reference("ariadne-kali")
+            if kali_image_ref is None
+            else kali_image_ref
+        )
+        self._netguard_image_ref = (
+            self._platform_image_reference("ariadne-netguard")
+            if netguard_image_ref is None
+            else netguard_image_ref
+        )
 
     async def run(self, spec: ProcessSpec) -> ProcessResult:
         self._bind_planned_ports(spec)
@@ -306,7 +318,15 @@ class OnDemandKaliRuntime:
         location_text = location.stdout.strip()
         version_text = (version.stdout or version.stderr).strip()
         guidance_text = (guidance.stdout or guidance.stderr).strip()
-        if location.exit_code != 0 or not location_text or not version_text or not guidance_text:
+        if version.exit_code != 0 or not version_text:
+            version_text = await self._installed_package_version(location_text)
+        if (
+            location.exit_code != 0
+            or not location_text
+            or not version_text
+            or guidance.exit_code != 0
+            or not guidance_text
+        ):
             raise KaliRuntimeUnavailableError(
                 f"Bounded version/help inspection failed for {executable}."
             )
@@ -316,6 +336,24 @@ class OnDemandKaliRuntime:
             guidance_text[:4096],
             "local_help",
         )
+
+    async def _installed_package_version(self, executable_path: str) -> str:
+        if not executable_path:
+            return ""
+        owner = await self._container_command(
+            ("dpkg-query", "-S", executable_path)
+        )
+        if owner.exit_code != 0 or not owner.stdout.strip():
+            return ""
+        package = owner.stdout.splitlines()[0].partition(":")[0].strip()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]*", package):
+            return ""
+        version = await self._container_command(
+            ("dpkg-query", "-W", "-f=${Version}\\n", package)
+        )
+        if version.exit_code != 0:
+            return ""
+        return version.stdout.strip()
 
     async def _ensure_started(self) -> None:
         if self._started:
@@ -347,12 +385,31 @@ class OnDemandKaliRuntime:
                 raise KaliRuntimeUnavailableError(
                     "Docker is installed but its daemon is unavailable."
                 )
+            startup_mode = "--build"
+            pinned_refs = (self._kali_image_ref, self._netguard_image_ref)
+            if any(pinned_refs) and not all(pinned_refs):
+                raise KaliRuntimeUnavailableError(
+                    "The pinned Ariadne Docker image set is incomplete. "
+                    "Kali and netguard must be pinned together."
+                )
+            if self._kali_image_ref and self._netguard_image_ref:
+                await self._verify_local_image(
+                    docker,
+                    self._kali_image_ref,
+                    label="Ariadne Kali",
+                )
+                await self._verify_local_image(
+                    docker,
+                    self._netguard_image_ref,
+                    label="Ariadne netguard",
+                )
+                startup_mode = "--no-build"
             started = await self._command_runtime.run(
                 ProcessSpec(
                     argv=(
                         *self._compose_prefix(docker=docker),
                         "up",
-                        "--build",
+                        startup_mode,
                         "--detach",
                         "--wait",
                         "netguard",
@@ -365,10 +422,48 @@ class OnDemandKaliRuntime:
                 )
             )
             if started.exit_code != 0:
+                detail = (started.stderr or started.stdout).strip()
                 raise KaliRuntimeUnavailableError(
-                    "The pinned Kali Docker service failed to start: " + started.stderr[:500]
+                    "The pinned Kali Docker service failed to start: " + detail[:500]
                 )
             self._started = True
+
+    async def _verify_local_image(
+        self,
+        docker: str,
+        image_ref: str,
+        *,
+        label: str,
+    ) -> None:
+        inspected = await self._command_runtime.run(
+            ProcessSpec(
+                argv=(
+                    docker,
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{.Id}}",
+                    image_ref,
+                ),
+                cwd=self._compose_dir,
+                timeout_seconds=15,
+                max_output_bytes=64 * 1024,
+            )
+        )
+        if inspected.exit_code != 0:
+            detail = (inspected.stderr or inspected.stdout).strip()
+            suffix = f": {detail[:500]}" if detail else ""
+            raise KaliRuntimeUnavailableError(
+                f"The pinned {label} image is not available locally{suffix}. "
+                "Build the curated images during setup before starting the engagement."
+            )
+        expected_digest = image_ref.rsplit("@sha256:", 1)[-1]
+        actual_digest = inspected.stdout.strip().removeprefix("sha256:")
+        if actual_digest != expected_digest:
+            raise KaliRuntimeUnavailableError(
+                f"The local {label} image does not match its pinned digest: "
+                f"expected {expected_digest}, got {actual_digest or 'unknown'}."
+            )
 
     async def _attest_nuclei(self, spec: ProcessSpec) -> None:
         paths = tuple(
@@ -464,7 +559,7 @@ class OnDemandKaliRuntime:
         )
 
     def _compose_environment(self) -> dict[str, str]:
-        return {
+        environment = {
             "ARIADNE_ALLOW_TARGETS": _targets_to_allowlist(
                 self._snapshot,
                 self._planned_target_ports,
@@ -474,6 +569,11 @@ class OnDemandKaliRuntime:
             "NETGUARD_BASE_REF": self._netguard_base_ref,
             "NUCLEI_TEMPLATES_REF": self._nuclei_revision,
         }
+        if self._kali_image_ref:
+            environment["ARIADNE_KALI_IMAGE"] = self._kali_image_ref
+        if self._netguard_image_ref:
+            environment["ARIADNE_NETGUARD_IMAGE"] = self._netguard_image_ref
+        return environment
 
     def _bind_planned_ports(self, spec: ProcessSpec) -> None:
         """Add only ports explicitly present in the authorized ProcessSpec."""
@@ -514,6 +614,27 @@ class OnDemandKaliRuntime:
         raise KaliRuntimeUnavailableError(
             f"No pinned {image_name} digest for linux/{architecture}"
         )
+
+    def _platform_image_reference(self, image_name: str) -> str | None:
+        architecture = {
+            "aarch64": "arm64",
+            "arm64": "arm64",
+            "x86_64": "amd64",
+            "amd64": "amd64",
+        }.get(platform.machine().casefold())
+        if architecture is None:
+            return None
+        lock = yaml.safe_load((self._compose_dir / "image-lock.yaml").read_text())
+        for image in lock.get("images", ()):
+            if (
+                isinstance(image, dict)
+                and image.get("image") == image_name
+                and image.get("platform") == f"linux/{architecture}"
+            ):
+                digest = str(image.get("digest", ""))
+                if re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                    return f"{image_name}@{digest}"
+        return None
 
 
 # ── Utility ──────────────────────────────────────────────────────────────

@@ -17,6 +17,14 @@ from ariadne.runtime.process import ProcessResult, ProcessSpec
 
 _REVISION = "9979ce144c257f1c427a75604f8c0ffbc8293390"
 _INDEX_SHA = "c8b69adb4b906eba5e9d9239f1d775d8175739a8bc263073243b0f0c129c74f9"
+_PINNED_KALI_REF = (
+    "ariadne-kali@"
+    "sha256:38348d7ab556982555ffcea3fcfd0aa9ffaa30286ce4fcc3802cb92aa2c15b67"
+)
+_PINNED_NETGUARD_REF = (
+    "ariadne-netguard@"
+    "sha256:0da048944617b30d54d330d8fd983924ccc2bef45205e901f467229808a95789"
+)
 
 
 class _DockerCommandRuntime:
@@ -38,6 +46,172 @@ class _DockerCommandRuntime:
         else:
             stdout = "ok\n"
         return ProcessResult(exit_code=0, stdout=stdout, stderr="")
+
+
+class _PinnedImageCommandRuntime(_DockerCommandRuntime):
+    def __init__(self, *, fail_startup: bool = False) -> None:
+        super().__init__()
+        self.fail_startup = fail_startup
+
+    async def run(self, spec: ProcessSpec) -> ProcessResult:
+        command = " ".join(spec.argv)
+        if " image inspect " in f" {command} ":
+            self.calls.append(spec)
+            image_ref = spec.argv[-1]
+            return ProcessResult(
+                exit_code=0,
+                stdout=image_ref.rsplit("sha256:", 1)[1] + "\n",
+                stderr="",
+            )
+        if " up --no-build --detach --wait " in f" {command} " and self.fail_startup:
+            self.calls.append(spec)
+            return ProcessResult(
+                exit_code=1,
+                stdout="compose startup failed: netguard unhealthy\n",
+                stderr="",
+            )
+        return await super().run(spec)
+
+
+class _SearchSploitPackageVersionRuntime(_PinnedImageCommandRuntime):
+    async def run(self, spec: ProcessSpec) -> ProcessResult:
+        argv = spec.argv
+        if argv[-2:] == ("searchsploit", "--version"):
+            self.calls.append(spec)
+            return ProcessResult(
+                exit_code=2,
+                stdout="",
+                stderr="Usage: searchsploit [options] term\n",
+            )
+        if argv[-2:] == ("which", "searchsploit"):
+            self.calls.append(spec)
+            return ProcessResult(
+                exit_code=0,
+                stdout="/usr/bin/searchsploit\n",
+                stderr="",
+            )
+        if argv[-3:] == ("dpkg-query", "-S", "/usr/bin/searchsploit"):
+            self.calls.append(spec)
+            return ProcessResult(
+                exit_code=0,
+                stdout="exploitdb: /usr/bin/searchsploit\n",
+                stderr="",
+            )
+        if "dpkg-query" in argv and "-W" in argv:
+            self.calls.append(spec)
+            return ProcessResult(
+                exit_code=0,
+                stdout="20260709-0kali1\n",
+                stderr="",
+            )
+        if argv[-2:] == ("searchsploit", "--help"):
+            self.calls.append(spec)
+            return ProcessResult(
+                exit_code=0,
+                stdout="Usage: searchsploit [options] term\n",
+                stderr="",
+            )
+        return await super().run(spec)
+
+
+def test_kali_reuses_locally_available_pinned_image_without_rebuild(tmp_path) -> None:
+    snapshot = EngagementSnapshot(
+        engagement_id=uuid4(),
+        revision=1,
+        previous_snapshot_hash=None,
+        snapshot_hash="0" * 64,
+        confirmed_at=datetime.now(UTC),
+        authorization_attested=True,
+        disclaimer_version="1.0",
+        profile=EnvironmentProfile.PRIVATE_LAB,
+        autonomy=AutonomyMode.CONTROLLED,
+        targets=(TargetSpec(host="192.0.2.10"),),
+        objectives=(Objective(kind="proof"),),
+    )
+    command_runtime = _PinnedImageCommandRuntime()
+    runtime = OnDemandKaliRuntime(
+        snapshot=snapshot,
+        run_root=tmp_path,
+        command_runtime=command_runtime,
+        docker_locator=lambda _: "/usr/local/bin/docker",
+        kali_image_ref=_PINNED_KALI_REF,
+        netguard_image_ref=_PINNED_NETGUARD_REF,
+    )
+
+    asyncio.run(runtime.inspect_tool("searchsploit"))
+
+    commands = [" ".join(call.argv) for call in command_runtime.calls]
+    compose_up = next(
+        call
+        for call in command_runtime.calls
+        if " up " in f" {' '.join(call.argv)} "
+    )
+    assert any(" image inspect " in f" {command} " for command in commands)
+    assert " up --no-build --detach --wait " in f" {' '.join(compose_up.argv)} "
+    assert "--build" not in compose_up.argv
+    assert compose_up.environment["ARIADNE_KALI_IMAGE"] == _PINNED_KALI_REF
+    assert compose_up.environment["ARIADNE_NETGUARD_IMAGE"] == _PINNED_NETGUARD_REF
+
+
+def test_kali_uses_package_metadata_when_tool_has_no_version_flag(tmp_path) -> None:
+    snapshot = EngagementSnapshot(
+        engagement_id=uuid4(),
+        revision=1,
+        previous_snapshot_hash=None,
+        snapshot_hash="0" * 64,
+        confirmed_at=datetime.now(UTC),
+        authorization_attested=True,
+        disclaimer_version="1.0",
+        profile=EnvironmentProfile.PRIVATE_LAB,
+        autonomy=AutonomyMode.CONTROLLED,
+        targets=(TargetSpec(host="192.0.2.10"),),
+        objectives=(Objective(kind="proof"),),
+    )
+    runtime = OnDemandKaliRuntime(
+        snapshot=snapshot,
+        run_root=tmp_path,
+        command_runtime=_SearchSploitPackageVersionRuntime(),
+        docker_locator=lambda _: "/usr/local/bin/docker",
+        kali_image_ref=_PINNED_KALI_REF,
+        netguard_image_ref=_PINNED_NETGUARD_REF,
+    )
+
+    assert asyncio.run(runtime.inspect_tool("searchsploit")) == (
+        "/usr/bin/searchsploit",
+        "20260709-0kali1",
+        "Usage: searchsploit [options] term",
+        "local_help",
+    )
+
+
+def test_kali_startup_error_includes_compose_stdout(tmp_path) -> None:
+    snapshot = EngagementSnapshot(
+        engagement_id=uuid4(),
+        revision=1,
+        previous_snapshot_hash=None,
+        snapshot_hash="0" * 64,
+        confirmed_at=datetime.now(UTC),
+        authorization_attested=True,
+        disclaimer_version="1.0",
+        profile=EnvironmentProfile.PRIVATE_LAB,
+        autonomy=AutonomyMode.CONTROLLED,
+        targets=(TargetSpec(host="192.0.2.10"),),
+        objectives=(Objective(kind="proof"),),
+    )
+    runtime = OnDemandKaliRuntime(
+        snapshot=snapshot,
+        run_root=tmp_path,
+        command_runtime=_PinnedImageCommandRuntime(fail_startup=True),
+        docker_locator=lambda _: "/usr/local/bin/docker",
+        kali_image_ref=_PINNED_KALI_REF,
+        netguard_image_ref=_PINNED_NETGUARD_REF,
+    )
+
+    with pytest.raises(
+        KaliRuntimeUnavailableError,
+        match="netguard unhealthy",
+    ):
+        asyncio.run(runtime.inspect_tool("searchsploit"))
 
 
 def test_kali_starts_once_and_attests_pinned_nuclei_checkout(
@@ -62,6 +236,8 @@ def test_kali_starts_once_and_attests_pinned_nuclei_checkout(
         run_root=tmp_path,
         command_runtime=command_runtime,
         docker_locator=lambda _: "/usr/local/bin/docker",
+        kali_image_ref="",
+        netguard_image_ref="",
     )
     spec = ProcessSpec(
         argv=(
@@ -123,6 +299,8 @@ def test_kali_rejects_a_modified_selected_nuclei_template(tmp_path) -> None:
         run_root=tmp_path,
         command_runtime=_DockerCommandRuntime(dirty_nuclei_template=True),
         docker_locator=lambda _: "/usr/local/bin/docker",
+        kali_image_ref="",
+        netguard_image_ref="",
     )
     spec = ProcessSpec(
         argv=(

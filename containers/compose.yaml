@@ -7,6 +7,8 @@ name: ariadne
 
 services:
   netguard:
+    image: ${ARIADNE_NETGUARD_IMAGE:-ariadne-netguard:local-build}
+    pull_policy: never
     build:
       context: .
       dockerfile: netguard/Dockerfile
@@ -22,6 +24,9 @@ services:
     restart: "no"
 
   kali:
+    image: ${ARIADNE_KALI_IMAGE:-ariadne-kali:local-build}
+    pull_policy: never
+    command: ["sleep", "infinity"]
     build:
       context: .
       dockerfile: kali/Dockerfile

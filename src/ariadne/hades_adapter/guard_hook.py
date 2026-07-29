@@ -44,6 +44,8 @@ ALWAYS_ALLOWED: frozenset[str] = frozenset({
     "web_search",
     "clarify",
     "session_search",
+    "skill_view",
+    "skills_list",
 })
 
 

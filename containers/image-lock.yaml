@@ -26,6 +26,18 @@ images:
     retrieved_at: "2026-07-29T00:00:00Z"
     url: "https://hub.docker.com/r/kalilinux/kali-rolling"
 
+  - image: "ariadne-kali"
+    digest: "sha256:38348d7ab556982555ffcea3fcfd0aa9ffaa30286ce4fcc3802cb92aa2c15b67"
+    platform: "linux/arm64"
+    retrieved_at: "2026-07-29T00:00:00Z"
+    url: "file://containers/kali/Dockerfile"
+
+  - image: "ariadne-netguard"
+    digest: "sha256:0da048944617b30d54d330d8fd983924ccc2bef45205e901f467229808a95789"
+    platform: "linux/arm64"
+    retrieved_at: "2026-07-29T00:00:00Z"
+    url: "file://containers/netguard/Dockerfile"
+
   - image: "softwaresecurityproject/zap-stable"
     digest: "sha256:b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c"
     platform: "linux/amd64"
