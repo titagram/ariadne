@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from ariadne.core.engagement import (
     EngagementDraft,
@@ -198,6 +198,7 @@ class AriadneCommand:
         )
         handle = self.store.create(snapshot)
         now = datetime.now(UTC)
+        transaction_id = uuid4().hex
         from ariadne.store.run_store import Event
 
         self.store.append_event(
@@ -206,6 +207,7 @@ class AriadneCommand:
                 event_type="engagement_locked",
                 payload={
                     "snapshot_hash": snapshot.snapshot_hash,
+                    "transaction_id": transaction_id,
                     "authorization_attested": True,
                     "disclaimer_version": CURRENT_DISCLAIMER_VERSION,
                     "profile": snapshot.profile.value,
@@ -225,6 +227,7 @@ class AriadneCommand:
                 payload={
                     "session_id": session_id,
                     "snapshot_hash": snapshot.snapshot_hash,
+                    "transaction_id": transaction_id,
                 },
                 timestamp=now,
             ),

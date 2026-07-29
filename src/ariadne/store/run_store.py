@@ -406,27 +406,35 @@ class RunStore:
                 continue
             if calculate_snapshot_hash(snapshot) != snapshot.snapshot_hash:
                 continue
-            lock_seen = False
-            for event in self.read_events(handle):
-                payload = event.get("payload", {})
-                if event.get("event_type") == "engagement_locked":
-                    lock_seen = (
-                        payload.get("snapshot_hash") == snapshot.snapshot_hash
-                        and payload.get("authorization_attested")
-                        is snapshot.authorization_attested
-                        and snapshot.authorization_attested
-                        and payload.get("disclaimer_version")
-                        == snapshot.disclaimer_version
-                    )
+            events = self.read_events(handle)
+            for index, event in enumerate(events[:-1]):
+                if event.get("event_type") != "engagement_locked":
                     continue
+                payload = event.get("payload", {})
+                transaction_id = payload.get("transaction_id")
+                if not isinstance(transaction_id, str) or not transaction_id:
+                    continue
+                lock_valid = (
+                    payload.get("snapshot_hash") == snapshot.snapshot_hash
+                    and payload.get("authorization_attested")
+                    is snapshot.authorization_attested
+                    and snapshot.authorization_attested
+                    and payload.get("disclaimer_version")
+                    == snapshot.disclaimer_version
+                )
+                if not lock_valid:
+                    continue
+                binding_event = events[index + 1]
+                binding_payload = binding_event.get("payload", {})
                 if (
-                    lock_seen
-                    and event.get("event_type") == "session_bound"
-                    and payload.get("session_id") == session_id
-                    and payload.get("snapshot_hash") == snapshot.snapshot_hash
-                    and event.get("timestamp", "") >= latest_timestamp
+                    binding_event.get("event_type") == "session_bound"
+                    and binding_payload.get("transaction_id") == transaction_id
+                    and binding_payload.get("session_id") == session_id
+                    and binding_payload.get("snapshot_hash")
+                    == snapshot.snapshot_hash
+                    and binding_event.get("timestamp", "") >= latest_timestamp
                 ):
-                    latest_timestamp = event.get("timestamp", "")
+                    latest_timestamp = binding_event.get("timestamp", "")
                     latest = {
                         "session_id": session_id,
                         "engagement_id": str(snapshot.engagement_id),

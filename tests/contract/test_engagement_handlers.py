@@ -202,6 +202,23 @@ def test_partial_prepare_never_binds_in_memory_or_after_restart(
     assert recreated.get_session_binding("partial-session") is None
 
 
+def test_prepare_persists_adjacent_correlated_transaction_events(
+    command: AriadneCommand,
+    valid_answers: dict,
+) -> None:
+    created = command.prepare(valid_answers, session_id="correlated-session")
+    handle = command.store.open(created.engagement_id)
+    assert handle is not None
+    events = command.store.read_events(handle)
+    assert [event["event_type"] for event in events] == [
+        "engagement_locked",
+        "session_bound",
+    ]
+    transaction_id = events[0]["payload"]["transaction_id"]
+    assert transaction_id
+    assert events[1]["payload"]["transaction_id"] == transaction_id
+
+
 @pytest.mark.asyncio
 async def test_recovery_rejects_isolated_session_bound_event(
     tmp_path,
@@ -300,3 +317,69 @@ def test_recovery_fails_closed_on_manifest_or_event_tampering(
         store=RunStore(base_path=tmp_path),
     )
     assert recreated.get_session_binding(f"{tamper}-session") is None
+
+
+@pytest.mark.parametrize("variant", ["missing", "mismatch", "intermediate"])
+def test_recovery_rejects_uncorrelated_or_nonadjacent_transaction_events(
+    tmp_path,
+    variant: str,
+) -> None:
+    store = RunStore(base_path=tmp_path)
+    snapshot = lock_attested_engagement(
+        EngagementDraft(
+            authorization_attested=True,
+            disclaimer_version=CURRENT_DISCLAIMER_VERSION,
+            profile=EnvironmentProfile.PRIVATE_LAB,
+            autonomy=AutonomyMode.FULL,
+            target=TargetSpec(host="192.168.2.148"),
+            objectives=[Objective(kind="proof")],
+        ),
+        max_duration_minutes=30,
+    )
+    handle = store.create(snapshot)
+    from datetime import UTC, datetime
+
+    lock_transaction = "" if variant == "missing" else "transaction-a"
+    bind_transaction = (
+        "transaction-b" if variant == "mismatch" else lock_transaction
+    )
+    store.append_event(
+        handle,
+        Event(
+            event_type="engagement_locked",
+            payload={
+                "snapshot_hash": snapshot.snapshot_hash,
+                "authorization_attested": True,
+                "disclaimer_version": CURRENT_DISCLAIMER_VERSION,
+                "transaction_id": lock_transaction,
+            },
+            timestamp=datetime.now(UTC),
+        ),
+    )
+    if variant == "intermediate":
+        store.append_event(
+            handle,
+            Event(
+                event_type="diagnostic",
+                payload={"status": "intermediate"},
+                timestamp=datetime.now(UTC),
+            ),
+        )
+    store.append_event(
+        handle,
+        Event(
+            event_type="session_bound",
+            payload={
+                "session_id": f"{variant}-transaction-session",
+                "snapshot_hash": snapshot.snapshot_hash,
+                "transaction_id": bind_transaction,
+            },
+            timestamp=datetime.now(UTC),
+        ),
+    )
+
+    recreated = AriadneCommand(ledger=ChallengeLedger(), store=store)
+    assert (
+        recreated.get_session_binding(f"{variant}-transaction-session")
+        is None
+    )

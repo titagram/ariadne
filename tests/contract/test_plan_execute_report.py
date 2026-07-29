@@ -400,6 +400,20 @@ class TestExecutePlanHandler:
         assert replacement.engagement_id is not None
         replacement_handle = command.store.open(replacement.engagement_id)
         assert replacement_handle is not None
+        transaction_id = "replacement-transaction"
+        command.store.append_event(
+            replacement_handle,
+            Event(
+                event_type="engagement_locked",
+                payload={
+                    "snapshot_hash": replacement.snapshot_hash,
+                    "authorization_attested": True,
+                    "disclaimer_version": CURRENT_DISCLAIMER_VERSION,
+                    "transaction_id": transaction_id,
+                },
+                timestamp=datetime.now(UTC),
+            ),
+        )
         command.store.append_event(
             replacement_handle,
             Event(
@@ -407,6 +421,7 @@ class TestExecutePlanHandler:
                 payload={
                     "session_id": session_id,
                     "snapshot_hash": replacement.snapshot_hash,
+                    "transaction_id": transaction_id,
                 },
                 timestamp=datetime.now(UTC),
             ),

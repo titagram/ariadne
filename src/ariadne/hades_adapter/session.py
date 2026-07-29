@@ -1,8 +1,9 @@
-"""Hades session-to-engagement binding and challenge ledger.
+"""Hades session bindings and exceptional-approval challenge ledger.
 
-ChallengeLedger manages one-time use, time-limited challenges that a
-real user must confirm via the /ariadne command before an engagement
-snapshot can be bound to a Hades session.
+Initial engagement locking no longer uses a public confirmation challenge.
+One-time challenges are reserved for exceptional approvals such as scope,
+host installation, and uncurated code. Atomic bindings may use opaque internal
+keys after their correlated durable events have been written.
 """
 
 from __future__ import annotations
