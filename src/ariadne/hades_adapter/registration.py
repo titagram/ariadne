@@ -20,20 +20,18 @@ from ariadne.hades_adapter.handlers import (
 from ariadne.hades_adapter.schemas import ARIADNE_TOOLS
 
 
-def register_plugin(ctx: object, services: ServiceContainer) -> None:
+def register_plugin(ctx: Any, services: ServiceContainer) -> None:
     """Register the Ariadne skill, tools, command, and guard hook."""
     _register_skill(ctx)
     _register_tools(ctx, services)
     _register_command(ctx, services)
-    # Guard hook disabled per user request — allows terminal during engagement.
-    # Re-enable by uncommenting the line below.
-    # _register_hook(ctx, services)
+    _register_hook(ctx, services)
 
 
 # ── internal helpers ───────────────────────────────────────────────────
 
 
-def _register_skill(ctx: object) -> None:
+def _register_skill(ctx: Any) -> None:
     manifest = getattr(ctx, "manifest", None)
     plugin_root = getattr(manifest, "path", None)
     skill_path = (
@@ -48,7 +46,7 @@ def _register_skill(ctx: object) -> None:
     )
 
 
-def _register_tools(ctx: object, services: ServiceContainer) -> None:
+def _register_tools(ctx: Any, services: ServiceContainer) -> None:
     for tool_name, reg in ARIADNE_TOOLS.items():
         handler = _handler_for(tool_name, services)
         ctx.register_tool(
@@ -63,7 +61,7 @@ def _register_tools(ctx: object, services: ServiceContainer) -> None:
         )
 
 
-def _register_command(ctx: object, services: ServiceContainer) -> None:
+def _register_command(ctx: Any, services: ServiceContainer) -> None:
     """Register /ariadne as a command handler that delegates to AriadneCommand."""
 
     async def command_handler(args: str, **context: object) -> dict[str, object]:
@@ -82,10 +80,10 @@ def _register_command(ctx: object, services: ServiceContainer) -> None:
     )
 
 
-def _register_hook(ctx: object, services: ServiceContainer) -> None:
+def _register_hook(ctx: Any, services: ServiceContainer) -> None:
     from ariadne.hades_adapter.guard_hook import GuardHook
 
-    hook = GuardHook(services.ledger)
+    hook = GuardHook(services.command)
     ctx.register_hook(
         hook_name="pre_tool_call",
         callback=hook,

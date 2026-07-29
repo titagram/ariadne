@@ -18,7 +18,7 @@ from ariadne.adapters import AdapterRegistry
 from ariadne.adapters.base import AdapterContext, Runtime
 from ariadne.core.engagement import EngagementSnapshot, TargetSpec
 from ariadne.core.enums import AssetStatus, AutonomyMode, EngagementState
-from ariadne.core.errors import WorkflowConfigurationError
+from ariadne.core.errors import PolicyConfigurationError, WorkflowConfigurationError
 from ariadne.core.observations import Asset, Hypothesis, Observation
 from ariadne.core.planner import Planner
 from ariadne.core.policy import EffectivePolicy
@@ -247,7 +247,7 @@ async def handle_prepare_engagement(
             validated.model_dump(),
             session_id=session_id,
         )
-    except (OSError, ValueError, TypeError) as exc:
+    except (OSError, PolicyConfigurationError, ValueError, TypeError) as exc:
         return {
             "status": "error",
             "message": f"Engagement was not locked: {exc}",
@@ -395,7 +395,17 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
     )
 
     # Load effective policy from the store's engagement.lock.yaml
-    effective_policy = _load_engagement_policy(snapshot)
+    try:
+        effective_policy = _load_engagement_policy(snapshot)
+    except PolicyConfigurationError as exc:
+        return {
+            "status": "error",
+            "message": (
+                f"Policy provenance check failed: {exc}. "
+                "Create a new snapshot or explicit scope amendment."
+            ),
+            "plan_id": "",
+        }
 
     planning_context = PlanningContext(
         snapshot=snapshot,
@@ -624,7 +634,30 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             "plan_id": plan_id,
         }
 
-    # 4. Check plan is approved
+    # 4. Re-load the frozen policy sources and re-authorize capabilities.
+    try:
+        execution_policy = _load_engagement_policy(run_handle.snapshot)
+    except PolicyConfigurationError as exc:
+        return {
+            "status": "error",
+            "message": (
+                f"Policy provenance check failed: {exc}. "
+                "Create a new snapshot or explicit scope amendment."
+            ),
+            "plan_id": plan_id,
+        }
+    if any(
+        capability not in execution_policy.capabilities
+        or not execution_policy.capabilities[capability].allowed
+        for capability in record.plan.capabilities
+    ):
+        return {
+            "status": "error",
+            "message": "Plan capabilities are no longer authorized by effective policy.",
+            "plan_id": plan_id,
+        }
+
+    # 5. Check plan is approved
     if not record.approved:
         return {
             "status": "error",
@@ -635,7 +668,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             "plan_id": plan_id,
         }
 
-    # 5. Check plan has not expired
+    # 6. Check plan has not expired
     if cmd.is_plan_expired(plan_id):
         return {
             "status": "error",
@@ -643,7 +676,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             "plan_id": plan_id,
         }
 
-    # 6. Execute plan actions via registered adapters
+    # 7. Execute plan actions via registered adapters
     registry = _get_adapter_registry(context)
     runtime = _get_runtime(context)
 
@@ -1042,36 +1075,12 @@ def _get_run_handle(store: RunStore, engagement_id: Any) -> RunHandle | None:
 def _load_engagement_policy(
     snapshot: EngagementSnapshot,
 ) -> EffectivePolicy:
-    """Load or construct an effective policy for this engagement.
+    """Rebuild and verify the policy sources frozen into the snapshot."""
+    from ariadne.core.policy import build_effective_policy
 
-    For the vertical slice, build a minimal permissive policy from
-    the snapshot's engagement constraints so that Planner validation
-    (capability checks) can exercise real rejection paths.
-    """
-    from ariadne.core.policy import CapabilityRule
-
-    return EffectivePolicy(
-        name=f"engagement-{snapshot.engagement_id}",
-        version=1,
-        capabilities={
-            "preflight.check": CapabilityRule(allowed=True),
-            "scan.tcp": CapabilityRule(allowed=True),
-            "scan.port": CapabilityRule(allowed=True),
-            "service.discovery": CapabilityRule(allowed=True),
-            "service.enum": CapabilityRule(allowed=True),
-            "service.routing": CapabilityRule(allowed=True),
-            "research.vulnerability": CapabilityRule(allowed=True),
-            "exploit.validation": CapabilityRule(allowed=True),
-            "foothold.confirm": CapabilityRule(allowed=True),
-            "postex.enum": CapabilityRule(allowed=True),
-            "privesc.enum": CapabilityRule(allowed=True),
-            "objective.check": CapabilityRule(allowed=True),
-            "cleanup.execute": CapabilityRule(allowed=True),
-            "report.render": CapabilityRule(allowed=True),
-            "exploit": CapabilityRule(allowed=False),
-            "resource.stress": CapabilityRule(allowed=False),
-            "persistence": CapabilityRule(allowed=False),
-            "lateral_movement": CapabilityRule(allowed=False),
-        },
-        source_digests=(),
-    )
+    effective = build_effective_policy(snapshot.profile, snapshot.constraints)
+    if not snapshot.policy_source_digests:
+        raise PolicyConfigurationError("snapshot has no policy provenance")
+    if effective.source_digests != snapshot.policy_source_digests:
+        raise PolicyConfigurationError("policy source digests changed")
+    return effective

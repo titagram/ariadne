@@ -42,7 +42,11 @@ def snapshot() -> EngagementSnapshot:
     )
     from ariadne.core.engagement import lock_engagement
 
-    return lock_engagement(draft, confirmation)
+    return lock_engagement(
+        draft,
+        confirmation,
+        policy_source_digests=("a" * 64, "b" * 64, "c" * 64),
+    )
 
 
 @pytest.fixture

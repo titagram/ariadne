@@ -75,6 +75,10 @@ base policy ∩ environment profile ∩ engagement snapshot ∩ action plan
 A lower layer may restrict a capability but may never expand a higher layer.
 The `authorize()` function in `policy.py` is fail-closed: unknown capability,
 ambiguous policy, stale approval, or malformed input stops execution.
+Partial environment overlays are materialized from the complete base capability
+map, then intersected with base and engagement rate/concurrency/duration
+restrictions. The three semantic source digests are frozen into the snapshot
+self-hash and revalidated at proposal and execution time.
 
 ### State machine
 

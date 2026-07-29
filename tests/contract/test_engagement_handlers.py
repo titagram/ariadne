@@ -12,6 +12,7 @@ from ariadne.core.engagement import (
     lock_attested_engagement,
 )
 from ariadne.core.enums import AutonomyMode, EnvironmentProfile
+from ariadne.core.errors import PolicyConfigurationError
 from ariadne.hades_adapter.commands import CURRENT_DISCLAIMER_VERSION, AriadneCommand
 from ariadne.hades_adapter.handlers import (
     handle_prepare_engagement,
@@ -103,6 +104,14 @@ async def test_prepare_atomically_locks_and_binds_trusted_session(
     binding = command.get_session_binding("trusted-hades-session")
     assert binding is not None
     assert binding.snapshot_hash == result["snapshot_hash"]
+    assert binding.engagement_id is not None
+    snapshot = command.store.open(binding.engagement_id).snapshot
+    assert len(snapshot.policy_source_digests) == 3
+    assert all(snapshot.policy_source_digests)
+    events = command.store.read_events(command.store.open(binding.engagement_id))
+    assert events[0]["payload"]["policy_source_digests"] == list(
+        snapshot.policy_source_digests,
+    )
 
 
 @pytest.mark.asyncio
@@ -140,6 +149,30 @@ async def test_prepare_rejects_missing_authorization_or_wrong_disclaimer(
     )
     assert result["status"] == "error"
     assert expected in result["message"].lower()
+    assert list(command.store.iter_snapshots()) == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_fails_closed_when_policy_sources_cannot_load(
+    command: AriadneCommand,
+    valid_answers: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing or malformed policy file must not escape the tool boundary."""
+    from ariadne.hades_adapter import commands
+
+    def reject_policy(profile, constraints):
+        raise PolicyConfigurationError("policy source unavailable")
+
+    monkeypatch.setattr(commands, "build_effective_policy", reject_policy)
+    result = await handle_prepare_engagement(
+        valid_answers,
+        session_id="trusted-hades-session",
+        ariadne_command=command,
+    )
+
+    assert result["status"] == "error"
+    assert "policy source unavailable" in result["message"]
     assert list(command.store.iter_snapshots()) == []
 
 
@@ -236,6 +269,7 @@ async def test_recovery_rejects_isolated_session_bound_event(
             objectives=[Objective(kind="proof")],
         ),
         max_duration_minutes=30,
+        policy_source_digests=("a" * 64, "b" * 64, "c" * 64),
     )
     handle = store.create(snapshot)
     from datetime import UTC, datetime
@@ -335,6 +369,7 @@ def test_recovery_rejects_uncorrelated_or_nonadjacent_transaction_events(
             objectives=[Objective(kind="proof")],
         ),
         max_duration_minutes=30,
+        policy_source_digests=("a" * 64, "b" * 64, "c" * 64),
     )
     handle = store.create(snapshot)
     from datetime import UTC, datetime

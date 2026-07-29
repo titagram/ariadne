@@ -14,10 +14,24 @@ from ariadne.core.engagement import (
     TargetSpec,
     amend_scope,
     calculate_snapshot_hash,
-    lock_engagement,
+)
+from ariadne.core.engagement import (
+    lock_engagement as _lock_engagement,
 )
 from ariadne.core.enums import AutonomyMode, EnvironmentProfile
 from ariadne.core.errors import ConfirmationError, ScopeError
+
+POLICY_SOURCE_DIGESTS = ("a" * 64, "b" * 64, "c" * 64)
+
+
+def lock_engagement(
+    draft: EngagementDraft,
+    confirmation: Confirmation,
+    **kwargs: object,
+):
+    """Create a non-legacy snapshot in unit contracts by default."""
+    kwargs.setdefault("policy_source_digests", POLICY_SOURCE_DIGESTS)
+    return _lock_engagement(draft, confirmation, **kwargs)
 
 
 @pytest.fixture
@@ -73,6 +87,46 @@ def test_public_snapshot_hash_recalculation_detects_tampered_content(
         update={"targets": (TargetSpec(host="10.10.10.99"),)}
     )
     assert calculate_snapshot_hash(tampered) != tampered.snapshot_hash
+
+
+def test_snapshot_hash_covers_policy_source_digests(
+    confirmed_draft: EngagementDraft,
+    confirmation: Confirmation,
+) -> None:
+    """Changing frozen policy provenance must invalidate the self-hash."""
+    snapshot = lock_engagement(
+        confirmed_draft,
+        confirmation,
+        policy_source_digests=("a" * 64, "b" * 64, "c" * 64),
+    )
+    changed = snapshot.model_copy(
+        update={"policy_source_digests": ("d" * 64,)},
+    )
+
+    assert snapshot.policy_source_digests == (
+        "a" * 64,
+        "b" * 64,
+        "c" * 64,
+    )
+    assert calculate_snapshot_hash(changed) != snapshot.snapshot_hash
+
+
+def test_attested_lock_rejects_empty_policy_provenance(
+    confirmed_draft: EngagementDraft,
+) -> None:
+    """Operational engagement creation must never produce legacy provenance."""
+    from ariadne.core.engagement import lock_attested_engagement
+
+    with pytest.raises(ConfirmationError, match="(?i)policy provenance"):
+        lock_attested_engagement(confirmed_draft)
+
+
+def test_confirmed_lock_rejects_empty_policy_provenance(
+    confirmed_draft: EngagementDraft,
+    confirmation: Confirmation,
+) -> None:
+    with pytest.raises(ConfirmationError, match="(?i)policy provenance"):
+        _lock_engagement(confirmed_draft, confirmation)
 
 
 # ── Confirmation validation ─────────────────────────────────────────────────

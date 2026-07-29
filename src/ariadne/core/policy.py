@@ -11,16 +11,23 @@ Effective permission is an intersection:
 A lower layer may restrict a capability but may never expand a higher layer.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import re
 from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 from pydantic import BaseModel, ConfigDict
 
+from ariadne.core.enums import EnvironmentProfile
 from ariadne.core.errors import PolicyConfigurationError
+
+if TYPE_CHECKING:
+    from ariadne.core.engagement import EngagementConstraints
 
 # ── Models ────────────────────────────────────────────────────────────────────
 
@@ -238,6 +245,64 @@ def load_policy(path: Path) -> PolicyDocument:
         raise PolicyConfigurationError(
             f"Policy validation failed for {path}: {exc}"
         ) from exc
+
+
+def materialize_profile(
+    base: PolicyDocument,
+    overlay: PolicyDocument,
+) -> PolicyDocument:
+    """Expand a partial profile overlay to every base capability.
+
+    Unknown overlay capabilities are rejected because a profile cannot create
+    authority absent from the base. The returned document is still intersected
+    with ``base`` by :func:`build_effective_policy`, so a permissive override
+    cannot amplify a base rule.
+    """
+    unknown = set(overlay.capabilities) - set(base.capabilities)
+    if unknown:
+        raise PolicyConfigurationError(
+            f"Profile {overlay.name!r} contains capabilities absent from base: "
+            f"{sorted(unknown)}"
+        )
+    capabilities = dict(base.capabilities)
+    capabilities.update(overlay.capabilities)
+    return PolicyDocument(
+        name=f"{overlay.name}-materialized",
+        version=max(base.version, overlay.version),
+        capabilities=capabilities,
+    )
+
+
+def build_effective_policy(
+    profile: EnvironmentProfile,
+    constraints: EngagementConstraints,
+    *,
+    policy_dir: Path | None = None,
+) -> EffectivePolicy:
+    """Load and intersect base, materialized profile, and engagement limits."""
+    root = (
+        policy_dir
+        if policy_dir is not None
+        else Path(__file__).resolve().parents[3] / "policies"
+    )
+    base = load_policy(root / "base.yaml")
+    overlay = load_policy(root / f"{profile.value}.yaml")
+    materialized = materialize_profile(base, overlay)
+    engagement_rules = {
+        capability: CapabilityRule(
+            allowed=True,
+            max_rate=constraints.max_requests_per_second,
+            max_concurrency=constraints.max_concurrent_checks,
+            max_duration_seconds=constraints.max_duration_minutes * 60,
+        )
+        for capability in base.capabilities
+    }
+    engagement = PolicyDocument(
+        name="engagement-constraints",
+        version=1,
+        capabilities=engagement_rules,
+    )
+    return intersect_policies(base, materialized, engagement)
 
 
 def intersect_policies(*documents: PolicyDocument) -> EffectivePolicy:

@@ -17,6 +17,7 @@ import pytest
 from ariadne.core.canonical import canonical_digest
 from ariadne.core.engagement import (
     Confirmation,
+    EngagementConstraints,
     EngagementDraft,
     EngagementSnapshot,
     Objective,
@@ -30,8 +31,7 @@ from ariadne.core.policy import (
     EffectivePolicy,
     PolicyDecision,
     authorize,
-    intersect_policies,
-    load_policy,
+    build_effective_policy,
 )
 from ariadne.reporting.models import RenderedReport
 from ariadne.reporting.pdf import PdfExporter
@@ -114,11 +114,18 @@ class HadesTestFixture:
     # ── Internal helpers ─────────────────────────────────────────────────
 
     def _load_effective_policy(self, profile: str) -> EffectivePolicy:
-        """Load and intersect base + profile policies."""
+        """Load base, complete profile, and engagement restrictions."""
         if profile not in self._policies:
-            base = load_policy(self._policy_dir / "base.yaml")
-            env_policy = load_policy(self._policy_dir / f"{profile}.yaml")
-            self._policies[profile] = intersect_policies(base, env_policy)
+            profile_enum = (
+                EnvironmentProfile.HTB
+                if profile == "htb"
+                else EnvironmentProfile.PRIVATE_LAB
+            )
+            self._policies[profile] = build_effective_policy(
+                profile_enum,
+                EngagementConstraints(),
+                policy_dir=self._policy_dir,
+            )
         return self._policies[profile]
 
     def _create_engagement(
@@ -149,7 +156,12 @@ class HadesTestFixture:
             expires_at=now + timedelta(minutes=5),
             actor="user",
         )
-        snapshot = lock_engagement(draft, confirmation)
+        effective_policy = self._load_effective_policy(profile)
+        snapshot = lock_engagement(
+            draft,
+            confirmation,
+            policy_source_digests=effective_policy.source_digests,
+        )
         handle = self._store.create(snapshot)
         return EngagementResult(
             snapshot=snapshot,

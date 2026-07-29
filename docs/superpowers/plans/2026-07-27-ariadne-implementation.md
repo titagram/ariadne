@@ -27,6 +27,9 @@
   invariants.
 - Hades `--yolo` has no effect on Ariadne guardrails.
 - Newly discovered assets are `observed_only` until a direct scope amendment creates a new immutable snapshot.
+- Base, materialized profile, and engagement-limit policy digests are frozen
+  into the snapshot hash and revalidated before every proposal and execution;
+  policy drift requires a new snapshot or explicit amendment.
 - HTB policy forbids denial of service, resource exhaustion, subnet scanning, and actions against other platform targets.
 - Docker is the only execution environment; there is no VM fallback.
 - The primary image is official `kalilinux/kali-rolling` with `kali-linux-headless`; ZAP runs in its official separate image.

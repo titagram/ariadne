@@ -11,7 +11,7 @@ therefore remains active regardless of that flag.
 
 from __future__ import annotations
 
-from ariadne.hades_adapter.session import ChallengeLedger
+from ariadne.hades_adapter.commands import AriadneCommand
 
 ARIADNE_TOOLS: frozenset[str] = frozenset({
     "ariadne_prepare_engagement",
@@ -22,12 +22,17 @@ ARIADNE_TOOLS: frozenset[str] = frozenset({
 })
 
 GENERIC_EXECUTION_TOOLS: frozenset[str] = frozenset({
+    "execute_code",
     "terminal",
     "shell",
     "python",
+    "python_exec",
     "computer",
     "write_file",
+    "patch",
     "apply_patch",
+    "edit_file",
+    "delete_file",
 })
 
 # Conversational and read-only tools that are always permitted.
@@ -35,10 +40,7 @@ ALWAYS_ALLOWED: frozenset[str] = frozenset({
     "read_file",
     "search_files",
     "web_search",
-    "web_extract",
-    "web_crawl",
     "clarify",
-    "memory",
     "session_search",
 })
 
@@ -51,10 +53,10 @@ class GuardHook:
     is a generic execution or file-mutation tool, the call is blocked.
     """
 
-    __slots__ = ("_ledger",)
+    __slots__ = ("_command",)
 
-    def __init__(self, ledger: ChallengeLedger) -> None:
-        self._ledger = ledger
+    def __init__(self, command: AriadneCommand) -> None:
+        self._command = command
 
     def __call__(self, **payload: object) -> dict[str, str] | None:
         """Evaluate the tool call and block if it violates guardrails.
@@ -79,16 +81,28 @@ class GuardHook:
         if tool_name in ALWAYS_ALLOWED:
             return None
 
-        # If the session is bound to an engagement, block execution tools.
-        if self._ledger.is_session_bound(session_id) and tool_name in GENERIC_EXECUTION_TOOLS:
+        try:
+            is_bound = self._command.get_session_binding(session_id) is not None
+        except Exception as exc:
             return {
-                    "action": "block",
-                    "message": (
-                        f"Tool '{tool_name}' is blocked during an active "
-                        "Ariadne engagement. Use Ariadne's tools to perform "
-                        "engagement actions."
-                    ),
-                }
+                "action": "block",
+                "message": (
+                    "Ariadne could not verify the durable session binding; "
+                    f"tool call blocked fail-closed: {exc}"
+                ),
+            }
 
-        # No active engagement or unrecognised tool — allow.
+        # During a bound engagement only Ariadne and the explicit read-only
+        # allowlist are permitted. Unknown/ambiguous tools fail closed.
+        if is_bound:
+            return {
+                "action": "block",
+                "message": (
+                    f"Tool '{tool_name}' is blocked during an active "
+                    "Ariadne engagement. Use Ariadne's tools to perform "
+                    "engagement actions."
+                ),
+            }
+
+        # No active engagement — Ariadne does not constrain the host session.
         return None

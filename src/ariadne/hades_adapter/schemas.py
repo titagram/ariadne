@@ -80,6 +80,18 @@ class PrepareEngagementInput(BaseModel):
         le=1440,
         description="Maximum engagement duration in minutes.",
     )
+    max_requests_per_second: int = Field(
+        default=10,
+        ge=1,
+        le=1000,
+        description="Maximum target requests per second.",
+    )
+    max_concurrent_checks: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        description="Maximum concurrent target checks.",
+    )
     notes: str = Field(
         default="",
         max_length=4000,

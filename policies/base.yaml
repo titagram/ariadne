@@ -186,6 +186,167 @@ capabilities:
     allowed: true
     always_manual: true
 
+  # ── Workflow-core capabilities (curated and bounded) ────────────────
+  preflight.check: &workflow_low
+    allowed: true
+    max_rate: 5
+    max_concurrency: 2
+    max_attempts: 3
+    max_duration_seconds: 600
+    max_output_bytes: 10_000_000
+  service.routing:
+    <<: *workflow_low
+  research.vulnerability:
+    <<: *workflow_low
+  exploit.validation:
+    <<: *workflow_low
+  exploit.payload_upload:
+    <<: *workflow_low
+  foothold.confirm:
+    <<: *workflow_low
+  objective.check:
+    <<: *workflow_low
+  cleanup.execute:
+    <<: *workflow_low
+  report.render:
+    <<: *workflow_low
+
+  # ── Protocol-specific enumeration ───────────────────────────────────
+  service.dns: &service_specific
+    allowed: true
+    max_rate: 20
+    max_concurrency: 2
+    max_attempts: 3
+    max_duration_seconds: 1800
+    max_output_bytes: 25_000_000
+  service.ssh:
+    <<: *service_specific
+  service.ftp:
+    <<: *service_specific
+  service.smtp:
+    <<: *service_specific
+  service.smb:
+    <<: *service_specific
+  service.ldap:
+    <<: *service_specific
+  service.kerberos:
+    <<: *service_specific
+  service.winrm:
+    <<: *service_specific
+  service.rdp:
+    <<: *service_specific
+  service.snmp:
+    <<: *service_specific
+  service.database:
+    <<: *service_specific
+  service.research_only:
+    <<: *service_specific
+
+  # ── Curated web workflow adapters ───────────────────────────────────
+  web.fingerprint: &web_workflow
+    allowed: true
+    max_rate: 20
+    max_concurrency: 3
+    max_attempts: 3
+    max_duration_seconds: 3600
+    max_output_bytes: 50_000_000
+  web.content_discovery:
+    <<: *web_workflow
+  web.nuclei_scan:
+    <<: *web_workflow
+  web.specialist_test:
+    <<: *web_workflow
+
+  # ── Local enumeration and privilege-escalation checks ───────────────
+  postex.enum: &local_enum
+    allowed: true
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 3
+    max_duration_seconds: 3600
+    max_output_bytes: 50_000_000
+  postex.linux.enum:
+    <<: *local_enum
+  postex.linux.identity:
+    <<: *local_enum
+  postex.windows.enum:
+    <<: *local_enum
+  postex.windows.identity:
+    <<: *local_enum
+  privesc.enum:
+    <<: *local_enum
+  privesc.linux.sudo:
+    <<: *local_enum
+  privesc.linux.suid:
+    <<: *local_enum
+  privesc.linux.capabilities:
+    <<: *local_enum
+  privesc.linux.scheduled_tasks:
+    <<: *local_enum
+  privesc.linux.services:
+    <<: *local_enum
+  privesc.linux.linpeas:
+    <<: *local_enum
+  privesc.linux.pspy:
+    <<: *local_enum
+  privesc.windows.token:
+    <<: *local_enum
+  privesc.windows.services:
+    <<: *local_enum
+  privesc.windows.scheduled_tasks:
+    <<: *local_enum
+  privesc.windows.registry:
+    <<: *local_enum
+  privesc.windows.winpeas:
+    <<: *local_enum
+  privesc.windows.privesccheck:
+    <<: *local_enum
+  privesc.windows.seatbelt:
+    <<: *local_enum
+
+  # ── Active Directory discovery ──────────────────────────────────────
+  ad.discovery: &ad_read
+    allowed: true
+    max_rate: 10
+    max_concurrency: 1
+    max_attempts: 3
+    max_duration_seconds: 3600
+    max_output_bytes: 100_000_000
+  ad.enum:
+    <<: *ad_read
+  ad.bloodhound:
+    <<: *ad_read
+  ad.certipy_find:
+    <<: *ad_read
+
+  # ── High-impact AD and pivot operations are never delegated ────────
+  ad.password_spray: &high_impact_manual
+    allowed: true
+    always_manual: true
+    max_rate: 2
+    max_concurrency: 1
+    max_attempts: 3
+    max_duration_seconds: 1800
+    max_output_bytes: 50_000_000
+  ad.credential_dump:
+    <<: *high_impact_manual
+  ad.ntlm_poisoning:
+    <<: *high_impact_manual
+  ad.ntlm_relay:
+    <<: *high_impact_manual
+  ad.ticket_manipulation:
+    <<: *high_impact_manual
+  ad.object_modification:
+    <<: *high_impact_manual
+  ad.adcs_abuse:
+    <<: *high_impact_manual
+  pivot.tunnel:
+    <<: *high_impact_manual
+  pivot.route:
+    <<: *high_impact_manual
+  pivot.scan:
+    <<: *high_impact_manual
+
   # ── Evidence and cleanup ─────────────────────────────────────────────
   evidence.collect:
     allowed: true

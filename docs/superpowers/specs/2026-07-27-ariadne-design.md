@@ -348,6 +348,15 @@ base policy
 ```
 
 A lower layer may restrict a capability but may never expand a higher layer.
+Profile YAML files are partial overlays. Ariadne first materializes each
+profile to every base capability, then intersects base, materialized profile,
+and the request-rate, concurrency, and duration limits frozen in the engagement
+snapshot. Every workflow capability must have an explicit base rule.
+
+The resulting three source digests are part of the immutable snapshot
+self-hash and lock event. Planning and execution rebuild the effective policy
+and compare those digests. Missing or changed policy provenance stops the
+engagement pending a new snapshot or explicit amendment.
 
 ### 7.1 Typed capabilities
 
@@ -394,8 +403,10 @@ testing. It cannot remove v1 base invariants.
 ### 7.3 Enforcement layers
 
 1. Tool handlers revalidate the current snapshot, plan, and capability.
-2. Hades `pre_tool_call` hooks block terminal/code/file bypass attempts during
-   an active engagement.
+2. The Hades `pre_tool_call` hook resolves durable session binding and, during
+   an active engagement, permits only Ariadne tools plus a minimal explicit
+   read-only/conversational allowlist. Execution, mutation, unknown, and
+   ambiguous tools fail closed.
 3. Engagement state is written only through the plugin's store.
 4. Container networking applies the confirmed target allowlist.
 5. Runners enforce timeouts, output bounds, and process-group termination.

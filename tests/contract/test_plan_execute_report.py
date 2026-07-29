@@ -22,6 +22,7 @@ import pytest
 
 from ariadne.adapters import AdapterRegistry, build_default_registry
 from ariadne.adapters.base import ProcessResult, ProcessSpec
+from ariadne.core.errors import PolicyConfigurationError
 from ariadne.core.planner import Planner
 from ariadne.core.policy import CapabilityRule, EffectivePolicy
 from ariadne.core.workflow import WorkflowCatalog
@@ -380,6 +381,34 @@ class TestProposePlanHandler:
         assert record.approved is False
         assert "persist" in result["message"].lower()
 
+    async def test_policy_provenance_drift_blocks_plan_proposal(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Changed policy files must require a new immutable snapshot."""
+        from ariadne.hades_adapter import handlers
+
+        snapshot_hash = await _bind_engagement(command, session_id, autonomy="full")
+
+        def reject_drift(snapshot):
+            raise PolicyConfigurationError("policy source digests changed")
+
+        monkeypatch.setattr(handlers, "_load_engagement_policy", reject_drift)
+        result = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "must stop"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+
+        assert result["status"] == "error"
+        assert "new snapshot" in result["message"].lower()
+
     async def test_plan_requires_approval_before_execution(
         self,
         command: AriadneCommand,
@@ -654,6 +683,45 @@ class TestExecutePlanHandler:
         assert "not been approved" not in result["message"].lower()
         assert result["next_action"] == "continue_until_complete_then_render_offline_report"
         assert "offline report" in result["message"].lower()
+
+    async def test_policy_provenance_drift_blocks_approved_plan_execution(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An approved plan cannot outlive the policy sources frozen at lock."""
+        from ariadne.hades_adapter import handlers
+
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "policy-bound plan"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        command.handle(f"approve {proposed['plan_id']}")
+
+        def reject_drift(snapshot):
+            raise PolicyConfigurationError("policy source digests changed")
+
+        monkeypatch.setattr(handlers, "_load_engagement_policy", reject_drift)
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=command,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+        )
+
+        assert result["status"] == "error"
+        assert "new snapshot" in result["message"].lower()
+        assert fake_runtime.calls == 0
 
 
 class TestRenderReportHandler:

@@ -79,6 +79,7 @@ class Plan(BaseModel):
         target: The target the plan applies to.
         hypothesis: The hypothesis this plan is testing / exploiting.
         playbook_id: The playbook from which this plan was derived.
+        capabilities: Frozen capabilities authorized for the playbook.
         actions: Ordered actions to execute.  Every action's ``argv`` is
             ``None`` at planning time; adapters generate argv at run time.
         limits: Intersected limits (playbook ∩ effective policy).
@@ -101,6 +102,7 @@ class Plan(BaseModel):
     target: TargetSpec
     hypothesis: str
     playbook_id: str
+    capabilities: tuple[str, ...]
     actions: tuple[PlannedAction, ...]
     limits: PlaybookLimits
     expected_evidence: tuple[str, ...]
@@ -228,6 +230,7 @@ class Planner:
             target=target,
             hypothesis=context.hypothesis.statement,
             playbook_id=playbook.id,
+            capabilities=tuple(sorted(playbook.capabilities)),
             actions=planned_actions,
             limits=intersected_limits,
             expected_evidence=tuple(playbook.success_emits),

@@ -15,6 +15,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from ariadne.core.engagement import (
+    EngagementConstraints,
     EngagementDraft,
     Objective,
     TargetSpec,
@@ -22,6 +23,7 @@ from ariadne.core.engagement import (
 )
 from ariadne.core.enums import AutonomyMode, EnvironmentProfile
 from ariadne.core.planner import Plan
+from ariadne.core.policy import build_effective_policy
 from ariadne.hades_adapter.session import ChallengeLedger
 from ariadne.store.run_store import RunStore
 
@@ -194,9 +196,18 @@ class AriadneCommand:
             objectives=objectives,
         )
 
+        constraints = EngagementConstraints(
+            max_concurrent_checks=answers.get("max_concurrent_checks", 5),
+            max_requests_per_second=answers.get("max_requests_per_second", 10),
+            max_duration_minutes=answers.get("time_window_minutes", 60),
+        )
+        effective_policy = build_effective_policy(profile, constraints)
         snapshot = lock_attested_engagement(
             draft,
-            max_duration_minutes=answers.get("time_window_minutes", 60),
+            max_concurrent_checks=constraints.max_concurrent_checks,
+            max_requests_per_second=constraints.max_requests_per_second,
+            max_duration_minutes=constraints.max_duration_minutes,
+            policy_source_digests=effective_policy.source_digests,
         )
         handle = self.store.create(snapshot)
         now = datetime.now(UTC)
@@ -217,6 +228,7 @@ class AriadneCommand:
                     "target": snapshot.targets[0].host,
                     "objectives": [o.model_dump(mode="json") for o in snapshot.objectives],
                     "time_window_minutes": snapshot.constraints.max_duration_minutes,
+                    "policy_source_digests": list(snapshot.policy_source_digests),
                     "notes": answers.get("notes", ""),
                 },
                 timestamp=now,

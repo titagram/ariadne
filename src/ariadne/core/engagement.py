@@ -168,6 +168,7 @@ class EngagementSnapshot(BaseModel):
     targets: tuple[TargetSpec, ...]
     objectives: tuple[Objective, ...]
     constraints: EngagementConstraints = Field(default_factory=EngagementConstraints)
+    policy_source_digests: tuple[str, ...] = ()
 
 
 def _make_content_hash(data: dict) -> str:
@@ -192,6 +193,7 @@ def calculate_snapshot_hash(snapshot: EngagementSnapshot) -> str:
             objective.model_dump(mode="json") for objective in snapshot.objectives
         ],
         "constraints": snapshot.constraints.model_dump(mode="json"),
+        "policy_source_digests": list(snapshot.policy_source_digests),
     }
     return _make_content_hash(data)
 
@@ -199,6 +201,8 @@ def calculate_snapshot_hash(snapshot: EngagementSnapshot) -> str:
 def lock_engagement(
     draft: EngagementDraft,
     confirmation: Confirmation,
+    *,
+    policy_source_digests: tuple[str, ...] = (),
 ) -> EngagementSnapshot:
     """Lock an engagement draft into an immutable snapshot.
 
@@ -209,6 +213,9 @@ def lock_engagement(
     Raises ``ConfirmationError`` if the digest does not match the draft or
     the confirmation has expired.
     """
+    if not policy_source_digests:
+        raise ConfirmationError("Policy provenance is required for a new engagement")
+
     # Validate challenge digest using the canonical digest
     from ariadne.core.canonical import canonical_digest
 
@@ -250,6 +257,7 @@ def lock_engagement(
         "targets": [t.model_dump(mode="json") for t in (draft.target,)],
         "objectives": [o.model_dump(mode="json") for o in draft.objectives],
         "constraints": constraints.model_dump(mode="json"),
+        "policy_source_digests": list(policy_source_digests),
     }
     snapshot_hash = _make_content_hash(data)
 
@@ -266,6 +274,7 @@ def lock_engagement(
         targets=(draft.target,),
         objectives=tuple(draft.objectives),
         constraints=constraints,
+        policy_source_digests=policy_source_digests,
     )
 
 
@@ -273,7 +282,10 @@ def lock_attested_engagement(
     draft: EngagementDraft,
     *,
     confirmed_at: datetime | None = None,
+    max_concurrent_checks: int = 5,
+    max_requests_per_second: int = 10,
     max_duration_minutes: int = 480,
+    policy_source_digests: tuple[str, ...] = (),
 ) -> EngagementSnapshot:
     """Lock a Q/A-attested draft without a second confirmation challenge.
 
@@ -284,12 +296,16 @@ def lock_attested_engagement(
     """
     if not draft.authorization_attested:
         raise ConfirmationError("Authorization attestation is required")
+    if not policy_source_digests:
+        raise ConfirmationError("Policy provenance is required for a new engagement")
     if max_duration_minutes < 1:
         raise ValueError("max_duration_minutes must be positive")
 
     engagement_id = uuid4()
     locked_at = confirmed_at or datetime.now(UTC)
     constraints = EngagementConstraints(
+        max_concurrent_checks=max_concurrent_checks,
+        max_requests_per_second=max_requests_per_second,
         max_duration_minutes=max_duration_minutes,
     )
     data = {
@@ -304,6 +320,7 @@ def lock_attested_engagement(
         "targets": [draft.target.model_dump(mode="json")],
         "objectives": [o.model_dump(mode="json") for o in draft.objectives],
         "constraints": constraints.model_dump(mode="json"),
+        "policy_source_digests": list(policy_source_digests),
     }
     snapshot_hash = _make_content_hash(data)
     return EngagementSnapshot(
@@ -319,6 +336,7 @@ def lock_attested_engagement(
         targets=(draft.target,),
         objectives=tuple(draft.objectives),
         constraints=constraints,
+        policy_source_digests=policy_source_digests,
     )
 
 
@@ -364,6 +382,7 @@ def amend_scope(
         "targets": [t.model_dump(mode="json") for t in targets],
         "objectives": [o.model_dump(mode="json") for o in snapshot.objectives],
         "constraints": constraints.model_dump(mode="json"),
+        "policy_source_digests": list(snapshot.policy_source_digests),
     }
     snapshot_hash = _make_content_hash(data)
 
@@ -380,4 +399,5 @@ def amend_scope(
         targets=targets,
         objectives=snapshot.objectives,
         constraints=constraints,
+        policy_source_digests=snapshot.policy_source_digests,
     )

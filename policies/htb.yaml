@@ -10,6 +10,14 @@ capabilities:
   resource.exhaustion:
     allowed: false
 
+  # Host mutation and uncurated public code are outside the HTB profile.
+  host.install:
+    allowed: false
+    always_manual: true
+  poc.uncurated:
+    allowed: false
+    always_manual: true
+
   # ── Subnet scanning explicitly denied — only single-host targets ─────
   scan.tcp:
     allowed: true
