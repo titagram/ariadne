@@ -45,7 +45,9 @@ def _check_dtd(stdout: str) -> None:
     """
     upper = stdout.upper()
     if "<!ENTITY" in upper:
-        raise AdapterError("XML contains ENTITY declarations — rejected for safety")
+        raise AdapterError(
+            "XML contains a DTD/ENTITY declaration — rejected for safety"
+        )
     # Accept nmap's standard DOCTYPE (case-insensitive), reject any other
     if "<!DOCTYPE" in upper and "<!DOCTYPE NMAPRUN" not in upper:
         raise AdapterError("XML contains unknown DTD — rejected for safety")
@@ -196,27 +198,43 @@ class NmapAdapter:
         # Common base arguments
         argv: list[str] = ["nmap", "-n", "-Pn"]
 
+        default_rate: int
         if op == "tcp_discovery":
-            net_raw = inputs.get("net_raw", True)
+            net_raw = inputs.get("net_raw", False)
             if net_raw:
                 argv.append("-sS")
             else:
                 argv.append("-sT")
-            argv.extend(["--max-rate", "500"])
+            default_rate = 100
         elif op == "service_fingerprint":
-            argv.extend(["-sS", "-sV", "--max-rate", "300"])
-
-
+            argv.extend([
+                "-sS" if inputs.get("net_raw", False) else "-sT",
+                "-sV",
+            ])
+            default_rate = 100
         elif op == "udp_targeted":
             argv.append("-sU")
-            argv.extend(["--max-rate", "50"])
+            default_rate = 50
+
+        rate = _bounded(
+            default_rate,
+            context.limits.max_rate,
+        )
+        argv.extend(["--max-rate", str(rate)])
 
         argv.extend(["-p", port_str, "-oX", "-", "--", target])
 
         return ProcessSpec(
             argv=tuple(argv),
-            timeout_seconds=int(inputs.get("timeout", 300)),  # type: ignore[arg-type]
-            max_output_bytes=int(inputs.get("max_output", 10 * 1024 * 1024)),  # type: ignore[arg-type]
+            cwd=context.cwd,
+            timeout_seconds=_bounded(
+                int(inputs.get("timeout", 300)),  # type: ignore[arg-type]
+                context.limits.max_duration_seconds,
+            ),
+            max_output_bytes=_bounded(
+                int(inputs.get("max_output", 10 * 1024 * 1024)),  # type: ignore[arg-type]
+                context.limits.max_output_bytes,
+            ),
         )
 
     async def execute(
@@ -237,8 +255,11 @@ class NmapAdapter:
             )
             fallback_spec = ProcessSpec(
                 argv=fallback_argv,
+                cwd=spec.cwd,
+                environment=spec.environment,
                 timeout_seconds=spec.timeout_seconds,
                 max_output_bytes=spec.max_output_bytes,
+                stdin=spec.stdin,
             )
             return await runtime.run(fallback_spec)
         return result
@@ -252,7 +273,10 @@ class NmapAdapter:
             return ()
         # Map operation to the evidence type expected by downstream playbooks
         op = self._current_operation
-        source = {"tcp_discovery": "port_open", "service_fingerprint": "service_fingerprinted"}.get(op, op or "nmap")
+        source = {
+            "tcp_discovery": "port_open",
+            "service_fingerprint": "service_fingerprinted",
+        }.get(op, op or "nmap")
         return tuple(_parse_nmap_xml(stdout, source=source))
 
     def classify(
@@ -296,3 +320,7 @@ class NmapAdapter:
         context: AdapterContext,
     ) -> CleanupResult:
         return CleanupResult(success=True, details="No temporary resources to clean up")
+
+
+def _bounded(requested: int, maximum: int | None) -> int:
+    return requested if maximum is None else min(requested, maximum)

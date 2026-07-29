@@ -20,6 +20,7 @@ from ariadne.adapters.base import ProcessResult, ProcessSpec
 from ariadne.core.planner import Planner
 from ariadne.core.policy import CapabilityRule, EffectivePolicy
 from ariadne.core.workflow import WorkflowCatalog
+from ariadne.execution.contracts import ExecutionContractRegistry
 from ariadne.hades_adapter.commands import CURRENT_DISCLAIMER_VERSION, AriadneCommand
 from ariadne.hades_adapter.handlers import (
     _get_run_handle,  # type: ignore[attr-defined]
@@ -292,6 +293,8 @@ class TestAdapterExecution:
             ariadne_command=command,
             adapter_registry=registry,
             runtime=fake_runtime,
+            execution_contract_registry=ExecutionContractRegistry.curated(),
+            catalog=full_catalog,
         )
         assert result["status"] in ("executed", "partial"), (
             f"Expected executed/partial, got {result}"

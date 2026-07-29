@@ -18,6 +18,7 @@ from ariadne.adapters.base import (
 from ariadne.adapters.nmap import NmapAdapter
 from ariadne.core.engagement import TargetSpec
 from ariadne.core.errors import AdapterError
+from ariadne.core.workflow import PlaybookLimits
 from ariadne.runtime.process import ProcessResult, ProcessSpec
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -72,7 +73,7 @@ class TestNmapPlan:
             context,
         )
         assert spec.argv == (
-            "nmap", "-n", "-Pn", "-sS", "--max-rate", "100",
+            "nmap", "-n", "-Pn", "-sT", "--max-rate", "100",
             "-p", "22,80,443", "-oX", "-", "--", "10.10.10.10",
         )
 
@@ -103,6 +104,17 @@ class TestNmapPlan:
         assert "-sT" in spec.argv
         assert "-sS" not in spec.argv
 
+    def test_syn_scan_requires_explicit_net_raw_input(
+        self,
+        context: AdapterContext,
+    ) -> None:
+        spec = NmapAdapter().plan(
+            action("tcp_discovery", ports=(22,), net_raw=True),
+            context,
+        )
+        assert "-sS" in spec.argv
+        assert "-sT" not in spec.argv
+
     def test_rejects_unknown_operation(self, context: AdapterContext) -> None:
         with pytest.raises(AdapterError):
             NmapAdapter().plan(action("unknown_op"), context)
@@ -121,6 +133,37 @@ class TestNmapPlan:
         assert isinstance(spec, ProcessSpec)
         assert 1 <= spec.timeout_seconds <= 3600
         assert spec.max_output_bytes >= 1024
+
+    def test_plan_consumes_context_rate_timeout_and_output_limits(
+        self,
+        context: AdapterContext,
+    ) -> None:
+        bounded = context.model_copy(
+            update={
+                "limits": PlaybookLimits(
+                    max_rate=30,
+                    max_concurrency=1,
+                    max_attempts=1,
+                    max_duration_seconds=20,
+                    max_output_bytes=4096,
+                )
+            }
+        )
+
+        spec = NmapAdapter().plan(
+            action(
+                "tcp_discovery",
+                ports=(22,),
+                timeout=60,
+                max_output=8192,
+            ),
+            bounded,
+        )
+
+        rate_index = spec.argv.index("--max-rate")
+        assert spec.argv[rate_index + 1] == "30"
+        assert spec.timeout_seconds == 20
+        assert spec.max_output_bytes == 4096
 
 
 # ── Parse ─────────────────────────────────────────────────────────────────────

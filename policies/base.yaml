@@ -50,6 +50,7 @@ capabilities:
     max_duration_seconds: 3600
     max_output_bytes: 50_000_000
     allowed_tools:
+      - nmap
       - smbclient
       - rpcclient
       - enum4linux-ng
@@ -187,17 +188,29 @@ capabilities:
     always_manual: true
 
   # ── Workflow-core capabilities (curated and bounded) ────────────────
-  preflight.check: &workflow_low
+  preflight.check:
     allowed: true
     max_rate: 5
     max_concurrency: 2
     max_attempts: 3
     max_duration_seconds: 600
     max_output_bytes: 10_000_000
+    allowed_tools:
+      - ping
   service.routing:
-    <<: *workflow_low
+    <<: &workflow_low
+      allowed: true
+      max_rate: 5
+      max_concurrency: 2
+      max_attempts: 3
+      max_duration_seconds: 600
+      max_output_bytes: 10_000_000
+    allowed_tools:
+      - nmap
   research.vulnerability:
     <<: *workflow_low
+    allowed_tools:
+      - searchsploit
   exploit.validation:
     <<: *workflow_low
   exploit.payload_upload:

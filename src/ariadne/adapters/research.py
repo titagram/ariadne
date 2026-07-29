@@ -30,6 +30,7 @@ from ariadne.adapters.base import (
     Runtime,
     ToolProbe,
 )
+from ariadne.core.engagement import TargetSpec
 from ariadne.core.observations import Observation
 from ariadne.core.research import (
     CveReference,
@@ -343,8 +344,15 @@ class ResearchAdapter:
             argv = ("ping", "-c", "1", "-W", "3", target_host)
             return ProcessSpec(
                 argv=argv,
-                timeout_seconds=10,
-                max_output_bytes=1024 * 1024,
+                cwd=context.cwd,
+                timeout_seconds=_bounded(
+                    10,
+                    context.limits.max_duration_seconds,
+                ),
+                max_output_bytes=_bounded(
+                    1024 * 1024,
+                    context.limits.max_output_bytes,
+                ),
             )
 
         # For non-preflight product research: searchsploit may not be
@@ -352,8 +360,15 @@ class ResearchAdapter:
         argv = ("searchsploit", str(product))
         return ProcessSpec(
             argv=argv,
-            timeout_seconds=30,
-            max_output_bytes=1024 * 1024,
+            cwd=context.cwd,
+            timeout_seconds=_bounded(
+                30,
+                context.limits.max_duration_seconds,
+            ),
+            max_output_bytes=_bounded(
+                1024 * 1024,
+                context.limits.max_output_bytes,
+            ),
         )
 
     async def execute(
@@ -364,12 +379,13 @@ class ResearchAdapter:
         try:
             return await runtime.run(spec)
         except FileNotFoundError:
-            # searchsploit not installed — return a no-op success result
-            from ariadne.runtime.process import ProcessResult
+            from ariadne.runtime.process import ProcessResult, ProcessStatus
+
             return ProcessResult(
-                exit_code=0,
-                stdout="NOT_AVAILABLE\nsearchsploit is not installed\n",
-                stderr="",
+                exit_code=127,
+                stdout="",
+                stderr="searchsploit is not installed",
+                status=ProcessStatus.FAILED,
             )
         except Exception:
             raise
@@ -378,6 +394,15 @@ class ResearchAdapter:
         self,
         result: ProcessResult,
     ) -> tuple[Observation, ...]:
+        raise AdapterError(
+            "Research observations require an explicit engagement target"
+        )
+
+    def parse_for_target(
+        self,
+        result: ProcessResult,
+        target: TargetSpec,
+    ) -> tuple[Observation, ...]:
         """Parse searchsploit/ping output into observations.
 
         For the preflight check (ping), produces a single observation
@@ -385,8 +410,6 @@ class ResearchAdapter:
         For searchsploit, produces observations from the output.
         """
         from uuid import uuid4
-
-        from ariadne.core.engagement import TargetSpec
 
         observations: list[Observation] = []
 
@@ -397,7 +420,7 @@ class ResearchAdapter:
             if is_ping:
                 obs = Observation(
                     observation_id=uuid4(),
-                    target=TargetSpec(host="127.0.0.1"),
+                    target=target,
                     source="preflight_passed",
                     data={
                         "type": "preflight_passed",
@@ -405,25 +428,14 @@ class ResearchAdapter:
                         "stdout_preview": stdout_preview,
                     },
                 )
-            elif "not_available" in stdout_preview.lower():
-                obs = Observation(
-                    observation_id=uuid4(),
-                    target=TargetSpec(host="127.0.0.1"),
-                    source="research_complete",
-                    data={
-                        "type": "no_cve_data",
-                        "summary": "searchsploit not available — no CVE data collected",
-                        "stdout_preview": stdout_preview,
-                    },
-                )
             else:
                 obs = Observation(
                     observation_id=uuid4(),
-                    target=TargetSpec(host="127.0.0.1"),
-                    source="preflight_passed",
+                    target=target,
+                    source="research_complete",
                     data={
-                        "type": "preflight_passed",
-                        "summary": "Environment ready — searchsploit available",
+                        "type": "research_complete",
+                        "summary": "Local exploit research completed",
                         "stdout_preview": stdout_preview,
                     },
                 )
@@ -448,11 +460,13 @@ class ResearchAdapter:
                 summary="Research timed out; partial results available",
             )
         if result.exit_code != 0:
-            # searchsploit not available or unknown product — not a failure
             return ExecutionClassification(
-                kind="success",
-                confidence=0.8,
-                summary="Research completed — no CVE data found",
+                kind="failure",
+                confidence=1.0,
+                summary=(
+                    "Research tool failed or is unavailable; "
+                    "no evidence was produced"
+                ),
             )
         if len(observations) > 0:
             return ExecutionClassification(
@@ -471,23 +485,9 @@ class ResearchAdapter:
         result: ProcessResult,
         collector: object,
     ) -> tuple[str, ...]:
-        """Collect research output as evidence artifact."""
-        from ariadne.evidence.collector import EvidenceCollector
-
-        if not isinstance(collector, EvidenceCollector):
-            return ()
-
-        from ariadne.core.engagement import TargetSpec
-
-        context = {
-            "target": TargetSpec(host="127.0.0.1"),
-            "adapter": "research",
-            "source": "research.preflight",
-            "argv": ("searchsploit",),
-        }
-
-        _ = collector.collect_process(result, context)
-        return ("evidence_collected",)
+        """The handler persists typed observations; do not invent raw evidence."""
+        del result, collector
+        return ()
 
     async def cleanup(
         self,
@@ -495,3 +495,7 @@ class ResearchAdapter:
     ) -> CleanupResult:
         """No temporary resources to clean up."""
         return CleanupResult(success=True, details="No temporary resources to clean up")
+
+
+def _bounded(requested: int, maximum: int | None) -> int:
+    return requested if maximum is None else min(requested, maximum)

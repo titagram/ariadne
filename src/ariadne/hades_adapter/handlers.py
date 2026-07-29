@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from ariadne.adapters import AdapterRegistry
 from ariadne.adapters.base import AdapterContext, Runtime
+from ariadne.core.canonical import canonical_digest
 from ariadne.core.engagement import EngagementSnapshot, TargetSpec
 from ariadne.core.enums import AssetStatus, AutonomyMode, EngagementState
 from ariadne.core.errors import PolicyConfigurationError, WorkflowConfigurationError
@@ -116,16 +117,10 @@ def _get_consent_gateway(context: dict[str, Any]) -> ConsentGateway:
     return gateway
 
 
-_DEFAULT_EXECUTION_CONTRACT_REGISTRY = ExecutionContractRegistry.curated()
-
-
 def _get_execution_contract_registry(
     context: dict[str, Any],
 ) -> ExecutionContractRegistry:
-    registry = context.get(
-        "execution_contract_registry",
-        _DEFAULT_EXECUTION_CONTRACT_REGISTRY,
-    )
+    registry = context.get("execution_contract_registry")
     if not isinstance(registry, ExecutionContractRegistry):
         raise TypeError(
             "No trusted composition execution contract registry is available."
@@ -834,7 +829,17 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
     actions_failed = 0
     evidence_artifacts: list[dict[str, Any]] = []
 
-    execution_contracts = _get_execution_contract_registry(context)
+    try:
+        execution_contracts = _get_execution_contract_registry(context)
+    except TypeError as exc:
+        return {
+            "status": "blocked",
+            "message": str(exc),
+            "plan_id": plan_id,
+            "actions_executed": 0,
+            "actions_failed": len(record.plan.actions),
+            "evidence_artifacts": [],
+        }
     for action_index, action in enumerate(record.plan.actions):
         envelope = ExecutionEnvelope.from_plan(
             record.plan,
@@ -941,10 +946,15 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                             ),
                             "reason": reason,
                             "attempts_consumed": attempts,
-                            "argv": (
-                                list(blocked_spec.argv)
+                            "process_spec_digest": (
+                                canonical_digest(blocked_spec)
                                 if blocked_spec is not None
-                                else []
+                                else None
+                            ),
+                            "executable_id": (
+                                blocked_spec.argv[0]
+                                if blocked_spec is not None
+                                else None
                             ),
                         },
                         timestamp=datetime.now(UTC),
@@ -967,7 +977,22 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             )
 
             # Parse observations from output
-            observations = adapter.parse(process_result)
+            parse_for_target = getattr(adapter, "parse_for_target", None)
+            observations = (
+                parse_for_target(process_result, record.plan.target)
+                if callable(parse_for_target)
+                else adapter.parse(process_result)
+            )
+            if any(
+                observation.target != record.plan.target
+                for observation in observations
+            ):
+                audit_block(
+                    "Adapter observation target differs from the "
+                    "execution envelope",
+                    process_spec,
+                    guarded_runtime.attempts,
+                )
 
             # Classify the result
             classification = adapter.classify(process_result, observations)
