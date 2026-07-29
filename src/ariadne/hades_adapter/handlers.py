@@ -157,23 +157,32 @@ def _determine_engagement_state(
                 if pb_id:
                     executed_playbooks.add(pb_id)
 
-    # Check evidence types from most advanced to most basic
-    if "report_ready" in evidence_types or "cleanup_complete" in evidence_types:
+    # Check evidence types from most advanced to most basic.  Each emitted
+    # evidence type advances to the stage of the next playbook.
+    if "report_ready" in evidence_types:
+        return EngagementState.COMPLETE, tuple(observations)
+    if "cleanup_complete" in evidence_types:
         return EngagementState.REPORTING, tuple(observations)
     if "objective_proven" in evidence_types or "objective_completed" in evidence_types:
-        return EngagementState.OBJECTIVE_VALIDATION, tuple(observations)
+        return EngagementState.CLEANUP, tuple(observations)
     if "privesc_found" in evidence_types or "privesc_path_identified" in evidence_types:
+        return EngagementState.OBJECTIVE_VALIDATION, tuple(observations)
+    if (
+        "host_info_collected" in evidence_types
+        or "host_enumerated" in evidence_types
+        or "postex_complete" in evidence_types
+    ):
         return EngagementState.PRIVILEGE_ESCALATION, tuple(observations)
-    if "host_enumerated" in evidence_types or "postex_complete" in evidence_types:
-        return EngagementState.POST_EXPLOITATION, tuple(observations)
     if "foothold_established" in evidence_types:
-        return EngagementState.FOOTHOLD, tuple(observations)
+        return EngagementState.POST_EXPLOITATION, tuple(observations)
     if "vulnerability_validated" in evidence_types or "exploit_succeeded" in evidence_types:
-        return EngagementState.VALIDATION, tuple(observations)
+        return EngagementState.FOOTHOLD, tuple(observations)
     if "research_complete" in evidence_types or "cve_reference" in evidence_types:
+        return EngagementState.VALIDATION, tuple(observations)
+    if "protocol_routed" in evidence_types:
         return EngagementState.HYPOTHESIS, tuple(observations)
     if "service_fingerprinted" in evidence_types:
-        return EngagementState.HYPOTHESIS, tuple(observations)
+        return EngagementState.ENUMERATION, tuple(observations)
     if "port_open" in evidence_types:
         return EngagementState.ENUMERATION, tuple(observations)
     if "preflight_passed" in evidence_types or "research.preflight" in evidence_types:
@@ -717,6 +726,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                     event_type="plan_executed",
                     payload={
                         "plan_id": plan_id,
+                        "playbook_id": record.plan.playbook_id,
                         "action": action.adapter,
                         "operation": action.operation,
                         "status": "error",
@@ -726,6 +736,64 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                     timestamp=now,
                 ),
             )
+
+    # Materialize the playbook's declared outputs after a fully successful run.
+    # Adapter observations are implementation-specific; success_emits is the
+    # workflow contract consumed by downstream playbooks and state transitions.
+    if actions_executed > 0 and actions_failed == 0:
+        catalog = _get_catalog(context)
+        playbook = catalog.playbooks.get(record.plan.playbook_id)
+        if playbook is not None:
+            existing_evidence = {
+                evt.get("payload", {}).get("evidence_type", "")
+                for evt in cmd.store.read_events(run_handle)
+                if evt.get("event_type") == "evidence_collected"
+            }
+            for evidence_type in playbook.success_emits:
+                if evidence_type not in existing_evidence:
+                    cmd.store.append_event(
+                        run_handle,
+                        Event(
+                            event_type="evidence_collected",
+                            payload={
+                                "finding": (
+                                    f"Playbook {playbook.id} emitted {evidence_type}"
+                                ),
+                                "evidence_type": evidence_type,
+                                "asset": record.plan.target.host,
+                                "playbook_id": playbook.id,
+                            },
+                            timestamp=now,
+                        ),
+                    )
+
+            # Report validation consumes lifecycle events rather than evidence
+            # types, so bridge the corresponding workflow outputs explicitly.
+            lifecycle_events = {
+                "objective_proven": "objective_completed",
+                "cleanup_complete": "cleanup_completed",
+            }
+            existing_event_types = {
+                evt.get("event_type", "")
+                for evt in cmd.store.read_events(run_handle)
+            }
+            for evidence_type, event_type in lifecycle_events.items():
+                if (
+                    evidence_type in playbook.success_emits
+                    and event_type not in existing_event_types
+                ):
+                    cmd.store.append_event(
+                        run_handle,
+                        Event(
+                            event_type=event_type,
+                            payload={
+                                "plan_id": plan_id,
+                                "playbook_id": playbook.id,
+                                "target": record.plan.target.host,
+                            },
+                            timestamp=now,
+                        ),
+                    )
 
     # Compute overall status
     overall_status = "executed" if actions_failed == 0 else "partial"
