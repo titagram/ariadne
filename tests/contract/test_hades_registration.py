@@ -8,6 +8,7 @@ skills, tools, commands, and hooks.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ariadne.composition import register
 
@@ -17,13 +18,14 @@ class RecordingPluginContext:
     """Fake Hades PluginContext that records registration calls."""
 
     profile_name: str = "test"
-    skills: list[tuple[str, str]] = field(default_factory=list)
+    skills: list[tuple[str, Path]] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)
     commands: list[str] = field(default_factory=list)
     hooks: list[str] = field(default_factory=list)
 
-    def register_skill(self, name: str, path: str, description: str) -> None:
-        self.skills.append((name, str(path)))
+    def register_skill(self, name: str, path: Path, description: str) -> None:
+        assert path.exists()
+        self.skills.append((name, path))
 
     def register_tool(
         self,
@@ -48,15 +50,17 @@ class RecordingPluginContext:
     ) -> None:
         self.commands.append(name)
 
-    def register_hook(self, name: str, callback: object, **kwargs: object) -> None:
-        self.hooks.append(name)
+    def register_hook(self, hook_name: str, callback: object, **kwargs: object) -> None:
+        self.hooks.append(hook_name)
 
 
 def test_register_exposes_namespaced_skill_tools_command_and_hook() -> None:
     """register() exposes the skill, six tools, /ariadne cmd, and guard hook."""
     ctx = RecordingPluginContext(profile_name="test")
     register(ctx)
-    assert ctx.skills == [("lab-pentest", "skills/lab-pentest/SKILL.md")]
+    assert [(name, path.name) for name, path in ctx.skills] == [
+        ("lab-pentest", "SKILL.md")
+    ]
     assert set(ctx.tools) == {
         "ariadne_prepare_engagement",
         "ariadne_bind_engagement",

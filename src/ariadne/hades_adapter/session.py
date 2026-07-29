@@ -253,3 +253,26 @@ class ChallengeLedger:
             if b.session_id == session_id:
                 return b
         return None
+
+    def unbind_session(self, session_id: str) -> None:
+        """Remove any existing binding for *session_id*.
+
+        Clears the binding from both ``_bindings`` (by challenge_id) and
+        ``_engagement_bindings`` so a new engagement can be bound to the
+        same session without stale state.
+        """
+        stale: list[str] = []
+        for cid, b in self._bindings.items():
+            if b.session_id == session_id:
+                stale.append(cid)
+                # Also remove from engagement bindings
+                eng_key = str(b.engagement_id) if b.engagement_id else None
+                if eng_key and eng_key in self._engagement_bindings:
+                    self._engagement_bindings[eng_key] = [
+                        eb for eb in self._engagement_bindings[eng_key]
+                        if eb.challenge_id != cid
+                    ]
+                    if not self._engagement_bindings[eng_key]:
+                        del self._engagement_bindings[eng_key]
+        for cid in stale:
+            del self._bindings[cid]

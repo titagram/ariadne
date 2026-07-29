@@ -1,0 +1,67 @@
+# Full engagement sequence — preflight through discovery
+# This is a minimal but realistic workflow for testing state progression.
+# Follows the same pattern as the production workflows/base.yaml.
+
+# 1. Preflight — verify environment readiness
+- id: engagement.preflight.v1
+  version: 1
+  stage: environment_preflight
+  triggers:
+    - kind: engagement_state
+      types: ["snapshot_locked"]
+  required_evidence_types: []
+  capabilities:
+    - preflight.check
+  actions:
+    - adapter: research
+      operation: investigate
+      inputs:
+        product: "preflight"
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 1048576
+  stop_conditions:
+    - "engagement_plan_discarded"
+    - "preflight_failed"
+  success_emits:
+    - "preflight_passed"
+  next_playbooks:
+    - preflight.tcp-discovery.v1
+  report_sections:
+    - "scope"
+
+# 2. TCP discovery — find open ports on the target
+- id: preflight.tcp-discovery.v1
+  version: 1
+  stage: discovery
+  triggers:
+    - kind: observation_type
+      types: ["preflight_passed"]
+  required_evidence_types:
+    - "preflight_passed"
+  capabilities:
+    - scan.tcp
+  actions:
+    - adapter: nmap
+      operation: tcp_discovery
+      inputs:
+        ports: "1-10000"
+  limits:
+    max_rate: 500
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "all_ports_checked"
+    - "target_unreachable"
+    - "max_time_exceeded"
+  success_emits:
+    - "port_open"
+    - "port_filtered"
+  next_playbooks: []
+  report_sections:
+    - "discovery"

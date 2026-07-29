@@ -347,3 +347,19 @@ class RunStore:
         path = self._engagement_path(engagement_id)
         lock = path / "engagement.lock.yaml"
         return lock.is_file()
+
+    def read_events(self, handle: RunHandle) -> list[dict]:
+        """Read all events from the run's JSONL log.
+
+        Returns events in chronological order (oldest first) as raw dicts
+        with keys: sequence, previous_event_hash, event_hash, event_type,
+        payload, timestamp.
+
+        Returns an empty list if the events file does not exist.
+        """
+        from ariadne.store.jsonl import read_all as _read_jsonl
+
+        events_path = handle.path / "events.jsonl"
+        if not events_path.is_file():
+            return []
+        return [evt.to_dict() for evt in _read_jsonl(events_path)]

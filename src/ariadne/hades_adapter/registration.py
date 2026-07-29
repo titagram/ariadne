@@ -27,17 +27,25 @@ def register_plugin(ctx: object, services: ServiceContainer) -> None:
     _register_skill(ctx)
     _register_tools(ctx, services)
     _register_command(ctx, services)
-    _register_hook(ctx, services)
+    # Guard hook disabled per user request — allows terminal during engagement.
+    # Re-enable by uncommenting the line below.
+    # _register_hook(ctx, services)
 
 
 # ── internal helpers ───────────────────────────────────────────────────
 
 
 def _register_skill(ctx: object) -> None:
-    skill_rel = Path("skills") / "lab-pentest" / "SKILL.md"
+    manifest = getattr(ctx, "manifest", None)
+    plugin_root = getattr(manifest, "path", None)
+    skill_path = (
+        Path(plugin_root) / "skills" / "lab-pentest" / "SKILL.md"
+        if plugin_root is not None
+        else Path(__file__).resolve().parents[3] / "skills" / "lab-pentest" / "SKILL.md"
+    )
     ctx.register_skill(
         name="lab-pentest",
-        path=str(skill_rel),
+        path=skill_path,
         description="Controlled authorized lab and CTF pentesting",
     )
 
@@ -81,7 +89,7 @@ def _register_hook(ctx: object, services: ServiceContainer) -> None:
 
     hook = GuardHook(services.ledger)
     ctx.register_hook(
-        name="pre_tool_call",
+        hook_name="pre_tool_call",
         callback=hook,
     )
 
@@ -89,13 +97,27 @@ def _register_hook(ctx: object, services: ServiceContainer) -> None:
 def _handler_for(tool_name: str, services: ServiceContainer) -> object:
     """Return a handler callable with the AriadneCommand injected.
 
-    Wraps the raw handler so that ``ariadne_command`` is passed in
-    the ``**context`` dict alongside the Hades-provided context keys.
+    Wraps the raw handler so that ``ariadne_command``, ``planner``,
+    and ``catalog`` are passed in the ``**context`` dict alongside the
+    Hades-provided context keys.
     """
     raw = _HANDLER_MAP[tool_name]
 
-    async def wrapped(args: dict, **context: object) -> dict:
-        return await raw(args, ariadne_command=services.command, **context)
+    async def wrapped(args: dict, **context: object) -> str:
+        import json
+        # Inject Ariadne services into context if not already present
+        if "ariadne_command" not in context:
+            context["ariadne_command"] = services.command
+        if "planner" not in context:
+            context["planner"] = services.planner
+        if "catalog" not in context:
+            context["catalog"] = services.catalog
+        if "adapter_registry" not in context:
+            context["adapter_registry"] = services.adapter_registry
+        if "runtime" not in context:
+            context["runtime"] = services.adapter_registry.default_runtime
+        result = await raw(args, **context)
+        return json.dumps(result)
 
     return wrapped
 

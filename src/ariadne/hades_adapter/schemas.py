@@ -1,12 +1,38 @@
 """JSON Schemas for Ariadne's registered Hades tools.
 
-Each schema follows the JSON Schema 2020-12 dialect with Pydantic-style
-type annotations that Hades renders for model selection.
+Each schema follows the OpenAI function-calling format so that
+``tools.registry.get_definitions()`` wraps them correctly into
+``{"type": "function", "function": {...}}`` tool definitions.
+
+The schema maps directly to the ``function`` object:
+  {"name": "...", "description": "...", "parameters": {...}}
 """
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+
+def _build_schema(model_cls: type[BaseModel], description: str = "") -> dict:
+    """Build an OpenAI-compatible tool schema from a Pydantic model.
+
+    Steps:
+    1. Generate JSON Schema via ``model_json_schema()``
+    2. Drop ``additionalProperties`` (causes HTTP 422 on strict providers)
+    3. Wrap ``properties`` and ``required`` inside a ``"parameters"`` object
+    4. Attach the human-readable description
+    """
+    raw = model_cls.model_json_schema()
+    raw.pop("additionalProperties", None)  # strict providers reject this
+    return {
+        "description": description or raw.get("description", ""),
+        "parameters": {
+            "type": "object",
+            "properties": raw.get("properties", {}),
+            "required": raw.get("required", []),
+        },
+    }
+
 
 # ── ariadne_prepare_engagement ─────────────────────────────────────────
 
@@ -16,17 +42,45 @@ class PrepareEngagementInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    authorization_attested: bool
-    disclaimer_version: str
-    profile: str
-    target_host: str
-    objectives: list[str]
-    autonomy: str = "controlled"
-    time_window_minutes: int = 60
-    notes: str = ""
+    authorization_attested: bool = Field(
+        ...,
+        description="True if the user has attested authorization for this engagement.",
+    )
+    disclaimer_version: str = Field(
+        ...,
+        description="Version string of the disclaimer accepted by the user (e.g. '2026-07-28').",
+    )
+    profile: str = Field(
+        ...,
+        description="Environment profile. Must be one of: 'private-lab' or 'htb'.",
+    )
+    target_host: str = Field(
+        ...,
+        description="Target host IP address or FQDN (e.g. '192.168.2.148').",
+    )
+    objectives: list[str] = Field(
+        ...,
+        description="List of objective kinds. Each must be one of: 'user_flag', 'root_flag', 'domain_admin', 'proof'.",
+    )
+    autonomy: str = Field(
+        default="controlled",
+        description="Autonomy mode: 'controlled' (default) or 'full'.",
+    )
+    time_window_minutes: int = Field(
+        default=60,
+        description="Maximum engagement duration in minutes.",
+    )
+    notes: str = Field(
+        default="",
+        description="Optional free-text notes for the engagement.",
+    )
 
 
-PREPARE_ENGAGEMENT_SCHEMA = PrepareEngagementInput.model_json_schema()
+PREPARE_ENGAGEMENT_SCHEMA = _build_schema(
+    PrepareEngagementInput,
+    "Initiate an engagement contract. Provide the target host, environment profile, "
+    "and objectives. Returns a challenge ID that the user must confirm.",
+)
 
 # ── ariadne_bind_engagement ─────────────────────────────────────────────
 
@@ -36,11 +90,22 @@ class BindEngagementInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    challenge_id: str
-    session_id: str
+    challenge_id: str = Field(
+        ...,
+        description="The challenge ID returned by ariadne_prepare_engagement, "
+        "after the user has confirmed it via /ariadne confirm.",
+    )
+    session_id: str | None = Field(
+        default=None,
+        description="Optional session ID. If omitted, the current session is used.",
+    )
 
 
-BIND_ENGAGEMENT_SCHEMA = BindEngagementInput.model_json_schema()
+BIND_ENGAGEMENT_SCHEMA = _build_schema(
+    BindEngagementInput,
+    "Bind a confirmed engagement to the current session. Pass the challenge ID "
+    "from ariadne_prepare_engagement after user confirmation.",
+)
 
 # ── ariadne_status ──────────────────────────────────────────────────────
 
@@ -50,10 +115,16 @@ class StatusInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    session_id: str | None = None
+    session_id: str | None = Field(
+        default=None,
+        description="Optional session ID. If omitted, the current session is used.",
+    )
 
 
-STATUS_SCHEMA = StatusInput.model_json_schema()
+STATUS_SCHEMA = _build_schema(
+    StatusInput,
+    "Show the current engagement status and state information for this session.",
+)
 
 # ── ariadne_propose_plan ────────────────────────────────────────────────
 
@@ -63,12 +134,27 @@ class ProposePlanInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    snapshot_hash: str
-    hypothesis: str = ""
-    session_id: str | None = None
+    snapshot_hash: str = Field(
+        ...,
+        description="The snapshot hash returned by ariadne_bind_engagement.",
+    )
+    hypothesis: str = Field(
+        default="",
+        description="Optional hypothesis statement for the plan "
+        "(e.g. 'Recon and enumerate target').",
+    )
+    session_id: str | None = Field(
+        default=None,
+        description="Optional session ID. If omitted, the current session is used.",
+    )
 
 
-PROPOSE_PLAN_SCHEMA = ProposePlanInput.model_json_schema()
+PROPOSE_PLAN_SCHEMA = _build_schema(
+    ProposePlanInput,
+    "Propose a bounded action plan for the current engagement. Requires the "
+    "snapshot hash from ariadne_bind_engagement. Returns a plan ID that must "
+    "be approved by the user via /ariadne approve.",
+)
 
 # ── ariadne_execute_plan ────────────────────────────────────────────────
 
@@ -78,11 +164,22 @@ class ExecutePlanInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    plan_id: str
-    session_id: str | None = None
+    plan_id: str = Field(
+        ...,
+        description="The plan ID returned by ariadne_propose_plan, after the user "
+        "has approved it via /ariadne approve.",
+    )
+    session_id: str | None = Field(
+        default=None,
+        description="Optional session ID. If omitted, the current session is used.",
+    )
 
 
-EXECUTE_PLAN_SCHEMA = ExecutePlanInput.model_json_schema()
+EXECUTE_PLAN_SCHEMA = _build_schema(
+    ExecutePlanInput,
+    "Execute an approved bounded action plan. Requires the plan ID from "
+    "ariadne_propose_plan after user approval via /ariadne approve.",
+)
 
 # ── ariadne_render_report ───────────────────────────────────────────────
 
@@ -92,11 +189,22 @@ class RenderReportInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    style: str = "walkthrough"
-    session_id: str | None = None
+    style: str = Field(
+        default="walkthrough",
+        description="Report style: 'walkthrough' (default) or 'professional'.",
+    )
+    session_id: str | None = Field(
+        default=None,
+        description="Optional session ID. If omitted, the current session is used.",
+    )
 
 
-RENDER_REPORT_SCHEMA = RenderReportInput.model_json_schema()
+RENDER_REPORT_SCHEMA = _build_schema(
+    RenderReportInput,
+    "Render a walkthrough or professional report for the current engagement. "
+    "Use 'walkthrough' for a step-by-step narrative or 'professional' for an "
+    "executive-format report.",
+)
 
 # ── Registry ────────────────────────────────────────────────────────────
 
@@ -125,7 +233,7 @@ ARIADNE_TOOLS: dict[str, ToolRegistration] = {
     "ariadne_prepare_engagement": ToolRegistration(
         name="ariadne_prepare_engagement",
         schema=PREPARE_ENGAGEMENT_SCHEMA,
-        handler=None,  # assigned by handlers module
+        handler=None,
         description="Initiate an engagement contract with collected answers",
         emoji="📋",
     ),

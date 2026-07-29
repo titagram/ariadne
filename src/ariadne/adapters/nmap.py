@@ -37,16 +37,27 @@ _OPERATIONS: frozenset = frozenset({"tcp_discovery", "service_fingerprint", "udp
 
 
 def _check_dtd(stdout: str) -> None:
-    """Reject XML that contains DTD declarations to prevent XXE."""
+    """Reject XML that contains dangerous DTD/ENTITY declarations.
+
+    ``<!DOCTYPE nmaprun>`` (Nmap's standard XML header) is harmless
+    and is accepted.  All other DOCTYPE / ENTITY declarations are
+    rejected to prevent XXE.
+    """
     upper = stdout.upper()
-    if "<!DOCTYPE" in upper or "<!ENTITY" in upper:
-        raise AdapterError("XML contains DTD/ENTITY declarations — rejected for safety")
+    if "<!ENTITY" in upper:
+        raise AdapterError("XML contains ENTITY declarations — rejected for safety")
+    # Accept nmap's standard DOCTYPE (case-insensitive), reject any other
+    if "<!DOCTYPE" in upper and "<!DOCTYPE NMAPRUN" not in upper:
+        raise AdapterError("XML contains unknown DTD — rejected for safety")
 
 
-def _parse_nmap_xml(stdout: str) -> list[Observation]:
+def _parse_nmap_xml(stdout: str, source: str = "nmap") -> list[Observation]:
     """Parse Nmap XML output into a list of Observation objects.
 
     Returns one observation per open TCP/UDP port on each host.
+
+    *source* is the evidence type stored on each observation
+    (e.g. ``tcp_discovery`` or ``service_fingerprint``).
     """
     _check_dtd(stdout)
 
@@ -115,7 +126,7 @@ def _parse_nmap_xml(stdout: str) -> list[Observation]:
             obs = Observation(
                 observation_id=uuid4(),
                 target=target,
-                source="nmap",
+                source=source,
                 data=obs_data,
             )
             observations.append(obs)
@@ -132,6 +143,9 @@ class NmapAdapter:
 
     name: ClassVar[str] = "nmap"
 
+    def __init__(self) -> None:
+        self._current_operation: str = ""
+
     # ── ToolAdapter protocol ─────────────────────────────────────────────
 
     async def probe(self, runtime: Runtime) -> ToolProbe:
@@ -143,6 +157,7 @@ class NmapAdapter:
         context: AdapterContext,
     ) -> ProcessSpec:
         op = action.operation
+        self._current_operation = op  # track for parse()
         if op not in _OPERATIONS:
             raise AdapterError(
                 f"Unknown Nmap operation: {op!r}. "
@@ -151,10 +166,31 @@ class NmapAdapter:
 
         inputs = action.inputs
         ports = inputs.get("ports", ())
-        if not ports or not isinstance(ports, (list, tuple)):
-            raise AdapterError("ports must be a non-empty list or tuple")
-
-        port_str = ",".join(str(p) for p in ports)
+        if not ports:
+            # Fall back to common ports when none specified (service_fingerprint
+            # after tcp_discovery knows which ports were found)
+            ports = ("22,80,443,445,3389,8080,8443",) if op == "service_fingerprint" else ()
+        if not ports:
+            raise AdapterError("ports must be non-empty")
+        if isinstance(ports, str):
+            port_str = ports
+        elif isinstance(ports, (list, tuple)):
+            port_str = ",".join(str(p) for p in ports)
+        else:
+            raise AdapterError("ports must be a string, list, or tuple")
+        # Cap large port ranges to prevent excessive scan times.
+        # A full 1-65535 TCP connect scan can take hours; 1-1000 is a
+        # reasonable default for discovery.  Use a specific port list or
+        # "--top-ports N" if you need more granularity.
+        if "-" in port_str:
+            parts = port_str.split("-")
+            if len(parts) == 2:
+                try:
+                    lo, hi = int(parts[0]), int(parts[1])
+                    if hi - lo > 200:
+                        port_str = f"{lo}-{lo + 199}"
+                except (ValueError, TypeError):
+                    pass  # non-numeric range, pass through as-is
         target = str(context.target.host)
 
         # Common base arguments
@@ -166,9 +202,11 @@ class NmapAdapter:
                 argv.append("-sS")
             else:
                 argv.append("-sT")
-            argv.extend(["--max-rate", "100"])
+            argv.extend(["--max-rate", "500"])
         elif op == "service_fingerprint":
-            argv.extend(["-sS", "-sV", "--max-rate", "100"])
+            argv.extend(["-sS", "-sV", "--max-rate", "300"])
+
+
         elif op == "udp_targeted":
             argv.append("-sU")
             argv.extend(["--max-rate", "50"])
@@ -186,7 +224,24 @@ class NmapAdapter:
         spec: ProcessSpec,
         runtime: Runtime,
     ) -> ProcessResult:
-        return await runtime.run(spec)
+        result = await runtime.run(spec)
+        # Auto-fallback: -sS (SYN scan) needs root. If it fails with "requires root",
+        # retry with -sT (TCP connect scan).
+        if (
+            result.exit_code != 0
+            and "-sS" in spec.argv
+            and "requires root" in (result.stderr or "").lower()
+        ):
+            fallback_argv = tuple(
+                "-sT" if a == "-sS" else a for a in spec.argv
+            )
+            fallback_spec = ProcessSpec(
+                argv=fallback_argv,
+                timeout_seconds=spec.timeout_seconds,
+                max_output_bytes=spec.max_output_bytes,
+            )
+            return await runtime.run(fallback_spec)
+        return result
 
     def parse(
         self,
@@ -195,7 +250,10 @@ class NmapAdapter:
         stdout = result.stdout
         if not stdout.strip():
             return ()
-        return tuple(_parse_nmap_xml(stdout))
+        # Map operation to the evidence type expected by downstream playbooks
+        op = self._current_operation
+        source = {"tcp_discovery": "port_open", "service_fingerprint": "service_fingerprinted"}.get(op, op or "nmap")
+        return tuple(_parse_nmap_xml(stdout, source=source))
 
     def classify(
         self,

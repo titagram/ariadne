@@ -1,28 +1,58 @@
 # A minimal valid playbook for testing the workflow catalog and planner.
-id: network.tcp-discovery.v1
-version: 1
-stage: discovery
-triggers:
-  - kind: observation_type
-    types: ["port_open"]
-required_evidence_types: []
-capabilities:
-  - scan.tcp
-actions:
-  - adapter: nmap
-    operation: tcp_scan
-    inputs:
-      ports: "1-1024"
-limits:
-  max_rate: 100
-  max_concurrency: 5
-  max_attempts: 1
-  max_duration_seconds: 300
-  max_output_bytes: 10485760
-stop_conditions: []
-success_emits:
-  - service_discovered
-next_playbooks:
-  - service.banner-grab.v1
-report_sections:
-  - discovery
+# Includes preflight + discovery stages so state progression tests work.
+---
+- id: engagement.preflight.v1
+  version: 1
+  stage: environment_preflight
+  triggers:
+    - kind: engagement_state
+      types: ["snapshot_locked"]
+  required_evidence_types: []
+  capabilities:
+    - preflight.check
+  actions:
+    - adapter: nmap
+      operation: tcp_scan
+      inputs:
+        ports: "1-1024"
+  limits:
+    max_rate: 100
+    max_concurrency: 5
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 10485760
+  stop_conditions: []
+  success_emits:
+    - service_discovered
+  next_playbooks:
+    - network.tcp-discovery.v1
+  report_sections:
+    - scope
+
+- id: network.tcp-discovery.v1
+  version: 1
+  stage: discovery
+  triggers:
+    - kind: observation_type
+      types: ["port_open"]
+  required_evidence_types: []
+  capabilities:
+    - scan.tcp
+  actions:
+    - adapter: nmap
+      operation: tcp_scan
+      inputs:
+        ports: "1-1024"
+  limits:
+    max_rate: 100
+    max_concurrency: 5
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 10485760
+  stop_conditions: []
+  success_emits:
+    - service_discovered
+  next_playbooks:
+    - service.banner-grab.v1
+  report_sections:
+    - discovery

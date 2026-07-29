@@ -1,4 +1,4 @@
-"""/ariadne command parser and engagement approval service.
+"""Ariadne command parser and engagement approval service.
 
 AriadneCommand enforces the rule that model-facing tool calls cannot
 self-confirm.  A real user must type ``/ariadne confirm <challenge-id>``
@@ -10,6 +10,7 @@ regular tool handler.
 from __future__ import annotations
 
 import shlex
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -24,8 +25,13 @@ from ariadne.core.engagement import (
     lock_engagement,
 )
 from ariadne.core.enums import AutonomyMode, EnvironmentProfile
+from ariadne.core.planner import Plan
 from ariadne.hades_adapter.session import ChallengeLedger
 from ariadne.store.run_store import RunStore
+
+# Shared plan ledger — keyed by plan_id, stored alongside the ChallengeLedger
+# so both tool handlers and /ariadne commands see the same plans.
+_PLAN_LEDGER: dict[str, PlanRecord] = {}
 
 # ── Recognised commands and their argument counts ──────────────────────────
 
@@ -77,6 +83,27 @@ class BindResult:
     snapshot_hash: str | None
     message: str
     error: str | None = None
+
+
+@dataclass
+class PlanRecord:
+    """A proposed plan awaiting approval or rejection.
+
+    Attributes:
+        plan: The bounded Plan object.
+        snapshot_hash: Hash of the engagement snapshot at proposal time.
+        session_id: Hades session that proposed this plan.
+        approved: Whether the user has approved this plan.
+        approved_at: When the plan was approved (None if not yet approved).
+        rejected: Whether the user has rejected this plan.
+    """
+
+    plan: Plan
+    snapshot_hash: str
+    session_id: str
+    approved: bool = False
+    approved_at: float | None = None
+    rejected: bool = False
 
 
 # ── Command service ────────────────────────────────────────────────────────
@@ -322,11 +349,27 @@ class AriadneCommand:
 
     def _handle_approve(self, plan_id: str) -> str:
         """Approve a plan by id."""
-        return f"Error: Unknown plan: {plan_id!r}"
+        record = _PLAN_LEDGER.get(plan_id)
+        if record is None:
+            return f"Error: Unknown plan: {plan_id!r}"
+        if record.approved:
+            return f"Plan {plan_id!r} was already approved."
+        record.approved = True
+        record.approved_at = time.time()
+        return (
+            f"Plan {plan_id!r} approved. "
+            f"Use ariadne_execute_plan to execute."
+        )
 
     def _handle_reject(self, plan_id: str) -> str:
         """Reject a plan by id."""
-        return f"Error: Unknown plan: {plan_id!r}"
+        record = _PLAN_LEDGER.get(plan_id)
+        if record is None:
+            return f"Error: Unknown plan: {plan_id!r}"
+        if record.rejected:
+            return f"Plan {plan_id!r} was already rejected."
+        record.rejected = True
+        return f"Plan {plan_id!r} rejected."
 
     def _handle_abort(self) -> str:
         """Abort the current engagement."""
@@ -396,6 +439,45 @@ class AriadneCommand:
             message=f"Error: Challenge {challenge_id!r} was confirmed but no snapshot was created.",
             error="Challenge consumed without snapshot",
         )
+
+    # ── Plan ledger ─────────────────────────────────────────────────────
+
+    def add_plan(self, plan: Plan, snapshot_hash: str, session_id: str) -> str:
+        """Register a proposed plan in the plan ledger.
+
+        Args:
+            plan: The bounded Plan to record.
+            snapshot_hash: Hash of the snapshot at proposal time.
+            session_id: The Hades session that proposed this plan.
+
+        Returns:
+            The plan_id string.
+        """
+        record = PlanRecord(
+            plan=plan,
+            snapshot_hash=snapshot_hash,
+            session_id=session_id,
+        )
+        _PLAN_LEDGER[plan.plan_id] = record
+        return plan.plan_id
+
+    def get_plan_record(self, plan_id: str) -> PlanRecord | None:
+        """Retrieve a plan record by id from the ledger."""
+        return _PLAN_LEDGER.get(plan_id)
+
+    def is_plan_approved(self, plan_id: str) -> bool:
+        """Check whether a plan has been approved by the user."""
+        record = _PLAN_LEDGER.get(plan_id)
+        if record is None:
+            return False
+        return record.approved
+
+    def is_plan_expired(self, plan_id: str) -> bool:
+        """Check whether a plan has expired (15 min TTL)."""
+        record = _PLAN_LEDGER.get(plan_id)
+        if record is None:
+            return True
+        return time.time() > record.plan.expires_at.timestamp()
 
     # ── Utility ─────────────────────────────────────────────────────────
 

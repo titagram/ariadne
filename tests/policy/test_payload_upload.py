@@ -94,7 +94,5 @@ class TestPayloadUploadDeny:
         ctx = _ctx(extra_env={"CAPABILITY_exploit_payload_upload": "allow"})
         for op in _UPLOAD_OPS:
             spec = adapter.plan(action(op), ctx)
-            # The spec should contain upload-related argv (copy/write to target)
-            argv_str = " ".join(spec.argv).lower()
             assert len(spec.argv) > 2
             assert spec.timeout_seconds <= 900
