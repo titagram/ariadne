@@ -10,7 +10,8 @@ reporting.
 
 ## 1. Starting an engagement
 
-In a Hades Hermes session, enter:
+In a Hades Hermes session, either write a natural-language prompt containing
+the authorized target and objective or enter:
 
 ```text
 /ariadne new
@@ -74,11 +75,12 @@ Every bounded action plan requires explicit approval:
 
 ### Full autonomy
 
-The current implementation still requires `/ariadne approve` for each bounded
-plan in `full` mode. Continuous execution of curated, in-policy plans is the
-next implementation milestone; it is not active yet.
+In `full`, curated, catalog-backed, in-policy plans without an `always_manual`
+capability are durably auto-approved. The agent immediately calls execution,
+repeats propose/execute through objective validation and cleanup, and
+automatically renders the local offline report.
 
-That continuous mode will pause only for:
+The continuous loop pauses only for:
 
 - scope changes or newly discovered targets;
 - policy or guardrail conflicts;
@@ -88,8 +90,8 @@ That continuous mode will pause only for:
 - high-impact actions not already authorized by the contract;
 - SysReptor network push.
 
-The offline local report will be generated automatically at completion in that
-mode. The current runtime still requires `/ariadne report`.
+The offline local report is generated automatically at completion. SysReptor
+network push remains a separate direct decision.
 
 > Hades's `--yolo` flag has **no effect** on Ariadne guardrails.
 
@@ -162,7 +164,8 @@ The dossier (evidence, findings, events) is **not** removed by cleanup.
 
 ## 6. Offline reporting
 
-After the engagement is complete, generate the report:
+In `full`, Ariadne generates the offline report automatically after objective
+validation and cleanup. In `controlled`, or to regenerate a report explicitly:
 
 ```text
 /ariadne report

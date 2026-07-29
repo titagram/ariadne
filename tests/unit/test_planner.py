@@ -97,3 +97,95 @@ class TestPlanCarriesSnapshotAndExpiry:
         # Only the adapter may generate an argument vector — at planning
         # time every action's argv must be None.
         assert all(action.argv is None for action in plan.actions)
+
+    def test_plan_carries_manual_approval_verdict_from_effective_policy(
+        self,
+        catalog: WorkflowCatalog,
+        planning_context: PlanningContext,
+    ) -> None:
+        """Dropping always_manual propagation would silently auto-approve a guarded plan."""
+        from ariadne.core.planner import Planner
+
+        guarded_policy = planning_context.effective_policy.model_copy(
+            update={
+                "capabilities": {
+                    "scan.tcp": CapabilityRule(
+                        allowed=True,
+                        always_manual=True,
+                    ),
+                },
+            },
+        )
+        guarded_context = planning_context.model_copy(
+            update={"effective_policy": guarded_policy},
+        )
+
+        plan = Planner(catalog).build("network.tcp-discovery.v1", guarded_context)
+
+        assert plan.requires_manual_approval is True
+        assert plan.manual_capabilities == ("scan.tcp",)
+        assert plan.approval_reasons == (
+            "effective policy requires manual approval for scan.tcp",
+        )
+
+    def test_plan_is_auto_approval_eligible_when_no_capability_is_manual(
+        self,
+        catalog: WorkflowCatalog,
+        planning_context: PlanningContext,
+    ) -> None:
+        """Marking every curated plan manual would break continuous full mode."""
+        from ariadne.core.planner import Planner
+
+        plan = Planner(catalog).build("network.tcp-discovery.v1", planning_context)
+
+        assert plan.requires_manual_approval is False
+        assert plan.manual_capabilities == ()
+        assert plan.approval_reasons == ()
+
+    @pytest.mark.parametrize(
+        "capability",
+        (
+            "scope.amend",
+            "guardrail.exception",
+            "host.install",
+            "poc.uncurated",
+            "sysreptor.push",
+        ),
+    )
+    def test_exceptional_capabilities_are_carried_as_manual(
+        self,
+        capability: str,
+        catalog: WorkflowCatalog,
+        planning_context: PlanningContext,
+    ) -> None:
+        """Dropping an exceptional manual capability would enable unsafe auto-approval."""
+        from ariadne.core.planner import Planner
+
+        source = catalog.playbooks["network.tcp-discovery.v1"]
+        exceptional = source.model_copy(
+            update={
+                "id": f"exceptional.{capability}",
+                "capabilities": frozenset({capability}),
+            },
+        )
+        exceptional_catalog = WorkflowCatalog(
+            playbooks={exceptional.id: exceptional},
+        )
+        guarded_policy = planning_context.effective_policy.model_copy(
+            update={
+                "capabilities": {
+                    capability: CapabilityRule(
+                        allowed=True,
+                        always_manual=False,
+                    ),
+                },
+            },
+        )
+        guarded_context = planning_context.model_copy(
+            update={"effective_policy": guarded_policy},
+        )
+
+        plan = Planner(exceptional_catalog).build(exceptional.id, guarded_context)
+
+        assert plan.requires_manual_approval is True
+        assert plan.manual_capabilities == (capability,)

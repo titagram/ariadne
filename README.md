@@ -92,26 +92,28 @@ No target-side action is initiated.
 
 ## Usage
 
-All user interaction happens through the `/ariadne` slash commands in a Hermes
-session. The typical lifecycle:
+In a Hermes session, the user can simply prompt with an authorized target and
+objective. Ariadne asks a short Q/A for missing contract fields, displays the
+disclaimer, and atomically locks the accepted answers. `/ariadne new` starts the
+same flow explicitly.
 
 1. **`/ariadne new`** — Interactive Q/A to define the engagement contract
    (target, objectives, profile, autonomy mode, time window, etc.)
 2. **Accept the current disclaimer** — Atomically lock and bind the completed
    Q/A to the trusted Hades session
-3. **`/ariadne status`** — View current engagement state and progress
-4. **`/ariadne plan`** — Generate a bounded action plan
-5. **`/ariadne approve <plan-id>`** — Approve a plan for execution
-6. **`/ariadne evidence`** — Review collected evidence
-7. **`/ariadne report`** — Generate the technical walkthrough and professional
-   report
-8. **`/ariadne abort`** — Stop the current engagement
+3. In **`full`**, Ariadne continuously proposes and immediately executes
+   curated, catalog-backed, in-policy plans until objective and cleanup
+   completion, then automatically generates the local offline reports
+4. In **`controlled`**, every bounded plan requires
+   **`/ariadne approve <plan-id>`**
+5. Ariadne pauses only for scope amendments, policy/guardrail conflicts,
+   `always_manual` capabilities, host installation, uncurated code, missing
+   credentials/decisions, or SysReptor network push
+6. **`/ariadne status`**, **`/ariadne evidence`**, and **`/ariadne abort`**
+   remain available throughout
 
-The current runtime requires plan approval in both autonomy modes. Continuous
-execution for curated, in-policy plans and automatic offline reporting are the
-next milestone, with blocking pauses retained for scope, policy, installation,
-uncurated code, missing decisions, unauthorized high-impact actions, and
-SysReptor network push.
+Guardrails, immutable session/snapshot binding, plan expiry, and scope isolation
+apply identically in both autonomy modes.
 
 See the [Operator Guide](docs/operator-guide.md) for detailed walkthroughs.
 

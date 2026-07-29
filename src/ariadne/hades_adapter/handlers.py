@@ -17,7 +17,7 @@ from pydantic import ValidationError
 from ariadne.adapters import AdapterRegistry
 from ariadne.adapters.base import AdapterContext, Runtime
 from ariadne.core.engagement import EngagementSnapshot, TargetSpec
-from ariadne.core.enums import AssetStatus, EngagementState
+from ariadne.core.enums import AssetStatus, AutonomyMode, EngagementState
 from ariadne.core.errors import WorkflowConfigurationError
 from ariadne.core.observations import Asset, Hypothesis, Observation
 from ariadne.core.planner import Planner
@@ -300,7 +300,8 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
 
     Builds a PlanningContext from the engagement snapshot, selects an
     eligible playbook, and constructs a bounded Plan.  The plan is
-    recorded in the command's plan ledger awaiting user approval.
+    recorded in the command's plan ledger. Controlled and manual-only plans
+    await the user; eligible full-autonomy plans are durably auto-approved.
     """
     cmd = _get_command(context)
     if "session_id" in args:
@@ -437,11 +438,90 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             "plan_id": "",
         }
 
-    # 6. Record the plan in the command's plan ledger
+    # 6. Persist the proposal before exposing it through the in-memory ledger.
+    from ariadne.store.run_store import Event
+
+    capabilities = sorted(playbook.capabilities)
+    proposal_payload = {
+        "plan_id": plan.plan_id,
+        "playbook_id": plan.playbook_id,
+        "snapshot_hash": snapshot_hash,
+        "session_id": input_session_id,
+        "autonomy": snapshot.autonomy.value,
+        "capabilities": capabilities,
+        "requires_manual_approval": plan.requires_manual_approval,
+        "manual_capabilities": list(plan.manual_capabilities),
+        "approval_reasons": list(plan.approval_reasons),
+    }
+    try:
+        cmd.store.append_event(
+            run_handle,
+            Event(
+                event_type="plan_proposed",
+                payload=proposal_payload,
+                timestamp=datetime.now(UTC),
+            ),
+        )
+    except Exception as exc:
+        # The store is the authorization ledger. Any persistence failure,
+        # regardless of backend exception type, must fail closed.
+        return {
+            "status": "error",
+            "message": f"Could not persist plan proposal: {exc}",
+            "plan_id": plan.plan_id,
+        }
+
+    # 7. Record the plan in the command's plan ledger, initially unapproved.
     cmd.add_plan(plan, snapshot_hash, input_session_id)
 
+    should_auto_approve = (
+        snapshot.autonomy == AutonomyMode.FULL
+        and not plan.requires_manual_approval
+    )
+    if should_auto_approve:
+        try:
+            cmd.store.append_event(
+                run_handle,
+                Event(
+                    event_type="plan_auto_approved",
+                    payload={
+                        **proposal_payload,
+                        "reason": "full_autonomy_curated_in_policy",
+                    },
+                    timestamp=datetime.now(UTC),
+                ),
+            )
+        except Exception as exc:
+            # Never mutate the in-memory approval record unless the durable
+            # event chain accepted the approval first.
+            return {
+                "status": "error",
+                "message": (
+                    "Could not persist automatic approval; "
+                    f"the plan remains unapproved: {exc}"
+                ),
+                "plan_id": plan.plan_id,
+            }
+        cmd.auto_approve_plan(plan.plan_id)
+
+    approval_status = (
+        "auto_approved" if should_auto_approve else "awaiting_user_approval"
+    )
+    message = (
+        f"Plan {plan.plan_id[:8]} auto-approved for full continuous mode. "
+        "Call ariadne_execute_plan now; do not request /ariadne approve."
+        if should_auto_approve
+        else (
+            f"Plan {plan.plan_id[:8]} proposed with {len(plan.actions)} action(s) "
+            f"for target {plan.target.host}. "
+            f"Use /ariadne approve {plan.plan_id} to approve, "
+            f"then ariadne_execute_plan to run."
+        )
+    )
+
     return {
-        "status": "plan_proposed",
+        "status": "plan_auto_approved" if should_auto_approve else "plan_proposed",
+        "approval_status": approval_status,
         "plan_id": plan.plan_id,
         "playbook_id": plan.playbook_id,
         "actions": [
@@ -455,12 +535,10 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         "hypothesis": plan.hypothesis,
         "expires_at": plan.expires_at.isoformat(),
         "limits": plan.limits.model_dump(mode="json"),
-        "message": (
-            f"Plan {plan.plan_id[:8]} proposed with {len(plan.actions)} action(s) "
-            f"for target {plan.target.host}. "
-            f"Use /ariadne approve {plan.plan_id} to approve, "
-            f"then ariadne_execute_plan to run."
-        ),
+        "requires_manual_approval": plan.requires_manual_approval,
+        "manual_capabilities": list(plan.manual_capabilities),
+        "approval_reasons": list(plan.approval_reasons),
+        "message": message,
     }
 
 
@@ -470,7 +548,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
     Validates:
     - Active engagement binding exists for this session
     - Plan exists in the ledger
-    - Plan has been approved by the user
+    - Plan has been manually or durably automatically approved
     - Plan has not expired
 
     For this vertical slice without real adapters, records the
@@ -800,10 +878,13 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
     return {
         "status": overall_status,
         "plan_id": plan_id,
+        "next_action": "continue_until_complete_then_render_offline_report",
         "message": (
             f"Plan {plan_id[:8]} executed with {actions_executed}/{total_actions} action(s) "
             f"against target {record.plan.target.host}. "
-            f"{actions_failed} action(s) failed."
+            f"{actions_failed} action(s) failed. Continue proposing and executing "
+            "eligible plans until the objective and cleanup complete, then render "
+            "the offline report automatically."
         ),
         "actions_executed": actions_executed,
         "actions_failed": actions_failed,

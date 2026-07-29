@@ -74,14 +74,15 @@ class PrepareResult:
 
 @dataclass
 class PlanRecord:
-    """A proposed plan awaiting approval or rejection.
+    """A proposed plan with manual or durable automatic approval state.
 
     Attributes:
         plan: The bounded Plan object.
         snapshot_hash: Hash of the engagement snapshot at proposal time.
         session_id: Hades session that proposed this plan.
-        approved: Whether the user has approved this plan.
+        approved: Whether the plan has been manually or automatically approved.
         approved_at: When the plan was approved (None if not yet approved).
+        approval_source: Provenance for the approval decision.
         rejected: Whether the user has rejected this plan.
     """
 
@@ -90,6 +91,7 @@ class PlanRecord:
     session_id: str
     approved: bool = False
     approved_at: float | None = None
+    approval_source: str | None = None
     rejected: bool = False
 
 
@@ -312,6 +314,7 @@ class AriadneCommand:
             return f"Plan {plan_id!r} was already approved."
         record.approved = True
         record.approved_at = time.time()
+        record.approval_source = "user"
         return (
             f"Plan {plan_id!r} approved. "
             f"Use ariadne_execute_plan to execute."
@@ -356,8 +359,19 @@ class AriadneCommand:
         """Retrieve a plan record by id from the ledger."""
         return _PLAN_LEDGER.get(plan_id)
 
+    def auto_approve_plan(self, plan_id: str) -> None:
+        """Mark a durably auto-approved full-autonomy plan as approved."""
+        record = _PLAN_LEDGER.get(plan_id)
+        if record is None:
+            raise ValueError(f"Unknown plan: {plan_id!r}")
+        if record.plan.requires_manual_approval:
+            raise ValueError("A manual-only plan cannot be auto-approved")
+        record.approved = True
+        record.approved_at = time.time()
+        record.approval_source = "full_autonomy_policy"
+
     def is_plan_approved(self, plan_id: str) -> bool:
-        """Check whether a plan has been approved by the user."""
+        """Check whether a plan has manual or automatic approval."""
         record = _PLAN_LEDGER.get(plan_id)
         if record is None:
             return False

@@ -39,9 +39,9 @@ typed adapters.
    completes the Q/A, attests authorization, and accepts the current disclaimer.
 2. **Fail closed.** Unknown state, ambiguous policy, stale approval, malformed
    output, or unexpected scope stops execution.
-3. **Guardrails are not an autonomy setting.** The current runtime retains plan
-   approval in both modes. The next continuous-mode boundary will remove only
-   routine curated/in-policy prompts and will never bypass hard invariants.
+3. **Guardrails are not an autonomy setting.** `full` removes routine prompts
+   only for curated, catalog-backed, in-policy plans. It never bypasses hard
+   invariants or capabilities marked `always_manual`.
 4. **The model proposes; the engine permits.** The LLM ranks hypotheses and
    selects eligible playbooks. The deterministic core authorizes transitions.
 5. **Evidence before claims.** Scanner alerts are candidates. Findings become
@@ -249,11 +249,12 @@ or:
 autonomy: full
 ```
 
-Controlled autonomy requires direct approval of bounded action plans. The
-current implementation also requires plan approval in `full`; it does not yet
-auto-execute. The immediately following milestone is continuous mode: after the
-brief Q/A it autonomously executes curated, in-policy plans through completion
-and generates the offline local report.
+Controlled autonomy requires direct approval of bounded action plans. In
+`full`, the planner freezes a deterministic approval verdict from the playbook
+and the same effective policy used to bound the plan. Curated, catalog-backed,
+in-policy plans with no manual capability are durably auto-approved. The agent
+immediately executes them, repeats propose/execute through objective validation
+and cleanup, and generates the offline local report.
 
 Continuous mode pauses for scope/new-target decisions, policy or guardrail
 conflicts, host installation, uncurated code, missing credentials or choices,
@@ -322,13 +323,18 @@ A bounded action plan includes:
 - cleanup;
 - expiration.
 
-Plans are approved with:
+Controlled plans and plans containing a manual capability are approved with:
 
 ```text
 /ariadne approve <plan-id>
 ```
 
 Any new scope snapshot invalidates plans associated with the previous snapshot.
+Each plan carries `requires_manual_approval`, the sorted manual capabilities,
+and approval reasons derived from the effective policy. Unknown or denied
+capabilities prevent plan construction. Auto-approval persists
+`plan_proposed` followed by `plan_auto_approved` before the in-memory record is
+marked approved; persistence failure leaves it unapproved.
 
 ## 7. Policy Model and Enforcement
 
@@ -752,11 +758,11 @@ networks.
 
 The minimum end-to-end acceptance scenario proves:
 
-1. contract creation and direct confirmation;
+1. short Q/A, disclaimer acceptance, and atomic contract lock;
 2. immutable snapshot;
 3. Docker preflight;
 4. isolated discovery;
-5. bounded plan and approval;
+5. bounded plan and deterministic manual/automatic approval verdict;
 6. evidence collection;
 7. validated finding;
 8. both report renderers;
@@ -768,7 +774,7 @@ The minimum end-to-end acceptance scenario proves:
 The first release is complete when:
 
 - it installs as a native Hades plugin;
-- Q/A, confirmation, and immutable snapshots work;
+- Q/A, disclaimer acceptance, atomic binding, and immutable snapshots work;
 - `base`, `private-lab`, and `htb` policies are enforced;
 - a generic IP/FQDN entry target is supported;
 - network, web, Linux, Windows, AD, and pivoting playbooks exist;
@@ -785,7 +791,7 @@ Implementation planning should preserve this dependency order:
 
 1. project scaffold, schemas, and architectural boundaries;
 2. core state machine, policy algebra, planning, and dossier;
-3. Hades registration, Q/A, direct confirmations, and hooks;
+3. Hades registration, Q/A, atomic lock, exceptional approvals, and hooks;
 4. Docker/Kali/ZAP preflight and lifecycle;
 5. direct network and web adapters;
 6. research and exploitation adapters;

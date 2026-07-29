@@ -43,6 +43,14 @@ _REGISTERED_ADAPTERS: frozenset[str] = frozenset({
     "screenshot",
 })
 
+_MANUAL_ONLY_CAPABILITIES: frozenset[str] = frozenset({
+    "scope.amend",
+    "guardrail.exception",
+    "host.install",
+    "poc.uncurated",
+    "sysreptor.push",
+})
+
 # ── Planner models ────────────────────────────────────────────────────────────
 
 
@@ -78,6 +86,10 @@ class Plan(BaseModel):
         stop_conditions: Conditions that should cause plan execution to
             halt.
         cleanup: Cleanup actions associated with this plan.
+        requires_manual_approval: Deterministic approval verdict derived
+            from the playbook capabilities and effective policy.
+        manual_capabilities: Capabilities that prevent auto-approval.
+        approval_reasons: Human-readable reasons for the manual verdict.
         created_at: When the plan was constructed.
         expires_at: When the plan expires (15 min after creation).
     """
@@ -94,6 +106,9 @@ class Plan(BaseModel):
     expected_evidence: tuple[str, ...]
     stop_conditions: tuple[str, ...]
     cleanup: tuple[str, ...] = ()
+    requires_manual_approval: bool
+    manual_capabilities: tuple[str, ...]
+    approval_reasons: tuple[str, ...]
     created_at: datetime
     expires_at: datetime
 
@@ -168,12 +183,31 @@ class Planner:
                     f"{playbook_id}"
                 )
 
-        # 6. Intersect limits
+        # 6. Freeze the deterministic approval verdict from the same
+        # effective policy used to construct and bound the plan.
+        manual_capabilities = tuple(sorted(
+            cap
+            for cap in playbook.capabilities
+            if (
+                cap in _MANUAL_ONLY_CAPABILITIES
+                or context.effective_policy.capabilities[cap].always_manual
+            )
+        ))
+        approval_reasons = tuple(
+            (
+                f"{cap} is a non-delegable manual capability"
+                if cap in _MANUAL_ONLY_CAPABILITIES
+                else f"effective policy requires manual approval for {cap}"
+            )
+            for cap in manual_capabilities
+        )
+
+        # 7. Intersect limits
         intersected_limits = self._intersect_limits(
             playbook.limits, context.effective_policy, playbook.capabilities
         )
 
-        # 7. Build actions (argv = None at planning time)
+        # 8. Build actions (argv = None at planning time)
         planned_actions = tuple(
             PlannedAction(
                 adapter=a.adapter,
@@ -184,7 +218,7 @@ class Planner:
             for a in playbook.actions
         )
 
-        # 8. Set expiry (15 minutes from now)
+        # 9. Set expiry (15 minutes from now)
         now = context.now
         expires_at = now + timedelta(minutes=15)
 
@@ -198,6 +232,9 @@ class Planner:
             limits=intersected_limits,
             expected_evidence=tuple(playbook.success_emits),
             stop_conditions=playbook.stop_conditions,
+            requires_manual_approval=bool(manual_capabilities),
+            manual_capabilities=manual_capabilities,
+            approval_reasons=approval_reasons,
             created_at=now,
             expires_at=expires_at,
         )

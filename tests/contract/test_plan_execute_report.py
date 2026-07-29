@@ -114,7 +114,12 @@ def fake_runtime() -> FakeRuntime:
     return FakeRuntime(exit_code=0, stdout="scan results")
 
 
-async def _bind_engagement(command: AriadneCommand, session_id: str) -> str:
+async def _bind_engagement(
+    command: AriadneCommand,
+    session_id: str,
+    *,
+    autonomy: str = "controlled",
+) -> str:
     """Helper: atomically prepare and bind an engagement."""
     args = {
         "authorization_attested": True,
@@ -122,7 +127,7 @@ async def _bind_engagement(command: AriadneCommand, session_id: str) -> str:
         "profile": "private-lab",
         "target_host": "10.10.10.10",
         "objectives": ["proof"],
-        "autonomy": "controlled",
+        "autonomy": autonomy,
     }
     prepare_result = await handle_prepare_engagement(
         args,
@@ -246,6 +251,134 @@ class TestProposePlanHandler:
         assert "actions" in result
         assert len(result["actions"]) > 0
         assert "expires_at" in result
+        assert result["approval_status"] == "awaiting_user_approval"
+        assert command.get_plan_record(result["plan_id"]).approved is False
+
+    async def test_full_mode_auto_approves_curated_in_policy_plan(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+    ) -> None:
+        """Forcing /ariadne approve in full mode would break continuous execution."""
+        snapshot_hash = await _bind_engagement(
+            command,
+            session_id,
+            autonomy="full",
+        )
+
+        result = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "bounded discovery"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+
+        record = command.get_plan_record(result["plan_id"])
+        assert result["status"] == "plan_auto_approved"
+        assert result["approval_status"] == "auto_approved"
+        assert "call ariadne_execute_plan now" in result["message"].lower()
+        assert record is not None
+        assert record.approved is True
+        assert record.approval_source == "full_autonomy_policy"
+
+        binding = command.get_session_binding(session_id)
+        assert binding is not None
+        assert binding.engagement_id is not None
+        handle = command.store.open(binding.engagement_id)
+        assert handle is not None
+        events = command.store.read_events(handle)
+        proposed = [e for e in events if e["event_type"] == "plan_proposed"]
+        auto = [e for e in events if e["event_type"] == "plan_auto_approved"]
+        assert proposed[-1]["payload"]["plan_id"] == result["plan_id"]
+        assert proposed[-1]["payload"]["snapshot_hash"] == snapshot_hash
+        assert proposed[-1]["payload"]["session_id"] == session_id
+        assert proposed[-1]["payload"]["autonomy"] == "full"
+        assert auto[-1]["payload"]["capabilities"] == ["preflight.check"]
+        assert auto[-1]["payload"]["reason"] == "full_autonomy_curated_in_policy"
+
+    async def test_full_mode_does_not_auto_approve_always_manual_capability(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Ignoring effective-policy always_manual would bypass a hard approval boundary."""
+        from ariadne.hades_adapter import handlers
+
+        snapshot_hash = await _bind_engagement(
+            command,
+            session_id,
+            autonomy="full",
+        )
+        guarded = EffectivePolicy(
+            name="guarded",
+            version=1,
+            capabilities={
+                "preflight.check": CapabilityRule(
+                    allowed=True,
+                    always_manual=True,
+                ),
+            },
+            source_digests=(),
+        )
+        monkeypatch.setattr(handlers, "_load_engagement_policy", lambda snapshot: guarded)
+
+        result = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "guarded preflight"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+
+        record = command.get_plan_record(result["plan_id"])
+        assert result["status"] == "plan_proposed"
+        assert result["approval_status"] == "awaiting_user_approval"
+        assert result["manual_capabilities"] == ["preflight.check"]
+        assert record is not None
+        assert record.approved is False
+
+    async def test_auto_approval_event_failure_leaves_plan_unapproved(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An event-chain write failure must fail closed instead of approving in memory."""
+        snapshot_hash = await _bind_engagement(
+            command,
+            session_id,
+            autonomy="full",
+        )
+        real_append = command.store.append_event
+
+        def fail_auto_approval(handle, event) -> None:
+            if event.event_type == "plan_auto_approved":
+                raise RuntimeError("simulated durable event failure")
+            real_append(handle, event)
+
+        monkeypatch.setattr(command.store, "append_event", fail_auto_approval)
+
+        result = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "fail closed"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+
+        assert result["status"] == "error"
+        record = command.get_plan_record(result["plan_id"])
+        assert record is not None
+        assert record.approved is False
+        assert "persist" in result["message"].lower()
 
     async def test_plan_requires_approval_before_execution(
         self,
@@ -484,6 +617,43 @@ class TestExecutePlanHandler:
         )
         assert result["status"] in ("executed", "partial"), f"Expected executed, got {result}"
         assert "plan_id" in result
+
+    async def test_full_mode_executes_auto_approved_plan_without_slash_approve(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+    ) -> None:
+        """Requiring a slash approval after auto-approval would stall continuous mode."""
+        snapshot_hash = await _bind_engagement(
+            command,
+            session_id,
+            autonomy="full",
+        )
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "continuous preflight"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=command,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+        )
+
+        assert proposed["status"] == "plan_auto_approved"
+        assert result["status"] in ("executed", "partial")
+        assert "not been approved" not in result["message"].lower()
+        assert result["next_action"] == "continue_until_complete_then_render_offline_report"
+        assert "offline report" in result["message"].lower()
 
 
 class TestRenderReportHandler:

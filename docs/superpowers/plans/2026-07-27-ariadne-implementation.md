@@ -38,12 +38,12 @@
 - Reporting is offline-first; SysReptor network push is explicit and previewed.
 - The ordinary CI suite may only address loopback and its isolated Docker test network.
 - Use TDD, keep tasks independently reviewable, and commit after each task.
-- Current interim behavior requires `/ariadne approve` for every plan in both
-  autonomy modes. The immediate next milestone is continuous/full execution of
-  curated, in-policy plans through automatic offline reporting, pausing only
-  for scope/new-target decisions, policy/guardrail conflicts, host installs,
-  uncurated code, missing credentials/decisions, contract-unapproved
-  high-impact actions, and SysReptor network push.
+- `controlled` requires `/ariadne approve` for every plan. `full` continuously
+  auto-approves and executes curated, catalog-backed, in-policy plans whose
+  frozen planner verdict contains no manual capability, then automatically
+  renders the offline report. It pauses only for scope/new-target decisions,
+  policy/guardrail conflicts, host installs, uncurated code, missing
+  credentials/decisions, `always_manual` capabilities, and SysReptor push.
 
 ---
 
@@ -1066,6 +1066,15 @@ append-only store after restart. No model-callable schema accepts `session_id`.
 Challenges remain only for separate exceptional approvals: scope amendment,
 host installation, uncurated PoC, guardrail exception, and SysReptor push.
 Approval records set `actor="user"` and are appended to the event chain.
+
+The Planner freezes an approval verdict from each catalog playbook and the
+effective policy used to construct it. `controlled` plans remain pending.
+Eligible `full` plans persist `plan_proposed` and `plan_auto_approved` before
+being marked approved in memory; the agent immediately executes them and
+continues the loop through objective validation, cleanup, and automatic offline
+report rendering. A persistence failure leaves the plan unapproved. Scope
+amendment, guardrail exception, host installation, uncurated PoC, missing
+credentials/decisions, and SysReptor push remain blocking choices.
 
 - [ ] **Step 4: Run all engagement and Hades contract tests**
 

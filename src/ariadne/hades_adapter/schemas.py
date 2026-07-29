@@ -131,8 +131,9 @@ class ProposePlanInput(BaseModel):
 PROPOSE_PLAN_SCHEMA = _build_schema(
     ProposePlanInput,
     "Propose a bounded action plan for the current engagement. Requires the "
-    "snapshot hash from ariadne_prepare_engagement. The current runtime requires "
-    "/ariadne approve in both controlled and full modes.",
+    "snapshot hash from ariadne_prepare_engagement. Controlled and manual-only "
+    "plans require /ariadne approve; eligible full plans are durably "
+    "auto-approved.",
 )
 
 # ── ariadne_execute_plan ────────────────────────────────────────────────
@@ -145,15 +146,15 @@ class ExecutePlanInput(BaseModel):
 
     plan_id: str = Field(
         ...,
-        description="The plan ID returned by ariadne_propose_plan, after the user "
-        "has approved it via /ariadne approve.",
+        description="The plan ID returned by ariadne_propose_plan after manual "
+        "approval or durable full-mode auto-approval.",
     )
 
 
 EXECUTE_PLAN_SCHEMA = _build_schema(
     ExecutePlanInput,
     "Execute an approved bounded action plan. Requires the plan ID from "
-    "ariadne_propose_plan after user approval via /ariadne approve.",
+    "ariadne_propose_plan after manual or durable automatic approval.",
 )
 
 # ── ariadne_render_report ───────────────────────────────────────────────
