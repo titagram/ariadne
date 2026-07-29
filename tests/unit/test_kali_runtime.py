@@ -107,8 +107,11 @@ class _SearchSploitPackageVersionRuntime(_PinnedImageCommandRuntime):
         if argv[-2:] == ("searchsploit", "--help"):
             self.calls.append(spec)
             return ProcessResult(
-                exit_code=0,
-                stdout="Usage: searchsploit [options] term\n",
+                exit_code=2,
+                stdout=(
+                    "Usage: searchsploit [options] term\n"
+                    "Options:\n  -h, --help  Show this help screen\n"
+                ),
                 stderr="",
             )
         return await super().run(spec)
@@ -179,7 +182,8 @@ def test_kali_uses_package_metadata_when_tool_has_no_version_flag(tmp_path) -> N
     assert asyncio.run(runtime.inspect_tool("searchsploit")) == (
         "/usr/bin/searchsploit",
         "20260709-0kali1",
-        "Usage: searchsploit [options] term",
+        "Usage: searchsploit [options] term\n"
+        "Options:\n  -h, --help  Show this help screen",
         "local_help",
     )
 

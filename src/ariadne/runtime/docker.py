@@ -320,12 +320,23 @@ class OnDemandKaliRuntime:
         guidance_text = (guidance.stdout or guidance.stderr).strip()
         if version.exit_code != 0 or not version_text:
             version_text = await self._installed_package_version(location_text)
+        guidance_is_help = (
+            not guidance.timed_out
+            and bool(guidance_text)
+            and (
+                guidance.exit_code == 0
+                or (
+                    guidance.exit_code in {1, 2}
+                    and re.search(r"(?im)^\s*usage\s*:", guidance_text) is not None
+                    and "--help" in guidance_text
+                )
+            )
+        )
         if (
             location.exit_code != 0
             or not location_text
             or not version_text
-            or guidance.exit_code != 0
-            or not guidance_text
+            or not guidance_is_help
         ):
             raise KaliRuntimeUnavailableError(
                 f"Bounded version/help inspection failed for {executable}."
