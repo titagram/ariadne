@@ -17,16 +17,25 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Barrier
+from threading import Event as ThreadEvent
 
 import pytest
 
 from ariadne.adapters import AdapterRegistry, build_default_registry
 from ariadne.adapters.base import ProcessResult, ProcessSpec
+from ariadne.adapters.nmap import NmapAdapter
+from ariadne.composition import ServiceContainer
 from ariadne.core.errors import PolicyConfigurationError
 from ariadne.core.planner import Planner
 from ariadne.core.policy import CapabilityRule, EffectivePolicy
 from ariadne.core.workflow import WorkflowCatalog
 from ariadne.hades_adapter.commands import CURRENT_DISCLAIMER_VERSION, AriadneCommand
+from ariadne.hades_adapter.consent import (
+    ConsentDecision,
+    HadesConsentGateway,
+    UnavailableConsentGateway,
+)
 from ariadne.hades_adapter.handlers import (
     handle_execute_plan,
     handle_prepare_engagement,
@@ -67,6 +76,66 @@ class FakeConsent:
     async def __call__(self, **kwargs: object) -> str:
         self.calls.append(kwargs)
         return self.result
+
+
+class FakeConsentGateway:
+    def __init__(self, decision: object) -> None:
+        self.decision = decision
+        self.calls = 0
+
+    async def request_plan(self, plan: object) -> object:
+        self.calls += 1
+        return self.decision
+
+
+class CallbackConsentGateway(FakeConsentGateway):
+    def __init__(self, decision: object, callback) -> None:
+        super().__init__(decision)
+        self.callback = callback
+
+    async def request_plan(self, plan: object) -> object:
+        self.callback()
+        return await super().request_plan(plan)
+
+
+class PausingConsentGateway(FakeConsentGateway):
+    def __init__(self, decision: object) -> None:
+        super().__init__(decision)
+        self.started = ThreadEvent()
+        self.release = ThreadEvent()
+
+    async def request_plan(self, plan: object) -> object:
+        import asyncio
+
+        self.started.set()
+        await asyncio.to_thread(self.release.wait, 5)
+        return await super().request_plan(plan)
+
+
+class BlockingNmapAdapter(NmapAdapter):
+    """Fixture adapter that accepts the catalog's synthetic tcp_scan op."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.plan_calls = 0
+        self.execute_started = ThreadEvent()
+        self.release_execute = ThreadEvent()
+
+    def plan(self, action, context):
+        del action, context
+        self.plan_calls += 1
+        return ProcessSpec(
+            argv=("nmap", "--version"),
+            timeout_seconds=10,
+            max_output_bytes=4096,
+        )
+
+    async def execute(self, spec, runtime):
+        import asyncio
+
+        self.execute_started.set()
+        await asyncio.to_thread(self.release_execute.wait, 5)
+        return await runtime.run(spec)
 
 # ── Shared fixtures ────────────────────────────────────────────────────────────
 
@@ -194,6 +263,71 @@ class TestRenderReportSchema:
         """RenderReportInput accepts 'professional' style."""
         inp = RenderReportInput(style="professional")
         assert inp.style == "professional"
+
+
+class TestCompositionOwnership:
+    def test_service_container_reuses_one_command_instance(
+        self,
+        store: RunStore,
+        ledger: ChallengeLedger,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+    ) -> None:
+        services = ServiceContainer(
+            profile_name="test",
+            store=store,
+            ledger=ledger,
+            catalog=catalog,
+            adapter_registry=registry,
+            consent_gateway=UnavailableConsentGateway(),
+        )
+        assert services.command is services.command
+
+    async def test_reserved_malicious_consent_context_cannot_override_composition(
+        self,
+        store: RunStore,
+        ledger: ChallengeLedger,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+        session_id: str,
+    ) -> None:
+        import json
+
+        from ariadne.hades_adapter.registration import _handler_for
+
+        composed_gateway = FakeConsentGateway(ConsentDecision.DECLINE)
+        malicious_gateway = FakeConsentGateway(ConsentDecision.ACCEPT)
+        registry.default_runtime = fake_runtime
+        services = ServiceContainer(
+            profile_name="test",
+            store=store,
+            ledger=ledger,
+            catalog=catalog,
+            adapter_registry=registry,
+            consent_gateway=composed_gateway,
+        )
+        snapshot_hash = await _bind_engagement(services.command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "reserved context"},
+            session_id=session_id,
+            ariadne_command=services.command,
+            planner=services.planner,
+            catalog=services.catalog,
+        )
+        wrapped = _handler_for("ariadne_execute_plan", services)
+
+        raw = await wrapped(  # type: ignore[operator]
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            consent_gateway=malicious_gateway,
+        )
+        result = json.loads(raw)
+
+        assert result["status"] == "blocked"
+        assert composed_gateway.calls == 1
+        assert malicious_gateway.calls == 0
+        assert fake_runtime.calls == 0
 
 
 # ── Handler-level tests ──────────────────────────────────────────────────────
@@ -475,8 +609,6 @@ class TestExecutePlanHandler:
         outcome: str,
         expected: tuple[bool | None, str],
     ) -> None:
-        from ariadne.hades_adapter import handlers
-
         snapshot_hash = await _bind_engagement(command, session_id)
         proposed = await handle_propose_plan(
             {"snapshot_hash": snapshot_hash, "hypothesis": "consent mapping"},
@@ -488,10 +620,16 @@ class TestExecutePlanHandler:
         record = command.get_plan_record(proposed["plan_id"])
         assert record is not None
 
-        assert await handlers._request_plan_consent(
-            FakeConsent(outcome),
-            plan=record.plan,
-        ) == expected
+        decision = await HadesConsentGateway(
+            FakeConsent(outcome)
+        ).request_plan(record.plan)
+        mapping = {
+            ConsentDecision.ACCEPT: (True, "accepted"),
+            ConsentDecision.DECLINE: (False, "declined"),
+            ConsentDecision.CANCEL: (None, "cancelled"),
+            ConsentDecision.UNAVAILABLE: (None, "invalid_response"),
+        }
+        assert mapping[decision] == expected
 
     async def test_rejects_no_active_engagement(
         self, command: AriadneCommand, session_id: str
@@ -568,7 +706,7 @@ class TestExecutePlanHandler:
             planner=planner,
             catalog=catalog,
         )
-        consent = FakeConsent("accept")
+        consent = FakeConsentGateway(ConsentDecision.ACCEPT)
 
         result = await handle_execute_plan(
             {"plan_id": proposed["plan_id"]},
@@ -577,16 +715,12 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             catalog=catalog,
-            plan_consent_requester=consent,
+            consent_gateway=consent,
         )
 
         assert proposed["requires_manual_approval"] is True
         assert result["status"] in ("executed", "partial")
-        assert len(consent.calls) == 1
-        prompt = consent.calls[0]
-        assert prompt["surface"] == "ariadne-plan"
-        assert "10.10.10.10" in str(prompt["message"])
-        assert "preflight.check" in str(prompt["description"])
+        assert consent.calls == 1
         record = command.get_plan_record(proposed["plan_id"])
         assert record is not None and record.approved and not record.rejected
 
@@ -613,7 +747,7 @@ class TestExecutePlanHandler:
             planner=planner,
             catalog=catalog,
         )
-        consent = FakeConsent(decision)
+        consent = FakeConsentGateway(ConsentDecision(decision))
 
         result = await handle_execute_plan(
             {"plan_id": proposed["plan_id"]},
@@ -622,7 +756,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             catalog=catalog,
-            plan_consent_requester=consent,
+            consent_gateway=consent,
         )
 
         assert result["status"] == "blocked"
@@ -652,7 +786,7 @@ class TestExecutePlanHandler:
             planner=planner,
             catalog=catalog,
         )
-        accepted = FakeConsent("accept")
+        accepted = FakeConsentGateway(ConsentDecision.ACCEPT)
         first = await handle_execute_plan(
             {"plan_id": proposed["plan_id"]},
             session_id=session_id,
@@ -660,10 +794,10 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             catalog=catalog,
-            plan_consent_requester=accepted,
+            consent_gateway=accepted,
         )
         restarted = AriadneCommand(ChallengeLedger(), command.store)
-        must_not_run = FakeConsent("decline")
+        must_not_run = FakeConsentGateway(ConsentDecision.DECLINE)
         second = await handle_execute_plan(
             {"plan_id": proposed["plan_id"]},
             session_id=session_id,
@@ -671,12 +805,13 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             catalog=catalog,
-            plan_consent_requester=must_not_run,
+            consent_gateway=must_not_run,
         )
 
         assert first["status"] in ("executed", "partial")
-        assert second["status"] in ("executed", "partial")
-        assert must_not_run.calls == []
+        assert second["status"] == "blocked"
+        assert "claimed" in second["message"].lower()
+        assert must_not_run.calls == 0
 
     async def test_approved_then_explicit_reject_is_irreversible_and_blocks(
         self,
@@ -751,10 +886,7 @@ class TestExecutePlanHandler:
         catalog: WorkflowCatalog,
         registry: AdapterRegistry,
         fake_runtime: FakeRuntime,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from ariadne.hades_adapter import handlers
-
         snapshot_hash = await _bind_engagement(command, session_id)
         proposed = await handle_propose_plan(
             {"snapshot_hash": snapshot_hash, "hypothesis": "no api"},
@@ -763,8 +895,6 @@ class TestExecutePlanHandler:
             planner=planner,
             catalog=catalog,
         )
-        monkeypatch.setattr(handlers, "_load_plan_consent_requester", lambda: None)
-
         result = await handle_execute_plan(
             {"plan_id": proposed["plan_id"]},
             session_id=session_id,
@@ -772,6 +902,7 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             catalog=catalog,
+            consent_gateway=UnavailableConsentGateway(),
             yolo=True,
         )
 
@@ -796,7 +927,8 @@ class TestExecutePlanHandler:
             planner=planner,
             catalog=catalog,
         )
-        consent = FakeConsent("unexpected")
+        requester = FakeConsent("unexpected")
+        consent = HadesConsentGateway(requester)
         result = await handle_execute_plan(
             {"plan_id": proposed["plan_id"]},
             session_id=session_id,
@@ -804,12 +936,12 @@ class TestExecutePlanHandler:
             adapter_registry=registry,
             runtime=fake_runtime,
             catalog=catalog,
-            plan_consent_requester=consent,
+            consent_gateway=consent,
             yolo=True,
         )
         assert result["status"] == "blocked"
-        assert len(consent.calls) == 1
-        assert "invalid_response" in result["message"]
+        assert "unavailable" in result["message"].lower()
+        assert len(requester.calls) == 1
         assert fake_runtime.calls == 0
 
     async def test_rejects_unknown_plan(
@@ -1248,6 +1380,290 @@ class TestExecutePlanHandler:
         assert payload["expires_at"] == proposed["expires_at"]
         assert payload["approval_state"] == "pending"
         assert payload["approval_correlation_id"]
+
+    async def test_restart_after_execution_claim_cannot_execute_again(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+    ) -> None:
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "single claim"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        assert "approved" in command.handle(
+            f"approve {proposed['plan_id']}",
+            trusted_session_id=session_id,
+        ).lower()
+        claimed = command.claim_plan_execution(
+            proposed["plan_id"],
+            trusted_session_id=session_id,
+        )
+        assert claimed.claimed is True
+
+        counting = BlockingNmapAdapter()
+        counting.release_execute.set()
+        registry.register("nmap", counting)
+        restarted = AriadneCommand(ChallengeLedger(), command.store)
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=restarted,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+            consent_gateway=FakeConsentGateway(ConsentDecision.ACCEPT),
+        )
+
+        assert result["status"] == "blocked"
+        assert "claimed" in result["message"].lower()
+        assert counting.plan_calls == 0
+        assert fake_runtime.calls == 0
+
+    @pytest.mark.parametrize("failure_mode", ["policy_drift", "tamper"])
+    async def test_change_between_consent_and_claim_has_no_side_effect(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+        monkeypatch: pytest.MonkeyPatch,
+        failure_mode: str,
+    ) -> None:
+        from ariadne.hades_adapter import commands
+
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {
+                "snapshot_hash": snapshot_hash,
+                "hypothesis": f"claim {failure_mode}",
+            },
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        binding = command.get_session_binding(session_id)
+        assert binding is not None and binding.engagement_id is not None
+        handle = command.store.open(binding.engagement_id)
+        assert handle is not None
+
+        if failure_mode == "policy_drift":
+            real_build = commands.build_effective_policy
+
+            def break_after_consent() -> None:
+                def drift(profile, constraints):
+                    policy = real_build(profile, constraints)
+                    return policy.model_copy(
+                        update={"source_digests": ("drifted",)}
+                    )
+
+                monkeypatch.setattr(commands, "build_effective_policy", drift)
+
+        else:
+            def break_after_consent() -> None:
+                events_path = handle.path / "events.jsonl"
+                events_path.write_text(
+                    events_path.read_text().replace(
+                        f"claim {failure_mode}",
+                        "claim modified",
+                    ),
+                    encoding="utf-8",
+                )
+
+        counting = BlockingNmapAdapter()
+        counting.release_execute.set()
+        registry.register("nmap", counting)
+        gateway = CallbackConsentGateway(
+            ConsentDecision.ACCEPT,
+            break_after_consent,
+        )
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=command,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+            consent_gateway=gateway,
+        )
+
+        assert result["status"] == "blocked"
+        assert counting.plan_calls == 0
+        assert fake_runtime.calls == 0
+        assert not any(
+            event["event_type"] == "plan_execution_claimed"
+            for event in command.store.read_events(handle)
+        )
+
+    async def test_concurrent_reject_wins_before_claim_with_zero_side_effect(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+    ) -> None:
+        import asyncio
+
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "reject race"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        counting = BlockingNmapAdapter()
+        counting.release_execute.set()
+        registry.register("nmap", counting)
+        gateway = PausingConsentGateway(ConsentDecision.ACCEPT)
+        execution = asyncio.create_task(handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=command,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+            consent_gateway=gateway,
+        ))
+        await asyncio.to_thread(gateway.started.wait, 5)
+
+        rejected = command.handle(
+            f"reject {proposed['plan_id']}",
+            trusted_session_id=session_id,
+        )
+        gateway.release.set()
+        result = await execution
+
+        assert "rejected" in rejected.lower()
+        assert result["status"] == "blocked"
+        assert counting.plan_calls == 0
+        assert fake_runtime.calls == 0
+
+    async def test_execution_claim_wins_and_reject_is_denied(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+    ) -> None:
+        import asyncio
+
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "claim wins"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        assert "approved" in command.handle(
+            f"approve {proposed['plan_id']}",
+            trusted_session_id=session_id,
+        ).lower()
+        blocking = BlockingNmapAdapter()
+        registry.register("nmap", blocking)
+        execution = asyncio.create_task(handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=command,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+            consent_gateway=UnavailableConsentGateway(),
+        ))
+        await asyncio.to_thread(blocking.execute_started.wait, 5)
+
+        rejected = command.handle(
+            f"reject {proposed['plan_id']}",
+            trusted_session_id=session_id,
+        )
+        second = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=command,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+            consent_gateway=UnavailableConsentGateway(),
+        )
+        blocking.release_execute.set()
+        first = await execution
+
+        assert "claimed" in rejected.lower()
+        assert second["status"] == "blocked"
+        assert "claimed" in second["message"].lower()
+        assert first["status"] in ("executed", "partial")
+        assert blocking.plan_calls == 1
+
+    async def test_claim_and_reject_share_one_serialized_transition(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+    ) -> None:
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "lock contention"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        assert "approved" in command.handle(
+            f"approve {proposed['plan_id']}",
+            trusted_session_id=session_id,
+        ).lower()
+        barrier = Barrier(3)
+
+        def claim():
+            barrier.wait()
+            return command.claim_plan_execution(
+                proposed["plan_id"],
+                trusted_session_id=session_id,
+            )
+
+        def reject():
+            barrier.wait()
+            return command.reject_plan(
+                proposed["plan_id"],
+                trusted_session_id=session_id,
+                decision_channel="slash_command",
+                reason="explicit_user_rejection",
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            claim_future = pool.submit(claim)
+            reject_future = pool.submit(reject)
+            barrier.wait()
+            claimed, rejected = await asyncio.gather(
+                asyncio.wrap_future(claim_future),
+                asyncio.wrap_future(reject_future),
+            )
+
+        reject_won = "rejected." in rejected.lower()
+        assert claimed.claimed is not reject_won
+        if claimed.claimed:
+            assert "claimed" in rejected.lower()
+        else:
+            assert "rejected" in claimed.message.lower()
 
 
 class TestRenderReportHandler:

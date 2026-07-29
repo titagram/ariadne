@@ -144,17 +144,13 @@ def _handler_for(tool_name: str, services: ServiceContainer) -> object:
 
     async def wrapped(args: dict, **context: object) -> str:
         import json
-        # Inject Ariadne services into context if not already present
-        if "ariadne_command" not in context:
-            context["ariadne_command"] = services.command
-        if "planner" not in context:
-            context["planner"] = services.planner
-        if "catalog" not in context:
-            context["catalog"] = services.catalog
-        if "adapter_registry" not in context:
-            context["adapter_registry"] = services.adapter_registry
-        if "runtime" not in context:
-            context["runtime"] = services.adapter_registry.default_runtime
+        # Reserved dependencies are composition-owned and non-overridable.
+        context["ariadne_command"] = services.command
+        context["planner"] = services.planner
+        context["catalog"] = services.catalog
+        context["adapter_registry"] = services.adapter_registry
+        context["runtime"] = services.adapter_registry.default_runtime
+        context["consent_gateway"] = services.consent_gateway
         result = await raw(args, **context)
         return json.dumps(result)
 

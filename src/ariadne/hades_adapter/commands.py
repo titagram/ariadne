@@ -11,6 +11,7 @@ import shlex
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from threading import Lock, RLock
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -89,6 +90,8 @@ class PlanRecord:
         approved_at: When the plan was approved (None if not yet approved).
         approval_source: Provenance for the approval decision.
         rejected: Whether the user has rejected this plan.
+        claimed: Whether execution has been durably claimed.
+        claimed_at: When the execution claim was persisted.
     """
 
     plan: Plan
@@ -99,6 +102,17 @@ class PlanRecord:
     approved_at: float | None = None
     approval_source: str | None = None
     rejected: bool = False
+    claimed: bool = False
+    claimed_at: float | None = None
+
+
+@dataclass(frozen=True)
+class PlanClaimResult:
+    """Outcome of an atomic durable execution claim."""
+
+    claimed: bool
+    message: str
+    record: PlanRecord | None = None
 
 
 # ── Command service ────────────────────────────────────────────────────────
@@ -116,6 +130,17 @@ class AriadneCommand:
         self.ledger = ledger
         self.store = store
         self._plan_ledger: dict[str, PlanRecord] = {}
+        self._plan_locks: dict[str, RLock] = {}
+        self._plan_locks_guard = Lock()
+
+    def _plan_lock(self, plan_id: str) -> RLock:
+        """Return the process-local serialization lock for one plan."""
+        with self._plan_locks_guard:
+            lock = self._plan_locks.get(plan_id)
+            if lock is None:
+                lock = RLock()
+                self._plan_locks[plan_id] = lock
+            return lock
 
     # ── Parsing ─────────────────────────────────────────────────────────
 
@@ -356,12 +381,23 @@ class AriadneCommand:
         """Persist a pending-to-approved transition before mutating memory."""
         if decision_channel not in _DECISION_CHANNELS:
             return "Error: Untrusted plan approval decision channel."
+        with self._plan_lock(plan_id):
+            return self._approve_plan_locked(
+                plan_id,
+                trusted_session_id=trusted_session_id,
+                decision_channel=decision_channel,
+            )
+
+    def _approve_plan_locked(
+        self,
+        plan_id: str,
+        *,
+        trusted_session_id: str,
+        decision_channel: str,
+    ) -> str:
         if not trusted_session_id:
             return "Error: A trusted Hades session identity is required for approval."
-        record = self.get_plan_record(
-            plan_id,
-            trusted_session_id=trusted_session_id,
-        )
+        record = self._recover_plan_record(plan_id, trusted_session_id)
         if record is None:
             return f"Error: Unknown plan: {plan_id!r}"
         if record.session_id != trusted_session_id:
@@ -414,6 +450,7 @@ class AriadneCommand:
         record.approved = True
         record.approved_at = approved_at.timestamp()
         record.approval_source = "user"
+        self._plan_ledger[plan_id] = record
         return (
             f"Plan {plan_id!r} approved. "
             f"Use ariadne_execute_plan to execute."
@@ -447,16 +484,31 @@ class AriadneCommand:
             or reason not in _REJECTION_REASONS
         ):
             return "Error: Untrusted plan rejection decision."
+        with self._plan_lock(plan_id):
+            return self._reject_plan_locked(
+                plan_id,
+                trusted_session_id=trusted_session_id,
+                decision_channel=decision_channel,
+                reason=reason,
+            )
+
+    def _reject_plan_locked(
+        self,
+        plan_id: str,
+        *,
+        trusted_session_id: str,
+        decision_channel: str,
+        reason: str,
+    ) -> str:
         if not trusted_session_id:
             return "Error: A trusted Hades session identity is required for rejection."
-        record = self.get_plan_record(
-            plan_id,
-            trusted_session_id=trusted_session_id,
-        )
+        record = self._recover_plan_record(plan_id, trusted_session_id)
         if record is None:
             return f"Error: Unknown plan: {plan_id!r}"
         if record.rejected:
             return f"Plan {plan_id!r} was already rejected."
+        if record.claimed:
+            return f"Error: Plan {plan_id!r} is already execution-claimed."
 
         binding = self.get_session_binding(trusted_session_id)
         if (
@@ -504,6 +556,7 @@ class AriadneCommand:
             return f"Error: Could not persist plan rejection: {exc}"
         record.approved = False
         record.rejected = True
+        self._plan_ledger[plan_id] = record
         return f"Plan {plan_id!r} rejected."
 
     def _handle_abort(self) -> str:
@@ -591,6 +644,7 @@ class AriadneCommand:
                 "plan_auto_approved",
                 "plan_manually_approved",
                 "plan_rejected",
+                "plan_execution_claimed",
             }:
                 if proposal is None:
                     return None
@@ -628,12 +682,29 @@ class AriadneCommand:
                 payload.get("approval_correlation_id") != correlation_id
                 or payload.get("snapshot_hash") != plan.snapshot_hash
                 or payload.get("trusted_session_id") != trusted_session_id
-                or payload.get("approval_state")
-                not in {"approved", "rejected"}
             ):
                 return None
+            if event_type == "plan_execution_claimed":
+                if (
+                    record.claimed
+                    or record.rejected
+                    or not record.approved
+                    or payload.get("execution_state") != "claimed"
+                    or tuple(payload.get("policy_source_digests", ()))
+                    != handle.snapshot.policy_source_digests
+                ):
+                    return None
+                try:
+                    claimed_at = datetime.fromisoformat(payload["claimed_at"])
+                except (KeyError, TypeError, ValueError):
+                    return None
+                record.claimed = True
+                record.claimed_at = claimed_at.timestamp()
+                continue
+            if payload.get("approval_state") not in {"approved", "rejected"}:
+                return None
             if event_type == "plan_rejected":
-                if record.rejected:
+                if record.rejected or record.claimed:
                     return None
                 try:
                     datetime.fromisoformat(payload["rejected_at"])
@@ -672,6 +743,151 @@ class AriadneCommand:
             record.approved_at = approved_at.timestamp()
             record.approval_source = str(source)
         return record
+
+    def claim_plan_execution(
+        self,
+        plan_id: str,
+        *,
+        trusted_session_id: str,
+    ) -> PlanClaimResult:
+        """Atomically claim one approved plan before adapter planning.
+
+        Rejection and execution use the same per-plan lock.  Every decision is
+        reconstructed from the verified durable chain while holding the lock;
+        the in-memory cache is never authoritative for this transition.
+
+        The lock serializes the single Hades service process. The durable claim
+        prevents restart replay; multi-process writers would additionally need
+        a RunStore-level cross-process compare-and-swap or file lock.
+        """
+        if not trusted_session_id:
+            return PlanClaimResult(
+                claimed=False,
+                message="Trusted Hades session identity is required.",
+            )
+        with self._plan_lock(plan_id):
+            record = self._recover_plan_record(plan_id, trusted_session_id)
+            if record is None:
+                return PlanClaimResult(
+                    claimed=False,
+                    message="Plan is missing or its durable chain is invalid.",
+                )
+            if record.rejected:
+                return PlanClaimResult(
+                    claimed=False,
+                    message="Plan was rejected or revoked.",
+                    record=record,
+                )
+            if record.claimed:
+                return PlanClaimResult(
+                    claimed=False,
+                    message="Plan is already execution-claimed.",
+                    record=record,
+                )
+            if not record.approved:
+                return PlanClaimResult(
+                    claimed=False,
+                    message="Plan is not durably approved.",
+                    record=record,
+                )
+            if time.time() > record.plan.expires_at.timestamp():
+                return PlanClaimResult(
+                    claimed=False,
+                    message="Plan has expired.",
+                    record=record,
+                )
+
+            binding = self.get_session_binding(trusted_session_id)
+            if (
+                binding is None
+                or binding.engagement_id is None
+                or binding.snapshot_hash != record.snapshot_hash
+            ):
+                return PlanClaimResult(
+                    claimed=False,
+                    message="Plan is not bound to the active trusted session.",
+                )
+            handle = self.store.open(binding.engagement_id)
+            if handle is None:
+                return PlanClaimResult(
+                    claimed=False,
+                    message="Engagement run is unavailable.",
+                )
+
+            from ariadne.core.engagement import calculate_snapshot_hash
+            from ariadne.store.integrity import verify_run
+            from ariadne.store.run_store import Event
+
+            snapshot = handle.snapshot
+            if (
+                not verify_run(handle.path).valid
+                or calculate_snapshot_hash(snapshot) != snapshot.snapshot_hash
+                or snapshot.snapshot_hash != record.snapshot_hash
+            ):
+                return PlanClaimResult(
+                    claimed=False,
+                    message="Snapshot or event-chain integrity check failed.",
+                )
+            try:
+                policy = build_effective_policy(
+                    snapshot.profile,
+                    snapshot.constraints,
+                )
+            except Exception:
+                return PlanClaimResult(
+                    claimed=False,
+                    message="Effective policy could not be rebuilt.",
+                )
+            if policy.source_digests != snapshot.policy_source_digests:
+                return PlanClaimResult(
+                    claimed=False,
+                    message="Policy provenance changed after approval.",
+                )
+            if any(
+                capability not in policy.capabilities
+                or not policy.capabilities[capability].allowed
+                for capability in record.plan.capabilities
+            ):
+                return PlanClaimResult(
+                    claimed=False,
+                    message="Plan capabilities are no longer authorized.",
+                )
+
+            claimed_at = datetime.now(UTC)
+            try:
+                self.store.append_event(
+                    handle,
+                    Event(
+                        event_type="plan_execution_claimed",
+                        payload={
+                            "plan_id": plan_id,
+                            "snapshot_hash": record.snapshot_hash,
+                            "trusted_session_id": trusted_session_id,
+                            "approval_correlation_id": (
+                                record.approval_correlation_id
+                            ),
+                            "execution_state": "claimed",
+                            "claimed_at": claimed_at.isoformat(),
+                            "policy_source_digests": list(
+                                policy.source_digests
+                            ),
+                        },
+                        timestamp=claimed_at,
+                    ),
+                )
+            except Exception as exc:
+                return PlanClaimResult(
+                    claimed=False,
+                    message=f"Could not persist execution claim: {exc}",
+                )
+            record.claimed = True
+            record.claimed_at = claimed_at.timestamp()
+            self._plan_ledger[plan_id] = record
+            return PlanClaimResult(
+                claimed=True,
+                message="Plan execution claimed.",
+                record=record,
+            )
 
     def auto_approve_plan(self, plan_id: str) -> None:
         """Mark a durably auto-approved full-autonomy plan as approved."""
