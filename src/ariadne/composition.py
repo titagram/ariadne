@@ -15,11 +15,19 @@ from ariadne.hades_adapter.consent import (
     load_hades_consent_gateway,
 )
 from ariadne.hades_adapter.session import ChallengeLedger
+from ariadne.knowledge import (
+    KnowledgeIndex,
+    LocalToolProbe,
+    RuntimeVerificationStore,
+    ToolCardVerifier,
+)
+from ariadne.store.paths import ariadne_home
 from ariadne.store.run_store import RunStore
 
 _DEFAULT_WORKFLOW_DIR = (
     Path(__file__).resolve().parent.parent.parent / "workflows"
 )
+_DEFAULT_KNOWLEDGE_DIR = Path(__file__).resolve().parent.parent.parent / "knowledge"
 
 
 @dataclass(frozen=True)
@@ -38,6 +46,7 @@ class ServiceContainer:
     execution_coordinator: ExecutionCoordinator = field(
         default_factory=lambda: ExecutionCoordinator(max_concurrency=1)
     )
+    tool_card_verifier: ToolCardVerifier | None = None
     command: AriadneCommand = field(init=False)
     planner: Planner = field(init=False)
 
@@ -57,6 +66,17 @@ class ServiceContainer:
             "command",
             AriadneCommand(ledger=self.ledger, store=self.store),
         )
+        if self.tool_card_verifier is None and _DEFAULT_KNOWLEDGE_DIR.is_dir():
+            knowledge_root = ariadne_home(self.store.base_path) / "knowledge-runtime"
+            object.__setattr__(
+                self,
+                "tool_card_verifier",
+                ToolCardVerifier(
+                    index=KnowledgeIndex.load(_DEFAULT_KNOWLEDGE_DIR),
+                    probe=LocalToolProbe(),
+                    store=RuntimeVerificationStore(knowledge_root),
+                ),
+            )
 
 
 def build_services(profile_name: str) -> ServiceContainer:

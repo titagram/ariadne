@@ -14,6 +14,7 @@ from ariadne.core.enums import (
     EnvironmentProfile,
     FindingStatus,
 )
+from ariadne.core.observations import create_scope_candidate, discovered_asset_status
 
 # ── Enums ──────────────────────────────────────────────────────────────────
 
@@ -32,7 +33,47 @@ def test_environment_profile_values() -> None:
 def test_asset_status_values() -> None:
     assert AssetStatus.IN_SCOPE == "in_scope"
     assert AssetStatus.OBSERVED_ONLY == "observed_only"
-    assert set(AssetStatus) == {"in_scope", "observed_only"}
+    assert AssetStatus.SCOPE_CANDIDATE == "scope_candidate"
+    assert set(AssetStatus) == {"in_scope", "scope_candidate", "observed_only"}
+
+
+def test_distinct_host_is_scope_candidate_but_local_service_is_not() -> None:
+    current = TargetSpec(host="10.10.10.10")
+
+    assert (
+        discovered_asset_status(TargetSpec(host="10.10.10.20"), current)
+        is AssetStatus.SCOPE_CANDIDATE
+    )
+    assert (
+        discovered_asset_status(TargetSpec(host="127.0.0.1"), current)
+        is AssetStatus.IN_SCOPE
+    )
+
+
+def test_scope_candidate_requires_local_evidence() -> None:
+    with pytest.raises(ValueError, match="evidence"):
+        create_scope_candidate(
+            target=TargetSpec(host="10.10.10.20"),
+            source_target=TargetSpec(host="10.10.10.10"),
+            reason="route discovered locally",
+            evidence_ids=(),
+            relation="lateral_host",
+        )
+
+
+def test_same_scope_branch_has_a_stable_candidate_id() -> None:
+    inputs = {
+        "target": TargetSpec(host="10.10.10.20"),
+        "source_target": TargetSpec(host="10.10.10.10"),
+        "reason": "route discovered locally",
+        "evidence_ids": ("artifact-1",),
+        "relation": "route",
+    }
+
+    assert (
+        create_scope_candidate(**inputs).candidate_id
+        == create_scope_candidate(**inputs).candidate_id
+    )
 
 
 def test_finding_status_values() -> None:

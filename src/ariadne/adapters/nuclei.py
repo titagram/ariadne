@@ -19,7 +19,8 @@ Safety invariants
 from __future__ import annotations
 
 import json
-from typing import ClassVar
+from typing import ClassVar, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from ariadne.adapters.base import (
@@ -42,16 +43,48 @@ from ariadne.core.observations import Observation
 # local testing and CTF use.
 _ALLOWLISTED_TEMPLATES: frozenset = frozenset(
     {
-        "cve-2024-1234",
         "tech-detect-apache",
         "tech-detect-nginx",
         "exposed-panel",
         "misconfig-dir-listing",
-        "vuln-sql-error",
     }
 )
 
 _OPERATIONS: frozenset = frozenset({"scan"})
+def _positive_int(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise AdapterError(f"Nuclei {label} must be a positive integer.")
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise AdapterError(
+            f"Nuclei {label} must be a positive integer."
+        ) from exc
+    if parsed < 1:
+        raise AdapterError(f"Nuclei {label} must be a positive integer.")
+    return parsed
+
+
+def is_official_nuclei_template_provenance(value: str) -> bool:
+    """Accept only concrete files or directories in the curated GitHub repo."""
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    segments = parsed.path.split("/")
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == "github.com"
+        and parsed.username is None
+        and parsed.password is None
+        and port is None
+        and len(segments) >= 6
+        and segments[1:3] == ["projectdiscovery", "nuclei-templates"]
+        and segments[3] in {"blob", "tree"}
+        and bool(segments[4])
+        and all(segment not in {"", ".", ".."} for segment in segments[5:])
+    )
 
 
 class NucleiAdapter:
@@ -96,17 +129,63 @@ class NucleiAdapter:
         # Build argv with allowlisted templates
         argv: list[str] = ["nuclei"]
 
-        template_ids = inputs.get("template_ids", ())
-        if isinstance(template_ids, (list, tuple)) and template_ids:
-            for tid in template_ids:
-                if tid not in _ALLOWLISTED_TEMPLATES:
-                    raise AdapterPolicyError(
-                        f"Template {tid!r} is not in the allowlisted "
-                        f"template catalog. Allowed: {sorted(_ALLOWLISTED_TEMPLATES)}"
-                    )
-            argv.extend(["-t"])
-            for tid in template_ids:
-                argv.append(str(tid))
+        raw_candidates = inputs.get("validated_candidates", ())
+        if not isinstance(raw_candidates, (list, tuple)) or not raw_candidates:
+            raise AdapterPolicyError(
+                "Nuclei scan requires a validated template candidate; "
+                "do not run the default template set."
+            )
+        template_ids: list[str] = []
+        required_candidate_keys = {
+            "candidate_id",
+            "template_id",
+            "target",
+            "validation_status",
+            "evidence_id",
+            "provenance",
+        }
+        for candidate in raw_candidates:
+            if not isinstance(candidate, dict):
+                raise AdapterPolicyError(
+                    "Nuclei scan requires a structured validated template "
+                    "candidate tied to persisted evidence."
+                )
+            candidate_map = cast(dict[str, object], candidate)
+            if (
+                set(candidate_map) != required_candidate_keys
+                or candidate_map.get("validation_status") != "validated"
+                or not all(
+                    isinstance(candidate_map.get(key), str)
+                    and bool(str(candidate_map.get(key)).strip())
+                    for key in required_candidate_keys
+                )
+            ):
+                raise AdapterPolicyError(
+                    "Nuclei scan requires a structured validated template "
+                    "candidate tied to persisted evidence."
+                )
+            if candidate_map["target"] != target:
+                raise AdapterPolicyError(
+                    "Nuclei validated template candidate is not tied to "
+                    "the current target."
+                )
+            provenance = str(candidate_map["provenance"])
+            if not is_official_nuclei_template_provenance(provenance):
+                raise AdapterPolicyError(
+                    "Nuclei validated template candidate does not cite the "
+                    "curated ProjectDiscovery template repository."
+                )
+            tid = str(candidate_map["template_id"])
+            if tid not in _ALLOWLISTED_TEMPLATES:
+                raise AdapterPolicyError(
+                    f"Template {tid!r} is not in the allowlisted "
+                    f"template catalog. Allowed: {sorted(_ALLOWLISTED_TEMPLATES)}"
+                )
+            if tid not in template_ids:
+                template_ids.append(tid)
+        argv.extend(["-t"])
+        for tid in template_ids:
+            argv.append(str(tid))
 
         # Target
         argv.extend(["-target", target])
@@ -114,16 +193,41 @@ class NucleiAdapter:
         # JSONL output
         argv.append("-json")
 
-        # Rate limiting
-        argv.extend(["-rate-limit", "50"])
+        rate_limit = _positive_int(
+            inputs.get(
+                "rate_limit",
+                context.limits.max_rate or 1,
+            ),
+            "rate_limit",
+        )
+        template_timeout = _positive_int(
+            inputs.get("template_timeout", 10),
+            "template_timeout",
+        )
+        process_timeout = _positive_int(
+            inputs.get(
+                "timeout",
+                context.limits.max_duration_seconds or 300,
+            ),
+            "timeout",
+        )
+        max_output = _positive_int(
+            inputs.get(
+                "max_output",
+                context.limits.max_output_bytes or 10_000_000,
+            ),
+            "max_output",
+        )
 
-        # Timeout per template
-        argv.extend(["-timeout", str(inputs.get("template_timeout", 10))])
+        # Rate and timeout defaults come from the already-intersected plan
+        # limits so the adapter cannot exceed the engagement policy by default.
+        argv.extend(["-rate-limit", str(rate_limit)])
+        argv.extend(["-timeout", str(template_timeout)])
 
         return ProcessSpec(
             argv=tuple(argv),
-            timeout_seconds=int(inputs.get("timeout", 300)),  # type: ignore[arg-type]
-            max_output_bytes=int(inputs.get("max_output", 10 * 1024 * 1024)),  # type: ignore[arg-type]
+            timeout_seconds=process_timeout,
+            max_output_bytes=max_output,
         )
 
     async def execute(

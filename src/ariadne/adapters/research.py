@@ -31,6 +31,7 @@ from ariadne.adapters.base import (
     ToolProbe,
 )
 from ariadne.core.engagement import TargetSpec
+from ariadne.core.errors import AdapterPolicyError
 from ariadne.core.observations import Observation
 from ariadne.core.research import (
     CveReference,
@@ -328,12 +329,15 @@ class ResearchAdapter:
 
         product = action.inputs.get("product", "")
 
-        # For full_chain research, get product from context observations
+        # Full-chain research must be tied to a structured service fingerprint.
+        # The adapter context intentionally carries no ambient observation
+        # history, so a missing product is a hard evidence boundary rather
+        # than an invitation to query a synthetic ``unknown`` product.
         if not product and action.inputs.get("full_chain"):
-            # Try to find the best known product from the target info
-            # In a full implementation this reads the evidence store;
-            # for now use a sensible default
-            product = "unknown"
+            raise AdapterPolicyError(
+                "Research full_chain is blocked: missing evidence for a "
+                "validated service product or fingerprint."
+            )
 
         if not product:
             product = "unknown"

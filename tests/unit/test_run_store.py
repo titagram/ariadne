@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import stat
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,7 @@ from ariadne.core.engagement import (
     EngagementSnapshot,
     Objective,
     TargetSpec,
+    amend_engagement,
 )
 from ariadne.core.enums import AutonomyMode, EnvironmentProfile
 from ariadne.store.run_store import ArtifactInput, Event, RunStore
@@ -247,6 +249,54 @@ def test_create_creates_run_directory(store: RunStore, snapshot: EngagementSnaps
     handle = store.create(snapshot)
     assert handle.path.is_dir()
     assert handle.path.stat().st_mode & 0o700
+
+
+def test_amend_snapshot_preserves_every_immutable_revision(
+    store: RunStore,
+    snapshot: EngagementSnapshot,
+) -> None:
+    first = store.create(snapshot)
+    second_snapshot = amend_engagement(
+        snapshot,
+        targets=snapshot.targets + (TargetSpec(host="10.10.10.20"),),
+    )
+
+    second = store.amend_snapshot(first, second_snapshot)
+
+    versions = second.path / "snapshots"
+    assert json.loads((versions / "0001.json").read_text())["snapshot_hash"] == (
+        snapshot.snapshot_hash
+    )
+    assert json.loads((versions / "0002.json").read_text())["snapshot_hash"] == (
+        second_snapshot.snapshot_hash
+    )
+    assert store.open(snapshot.engagement_id).snapshot == second_snapshot
+
+
+def test_amend_snapshot_rejects_nonlinked_revision(
+    store: RunStore,
+    snapshot: EngagementSnapshot,
+) -> None:
+    first = store.create(snapshot)
+    invalid = amend_engagement(snapshot).model_copy(
+        update={"previous_snapshot_hash": "0" * 64},
+    )
+
+    with pytest.raises(ValueError, match="link"):
+        store.amend_snapshot(first, invalid)
+
+
+def test_write_output_is_integrity_tracked(
+    store: RunStore,
+    snapshot: EngagementSnapshot,
+) -> None:
+    handle = store.create(snapshot)
+
+    output_path = store.write_output(handle, "walkthrough.md", b"# Report\n")
+
+    assert output_path.read_bytes() == b"# Report\n"
+    manifest = json.loads((handle.path / "integrity.manifest").read_text())
+    assert manifest["walkthrough.md"] == hashlib.sha256(b"# Report\n").hexdigest()
 
 
 # ── Event model tests ─────────────────────────────────────────────────────────

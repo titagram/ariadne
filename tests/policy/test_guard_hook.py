@@ -29,7 +29,11 @@ def command(tmp_path) -> AriadneCommand:
         ledger=ChallengeLedger(),
         store=RunStore(base_path=tmp_path),
     )
-    cmd.prepare(_answers(), session_id="active-session")
+    cmd.prepare(
+        _answers(),
+        session_id="active-session",
+        trusted_confirmation_digest="a" * 64,
+    )
     return cmd
 
 

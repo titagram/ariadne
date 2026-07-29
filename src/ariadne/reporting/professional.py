@@ -6,11 +6,11 @@ validated run dossier.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from ariadne.reporting.dossier import DossierBuilder
 from ariadne.reporting.models import RenderedReport
 from ariadne.reporting.validation import ReportOptions
 from ariadne.store.run_store import RunHandle
@@ -43,6 +43,7 @@ class ProfessionalRenderer:
             )
         else:
             self._env = _ENV
+        self._dossier_builder = DossierBuilder()
 
     def render(
         self,
@@ -58,101 +59,68 @@ class ProfessionalRenderer:
         Returns:
             A ``RenderedReport`` with HTML text and referenced assets.
         """
-        snapshot = run.snapshot
+        dossier = self._dossier_builder.build(run, options)
         template = self._env.get_template(_TEMPLATE_NAME)
 
-        # Build template variables
-        targets = list(snapshot.targets)
-        objectives_data = [
-            {
-                "kind": o.kind,
-                "description": o.description,
-                "completed": False,
-            }
-            for o in snapshot.objectives
-        ]
-
-        findings_data: list[dict] = []
-        for t in targets:
-            findings_data.append({
-                "title": "Port Discovery",
-                "severity": "medium",
-                "status": "validated",
-                "target": t.host,
-                "description": (
-                    "Open ports and services were identified on the target "
-                    "host during the enumeration phase."
-                ),
-                "evidence": ["nmap_result.txt"],
-            })
+        validated_findings = tuple(
+            finding for finding in dossier.findings
+            if finding.status == "validated"
+        )
+        candidate_findings = tuple(
+            finding for finding in dossier.findings
+            if finding.status == "candidate"
+        )
+        evidence_count = len(dossier.evidence)
+        executive_summary = (
+            f"The persisted engagement dossier contains "
+            f"{len(validated_findings)} validated finding(s) and "
+            f"{len(candidate_findings)} candidate finding(s), backed by "
+            f"{evidence_count} event-backed evidence artifact(s)."
+        )
 
         text = template.render(
-            classification="Confidential",
+            classification=(
+                "Authorized assessment"
+                if dossier.authorization_attested
+                else "Authorization not attested"
+            ),
             report_version="1.0",
-            generated_at=datetime.now(UTC).isoformat(),
-            engagement_id=str(snapshot.engagement_id),
+            generated_at=dossier.generated_at,
+            engagement_id=dossier.engagement_id,
             disclaimer=(
-                "This report contains confidential findings from an authorized "
-                "penetration test conducted in a controlled lab environment. "
-                "Distribution is limited to authorized personnel only."
+                "This report describes an authorized assessment. Its factual "
+                "sections contain only data persisted in the engagement dossier."
             ),
-            executive_summary=(
-                "A penetration test was conducted against the specified targets "
-                "within the authorized scope. The assessment identified security "
-                "findings that have been documented with corresponding "
-                "remediation recommendations."
-            ),
+            executive_summary=executive_summary,
             methodology=(
-                "The assessment followed the Ariadne methodology: reconnaissance, "
-                "enumeration, hypothesis-driven attack planning, controlled "
-                "exploitation, post-exploration, privilege escalation, and "
-                "cleanup verification."
+                "Report activity is organized using the Ariadne methodology: "
+                "reconnaissance, enumeration, hypothesis-driven attack planning, "
+                "controlled exploitation, post-exploration, privilege escalation, "
+                "and cleanup verification."
             ),
-            targets=targets,
-            objectives=objectives_data,
-            profile=snapshot.profile.value,
-            risk_counts={
-                "critical": 0,
-                "high": 0,
-                "medium": 1,
-                "low": 0,
-                "informational": 0,
-            },
-            findings=findings_data,
-            compromise_narrative=[
-                "Target identified and scoped within engagement contract.",
-                "Initial reconnaissance performed using Nmap port scan.",
-                "Open services enumerated and fingerprinted.",
-                "Findings documented and validated with evidence.",
-            ],
-            remediation={
-                "immediate": [
-                    "Review and remediate identified high-severity issues.",
-                ],
-                "short_term": [
-                    "Implement network segmentation where applicable.",
-                ],
-                "long_term": [
-                    "Establish a regular security assessment schedule.",
-                ],
-            },
-            compromised=[
-                "No hosts were compromised during this assessment.",
-            ],
-            cleanup_summary=(
-                "All artifacts and tool outputs have been cleaned up. "
-                "No persistent access mechanisms were deployed."
-            ),
+            targets=dossier.targets,
+            objectives=dossier.objectives,
+            profile=dossier.profile,
+            risk_counts=dossier.risk_counts,
+            findings=dossier.findings,
+            validated_findings=validated_findings,
+            candidate_findings=candidate_findings,
+            evidence=dossier.evidence,
+            compromise_narrative=dossier.lifecycle,
+            remediation=dossier.remediation,
+            compromised=dossier.compromised,
+            cleanup=dossier.cleanup,
             scoring_notes=(
-                "Findings are scored using the Ariadne risk framework, "
-                "which considers exploitability, impact, and environment "
-                "context."
+                "Risk counts include only separately validated findings with "
+                "an explicitly persisted severity. Candidate alerts remain "
+                "listed but are excluded from validated risk totals."
             ),
         )
 
-        # Collect referenced assets (CSS, etc.)
         css_path = _TEMPLATE_DIR / "styles.css"
-        assets = [css_path] if css_path.is_file() else []
+        assets = list(dict.fromkeys(item.path for item in dossier.evidence))
+        if css_path.is_file():
+            assets.append(css_path)
 
         return RenderedReport(
             text=text,

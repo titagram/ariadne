@@ -651,6 +651,24 @@ class PostExAdapter:
 
         return tuple(observations)
 
+    def parse_for_target(
+        self,
+        result: ProcessResult,
+        target: object,
+    ) -> tuple[Observation, ...]:
+        """Bind locally parsed host evidence to the authorized target."""
+        from ariadne.core.engagement import TargetSpec
+
+        resolved_target = (
+            target
+            if isinstance(target, TargetSpec)
+            else TargetSpec(host=str(target))
+        )
+        return tuple(
+            observation.model_copy(update={"target": resolved_target})
+            for observation in self.parse(result)
+        )
+
     def _parse_pspy_commands(self, stdout: str) -> list[dict[str, str]]:
         """Parse pspy output into structured command entries."""
         commands: list[dict[str, str]] = []

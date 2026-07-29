@@ -39,6 +39,14 @@ class UnavailableConsentGateway:
         del plan
         return ConsentDecision.UNAVAILABLE
 
+    async def request_contract(self, summary: dict[str, object]) -> ConsentDecision:
+        del summary
+        return ConsentDecision.UNAVAILABLE
+
+    async def request_amendment(self, summary: dict[str, object]) -> ConsentDecision:
+        del summary
+        return ConsentDecision.UNAVAILABLE
+
 
 class HadesConsentGateway:
     """Adapter for Hades' ContextVar-scoped public elicitation API."""
@@ -94,13 +102,51 @@ class HadesConsentGateway:
             },
             sort_keys=True,
         )
+        return await self._request(
+            message=message,
+            description=description,
+            surface="ariadne-plan",
+        )
+
+    async def request_contract(
+        self,
+        summary: dict[str, object],
+    ) -> ConsentDecision:
+        import json
+
+        target = str(summary.get("target", ""))
+        return await self._request(
+            message=f"Confirm the Ariadne engagement contract for {target}?",
+            description=json.dumps(summary, sort_keys=True),
+            surface="ariadne-contract",
+        )
+
+    async def request_amendment(
+        self,
+        summary: dict[str, object],
+    ) -> ConsentDecision:
+        import json
+
+        return await self._request(
+            message="Confirm this targeted Ariadne contract amendment?",
+            description=json.dumps(summary, sort_keys=True),
+            surface="ariadne-amendment",
+        )
+
+    async def _request(
+        self,
+        *,
+        message: str,
+        description: str,
+        surface: str,
+    ) -> ConsentDecision:
         async def invoke() -> object:
             outcome = await asyncio.to_thread(
                 self._requester,
                 message=message,
                 description=description,
                 timeout_seconds=self._requester_timeout_seconds,
-                surface="ariadne-plan",
+                surface=surface,
             )
             return await outcome if isawaitable(outcome) else outcome
 

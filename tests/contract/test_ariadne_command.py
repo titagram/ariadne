@@ -47,6 +47,7 @@ def test_prepare_atomically_locks_snapshot_and_binding(
     result = command.prepare(
         valid_answers,
         session_id="trusted-session",
+        trusted_confirmation_digest="a" * 64,
     )
     assert result.status == "active"
     assert result.engagement_id is not None
@@ -62,14 +63,22 @@ def test_prepare_requires_nonempty_trusted_session(
     valid_answers: dict,
 ) -> None:
     with pytest.raises(ValueError, match="trusted"):
-        command.prepare(valid_answers, session_id="")
+        command.prepare(
+            valid_answers,
+            session_id="",
+            trusted_confirmation_digest="a" * 64,
+        )
 
 
 def test_atomic_lock_appends_auditable_events(
     command: AriadneCommand,
     valid_answers: dict,
 ) -> None:
-    result = command.prepare(valid_answers, session_id="trusted-session")
+    result = command.prepare(
+        valid_answers,
+        session_id="trusted-session",
+        trusted_confirmation_digest="a" * 64,
+    )
     handle = command.store.open(result.engagement_id)
     assert handle is not None
     assert [

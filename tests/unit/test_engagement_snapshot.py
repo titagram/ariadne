@@ -12,6 +12,7 @@ from ariadne.core.engagement import (
     EngagementDraft,
     Objective,
     TargetSpec,
+    amend_engagement,
     amend_scope,
     calculate_snapshot_hash,
 )
@@ -304,6 +305,25 @@ def test_scope_amendment_creates_new_linked_snapshot(
     assert second.revision == first.revision + 1
     assert second.previous_snapshot_hash == first.snapshot_hash
     assert second.snapshot_hash != first.snapshot_hash
+
+
+def test_contract_amendment_versions_intensity_and_exclusions(
+    confirmed_draft: EngagementDraft,
+    confirmation: Confirmation,
+) -> None:
+    first = lock_engagement(confirmed_draft, confirmation)
+    second = amend_engagement(
+        first,
+        intensity="high",
+        exclusions=("dos", " password spraying ", "dos"),
+    )
+
+    assert second.revision == first.revision + 1
+    assert second.previous_snapshot_hash == first.snapshot_hash
+    assert second.intensity == "high"
+    assert second.exclusions == ("dos", "password spraying")
+    assert first.intensity == "normal"
+    assert first.exclusions == ()
 
 
 def test_scope_amendment_preserves_original_fields(

@@ -1,240 +1,145 @@
 # Ariadne Operator Guide
 
-## Overview
+## 1. Start an Engagement
 
-This guide walks through a typical Ariadne engagement from start to finish,
-covering both environment profiles, autonomy modes, scope amendment, and
-reporting.
-
----
-
-## 1. Starting an engagement
-
-In a Hades Hermes session, either write a natural-language prompt containing
-the authorized target and objective or enter:
+In a Hades/Hermes session, provide an authorized target and objective in
+natural language or enter:
 
 ```text
 /ariadne new
 ```
 
-Ariadne will begin interactive Q/A covering:
+Ariadne reuses fields already present in the prompt or Hades project context
+and asks only for missing values:
 
-1. **Authorization attestation** — confirm you are authorized to test the target
-2. **Environment profile** — choose `private-lab` or `htb`
-3. **Target** — one IP address or FQDN
-4. **Objectives** — one or more of: `user_flag`, `root_flag`, `domain_admin`, `proof`, `custom`
-5. **Time window** — permitted testing duration
-6. **Autonomy mode** — `controlled` or `full`
-7. **Additional constraints** — ports, rates, credentials, auth limits
-8. **Reporting preferences** — offline walkthrough, professional report, SysReptor
+1. environment profile, such as `private-lab` or `htb`;
+2. target IP address or FQDN;
+3. one or more explicit objectives;
+4. bounded intensity: `low`, `normal`, or `high`;
+5. optional exclusions.
 
-After Q/A, Ariadne displays a **contract summary** and the current legal
-disclaimer. Explicit acceptance locks and activates the engagement immediately.
-
-### Example: Private lab
+It then displays one contract summary containing the authorization attestation
+and current legal disclaimer. One trusted Hades acceptance atomically writes
+revision 1 and binds it to the current session. There are no confirmation
+tokens or repeated flags.
 
 ```text
-/ariadne new
-  Profile: private-lab
-  Target: 10.10.10.10
-  Objectives: user_flag, root_flag
-  Autonomy: controlled
-  Time window: 8 hours
-→ Contract summary displayed
-→ Disclaimer accepted; engagement locked and bound
+Target: 10.10.10.10
+Profile: private-lab
+Objectives: user_flag, root_flag
+Intensity: normal
+Exclusions: denial of service
+→ one summary
+→ one Hades confirmation
+→ active engagement
 ```
 
-### Example: HTB
+## 2. Autonomous Operation
 
-```text
-/ariadne new
-  Profile: htb
-  Target: box.htb
-  Objectives: user_flag, root_flag
-  Autonomy: full
-  Time window: 24 hours
-→ Contract summary displayed
-→ Disclaimer accepted; engagement locked and bound
-```
+After activation, Ariadne calls the deterministic `ariadne_run` loop. Routine
+curated, in-policy actions proceed automatically in both `controlled` and
+`full`. The modes can select different policy ceilings, but neither changes
+the non-overridable guardrails.
 
----
+The loop persists each plan, atomically claims execution, captures the real
+transcript, classifies evidence, and advances until:
 
-## 2. Controlled vs Full autonomy
+- every objective and cleanup condition is satisfied and reports are written;
+- a distinct target needs a scope amendment;
+- uncurated code is required;
+- policy or an `always_manual` capability needs a decision;
+- a material credential or choice is missing;
+- report evidence fails a quality gate.
 
-### Controlled autonomy (default)
+Hades's `--yolo` flag has no effect on Ariadne guardrails.
 
-Every bounded action plan requires explicit approval:
+## 3. Amend an Active Contract
 
-```text
-/ariadne plan
-→ Plan p1: scan TCP ports 1-10000 on 10.10.10.10
-           expected duration: 5 min
-           expected evidence: open ports, service banners
-/ariadne approve p1
-```
-
-### Full autonomy
-
-In `full`, curated, catalog-backed, in-policy plans without an `always_manual`
-capability are durably auto-approved. The agent immediately calls execution,
-repeats propose/execute through objective validation and cleanup, and
-automatically renders the local offline report.
-
-The continuous loop pauses only for:
-
-- scope changes or newly discovered targets;
-- policy or guardrail conflicts;
-- host container-runtime installation;
-- acquisition or execution of uncurated code;
-- missing credentials or decisions;
-- high-impact actions not already authorized by the contract;
-- SysReptor network push.
-
-The offline local report is generated automatically at completion. SysReptor
-network push remains a separate direct decision.
-
-> Hades's `--yolo` flag has **no effect** on Ariadne guardrails.
-
----
-
-## 3. Scope amendment
-
-If you want to add a target during an active engagement:
+An engagement is amendable even though every version is immutable:
 
 ```text
 /ariadne amend-scope
-→ New target: 10.10.10.20
-→ Contract summary displayed
-→ Explicit scope-amendment approval requested
+→ agent calls ariadne_amend_engagement with the proposed delta and reason
+→ one targeted Hades confirmation
+→ immutable revision 2 linked to revision 1
 ```
 
-This creates a new immutable snapshot linked to the previous one. Any plans
-associated with the previous snapshot are invalidated.
+An amendment may add targets or revise objectives, intensity, and exclusions.
+Plans bound to the earlier snapshot become stale.
 
-> Targets added this way are `in_scope`. Newly *discovered* hosts are always
-> `observed_only` until a direct scope amendment.
+### Lateral movement
 
----
+Localhost and services of the current target do not require an amendment. A
+distinct host or container becomes a `scope_candidate`. Ariadne first saves
+only the evidence visible on the current machine, explains what was discovered
+and why traffic might be useful, then requests one targeted amendment before
+sending any packets.
 
-## 4. Pause and abort
+If declined, the candidate branch is recorded as blocked. Ariadne continues
+with other in-scope alternatives and does not repeatedly propose the same
+candidate.
 
-### Pause
+## 4. Tools and Kali
 
-```text
-/ariadne pause
-```
+Playbooks request capabilities rather than fixed product names. Before using a
+tool, Ariadne consults its canonical Markdown card. When the card is absent or
+stale, it checks the installed version and local `--help`/`man` output first,
+then official online documentation. The resulting card is concise and records
+version, source, and date. Successful execution promotes it to
+`runtime_verified`.
 
-Pauses the current engagement. Running containers are kept alive; no new actions
-are dispatched.
+Local curated tools are preferred. Ariadne can select the official
+`kalilinux/kali-rolling` image when a specialist toolchain, isolation,
+VPN/routing, or compatibility makes it necessary, but container lifecycle is
+not yet connected to the current Hades execution path. Docker is therefore not
+started automatically today.
 
-```text
-/ariadne resume
-```
+No VM fallback is used. Acquiring or running uncurated code also remains a
+specific approval boundary.
 
-Resumes from the paused state.
-
-### Abort
-
-```text
-/ariadne abort
-```
-
-Stops the engagement and triggers cleanup: running containers are torn down,
-temporary files are removed.
-
----
-
-## 5. Cleanup
-
-Cleanup happens automatically at the end of a successful engagement, after an
-abort, or on failure. Manual cleanup:
-
-```text
-/ariadne cleanup
-```
-
-This removes:
-- Running Docker containers from the engagement stack
-- Temporary files created during execution
-- Transient network configurations
-
-The dossier (evidence, findings, events) is **not** removed by cleanup.
-
----
-
-## 6. Offline reporting
-
-In `full`, Ariadne generates the offline report automatically after objective
-validation and cleanup. In `controlled`, or to regenerate a report explicitly:
-
-```text
-/ariadne report
-```
-
-This produces:
-- **Technical walkthrough** (`walkthrough.md`) — markdown with shells, flags,
-  and key commands
-- **Professional report** (`professional.html`) — formatted HTML suitable for
-  printing or PDF conversion
-- **Professional PDF** (`professional.pdf`) — if Chromium is available in the host
-
-Reports are written to the profile dossier:
-
-```
-~/.hermes/profiles/<name>/ariadne/runs/<engagement-id>/
-```
-
----
-
-## 7. SysReptor reporting
-
-### Preview
-
-Before pushing, preview the SysReptor bundle:
-
-```text
-/ariadne sysreptor preview
-```
-
-This generates an offline ZIP bundle with:
-- Manifest (`manifest.json`) with SHA-256 hashes
-- Findings as individual JSON files
-- Evidence as referenced files
-- Summary metadata
-
-The preview is written to the report directory but is **not pushed** to
-SysReptor.
-
-### Push
-
-To push to a SysReptor instance:
-
-```text
-/ariadne sysreptor push
-```
-
-This requires:
-1. SysReptor CLI configured with API credentials
-2. User confirmation (always required, even under full autonomy)
-
-The push reports progress and confirms successful upload or error details.
-
-> SysReptor credentials, API URL, and project template are configured in the
-> SysReptor CLI configuration, not in Ariadne.
-
----
-
-## 8. Monitoring
+## 5. Status
 
 ```text
 /ariadne status
 ```
 
-Shows current engagement state, active snapshot hash, elapsed time, and
-progress toward objectives.
+The current plugin exposes status through `ariadne_status`. It does not expose
+interactive pause, resume, or abort commands; a real blocking boundary leaves
+the immutable dossier intact for a later amendment or operator decision.
+
+## 6. Offline Reporting
+
+Successful completion automatically writes:
 
 ```text
-/ariadne evidence
+~/.hermes/profiles/<name>/ariadne/runs/<engagement-id>/
+├── snapshots/              # immutable contract revisions
+├── artifacts/              # real evidence and command transcripts
+├── events.jsonl            # hash-chained audit events
+├── walkthrough.md          # technical CTF walkthrough
+└── professional.html       # professional evidence-backed report
 ```
 
-Lists collected evidence artifacts with their hashes.
+Reports contain only persisted evidence. Screenshots, URLs, CVEs, PoCs, and
+exploit details appear only when they were actually collected and referenced.
+Scanner alerts remain labelled as candidates and are excluded from validated
+risk totals until a separate validation event is persisted. Nuclei execution
+also requires a structured, evidence-linked validated template candidate for
+the current target; a missing candidate stops at a typed boundary without
+starting the subprocess.
+Use `ariadne_render_report` to regenerate local outputs after the quality gate
+passes. `include_flags` and `include_secrets` are explicit opt-in inputs; both
+default to redaction.
+
+## 7. SysReptor and PDF follow-up
+
+Offline SysReptor bundle and PDF helper modules are present, but neither is
+currently exposed through a Hades tool or generated automatically. The active
+workflow produces the Markdown walkthrough and professional HTML dossier only.
+Any future SysReptor push must remain a separate explicit operator action.
+
+## 8. Verification
+
+Project tests use a fake runtime for the representative end-to-end dry-run;
+they do not perform a real pentest. There is currently no `/ariadne doctor`
+command.

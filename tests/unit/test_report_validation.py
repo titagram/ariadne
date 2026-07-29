@@ -7,6 +7,9 @@ Run::
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 
 from ariadne.reporting.models import RenderedReport
@@ -106,3 +109,23 @@ def test_validation_result_is_dataclass(default_options: ReportOptions) -> None:
     assert passed.valid
     assert not failed.valid
     assert len(failed.errors) == 1
+
+
+def test_every_objective_in_a_multi_objective_contract_needs_its_own_proof(
+    valid_run: RunHandle,
+    default_options: ReportOptions,
+) -> None:
+    lock_path = valid_run.path / "engagement.lock.yaml"
+    snapshot = json.loads(lock_path.read_text(encoding="utf-8"))
+    snapshot["objectives"].append({"kind": "root_flag", "description": ""})
+    lock_bytes = json.dumps(snapshot, sort_keys=True, indent=2).encode("utf-8")
+    lock_path.write_bytes(lock_bytes)
+    manifest_path = valid_run.path / "integrity.manifest"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["engagement.lock.yaml"] = hashlib.sha256(lock_bytes).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2))
+
+    result = ReportValidator().validate(valid_run, default_options)
+
+    assert not result.valid
+    assert any("root_flag" in error for error in result.errors)

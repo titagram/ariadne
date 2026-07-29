@@ -22,8 +22,8 @@ playbooks, typed tool adapters, evidence, and reporting.
 
 - **Hades** 0.17.0 or later (Hermes agent)
 - **Python** 3.11–3.13
-- **Docker** (recommended: Docker Desktop for macOS/Windows, or `docker.io` on
-  Linux) — see [Docker prerequisites](#docker-prerequisites) below
+- **Docker**, only for a future Kali execution integration when isolation or a
+  specialist toolchain is required
 - **Git** to clone the repository
 
 ### Install as a Hades plugin
@@ -50,72 +50,72 @@ hades plugins install file:///Users/gabriele/Dev/ariadne
 
 ---
 
-## Docker prerequisites
+## Conditional Kali runtime
 
-Ariadne executes all target-facing tools inside Docker containers based on the
-official `kalilinux/kali-rolling` image and an OWASP ZAP stable image.
+Ariadne's runtime selector prefers ordinary curated host tools and selects the
+official `kalilinux/kali-rolling` image only for specialist tooling, isolation,
+VPN/routing, or compatibility. The selector is implemented, but lifecycle and
+network execution for the Kali container are not yet wired into the Hades
+plugin; current bounded execution remains local.
 
-Before starting an engagement:
-
-1. Install Docker Desktop (macOS/Windows) or `docker.io` (Linux).
-2. Ensure the Docker daemon is running:
-   ```bash
-   docker info
-   ```
-3. The first `/ariadne new` will run a preflight check and present the images
-   it intends to pull. Confirm to proceed.
-
-> Ariadne does not use a VM fallback. If Docker is unavailable, the
-> `/ariadne doctor` command will report the issue and guide through
-> installation.
+There is no VM fallback. If Docker is required but missing, Ariadne stops at a
+host-install boundary. It may offer package-manager installation where
+supported, but performs it only after specific user approval.
 
 ---
 
 ## Quick start — no-target dry run
 
-You can verify the plugin is operational without engaging a real target by
-running `/ariadne doctor` in a Hades session:
+Use the project's representative fake-runtime test to verify the plugin
+without contacting a target:
 
-```text
-/ariadne doctor
+```bash
+.venv/bin/pytest -q tests/contract/test_autonomous_run.py
 ```
 
-This checks:
-- Plugin registration and skill availability
-- Docker daemon presence (without pulling images)
-- Hades version compatibility
-- Filesystem permissions for the dossier
-
-No target-side action is initiated.
+There is currently no exposed `/ariadne doctor` command.
 
 ---
 
 ## Usage
 
-In a Hermes session, the user can simply prompt with an authorized target and
-objective. Ariadne asks a short Q/A for missing contract fields, displays the
-disclaimer, and atomically locks the accepted answers. `/ariadne new` starts the
-same flow explicitly.
+In a Hermes session, supply an authorized target and objective. Ariadne asks
+only for missing profile, target, objectives, intensity, and exclusions, then
+shows one summary with the legal disclaimer. Hades performs one trusted
+confirmation and atomically binds the accepted snapshot.
 
-1. **`/ariadne new`** — Interactive Q/A to define the engagement contract
-   (target, objectives, profile, autonomy mode, time window, etc.)
-2. **Accept the current disclaimer** — Atomically lock and bind the completed
-   Q/A to the trusted Hades session
-3. In **`full`**, Ariadne continuously proposes and immediately executes
-   curated, catalog-backed, in-policy plans until objective and cleanup
-   completion, then automatically generates the local offline reports
-4. In **`controlled`**, every bounded plan requires
-   **`/ariadne approve <plan-id>`**
-5. Ariadne pauses only for scope amendments, policy/guardrail conflicts,
-   `always_manual` capabilities, host installation, uncurated code, missing
-   credentials/decisions, or SysReptor network push
-6. **`/ariadne status`**, **`/ariadne evidence`**, and **`/ariadne abort`**
-   remain available throughout
+After confirmation, `ariadne_run` proceeds autonomously in both `controlled`
+and `full` through objective completion, cleanup, and offline reporting.
+Interaction occurs only at a true boundary: targeted scope amendment,
+policy/guardrail conflict, an `always_manual` capability, host installation,
+uncurated code, or a missing material decision.
 
 Guardrails, immutable session/snapshot binding, plan expiry, and scope isolation
 apply identically in both autonomy modes.
 
 See the [Operator Guide](docs/operator-guide.md) for detailed walkthroughs.
+
+## Knowledge base
+
+The `knowledge/` directory is the canonical knowledge base and wiki source.
+Markdown frontmatter links methodology, services, techniques, tools, and
+official sources through stable `id`, `next`, `requires`, `policy`, and
+`provenance` fields. Hades provides indexing, search, memory, and project
+awareness; Ariadne does not add a graph database, vector database, crawler, or
+separate RAG pipeline.
+
+Tool documentation is recovered just in time from the installed version's
+`--help`/`man` output, then from official documentation if needed. Concise tool
+cards record version, source, and date and become `runtime_verified` only after
+successful bounded execution. The execution path derives the tool identity
+from the authorized `ProcessSpec`; a curated playbook can declare a
+`tool_card` with its official HTTPS source and concise summary when that tool
+is not yet in the canonical knowledge base. The declaration also pins the
+documentation source date; discovery is fail-closed when the declaration is
+missing or unsafe. The real action `ProcessSpec` is policy-authorized before
+the fixed `--version`/`--help` probes run. Failed executions leave the new card
+in `discovered` state. This does not authorize uncurated installation or
+execution.
 
 ## Report locations
 
@@ -124,10 +124,11 @@ After a completed engagement, reports are written to the profile-scoped dossier:
 ```
 ~/.hermes/profiles/<profile>/ariadne/runs/<engagement-id>/
 ├── walkthrough.md          # Technical CTF walkthrough
-├── professional.html       # Professional HTML report
-├── professional.pdf        # Professional PDF report (if Chromium available)
-└── sysreptor/              # SysReptor offline bundle (if generated)
+└── professional.html       # Professional HTML report
 ```
+
+PDF export and SysReptor bundle/push helpers exist as library components, but
+they are not exposed by the current Hades plugin workflow.
 
 ## Removal
 

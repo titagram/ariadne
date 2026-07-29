@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
@@ -11,6 +12,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NoReturn
 
+import yaml
 from pydantic import BaseModel, ConfigDict
 
 from ariadne.adapters.base import Runtime
@@ -138,6 +140,30 @@ class ExecutionContractRegistry:
 
     @classmethod
     def curated(cls) -> ExecutionContractRegistry:
+        def bounded(
+            adapter: str,
+            operations: tuple[str, ...],
+            executable_ids: frozenset[str],
+            implementation_id: str,
+            *,
+            allow_stdin: bool = False,
+        ) -> list[ExecutionContract]:
+            return [
+                ExecutionContract(
+                    adapter=adapter,
+                    operation=operation,
+                    executable_ids=executable_ids,
+                    implementation_id=implementation_id,
+                    allow_stdin=allow_stdin,
+                    max_rate=1000,
+                    max_concurrency=5,
+                    max_attempts=3,
+                    max_duration_seconds=14_400,
+                    max_output_bytes=100_000_000,
+                )
+                for operation in operations
+            ]
+
         contracts = [
             ExecutionContract(
                 adapter="research",
@@ -168,6 +194,155 @@ class ExecutionContractRegistry:
                     "udp_targeted",
                 )
             ],
+            *bounded(
+                "httpx",
+                ("scan",),
+                frozenset({"httpx"}),
+                "ariadne.adapters.httpx.HttpxAdapter",
+                allow_stdin=True,
+            ),
+            *bounded(
+                "zap",
+                ("passive_scan", "active_scan", "spider"),
+                frozenset({"zap.sh"}),
+                "ariadne.adapters.zap.ZapAdapter",
+                allow_stdin=True,
+            ),
+            *bounded(
+                "nuclei",
+                ("scan",),
+                frozenset({"nuclei"}),
+                "ariadne.adapters.nuclei.NucleiAdapter",
+            ),
+            *bounded(
+                "screenshot",
+                ("capture",),
+                frozenset({"chromium"}),
+                "ariadne.adapters.screenshot.ScreenshotAdapter",
+            ),
+            *bounded(
+                "postex",
+                (
+                    "sudo_rules",
+                    "suid_files",
+                    "file_capabilities",
+                    "scheduled_jobs",
+                    "linpeas",
+                    "pspy_bounded",
+                ),
+                frozenset({"ssh"}),
+                "ariadne.adapters.postex.PostExAdapter",
+            ),
+            # The immutable action inputs select an OS-specific executable
+            # for these shared operations.  Runtime policy still requires the
+            # exact executable to be explicitly allowed by that capability.
+            *bounded(
+                "postex",
+                ("identity", "services"),
+                frozenset({"ssh", "impacket-wmiexec"}),
+                "ariadne.adapters.postex.PostExAdapter",
+            ),
+            *bounded(
+                "postex",
+                (
+                    "token_privileges",
+                    "scheduled_tasks",
+                    "registry",
+                    "privesccheck",
+                ),
+                frozenset({"impacket-wmiexec"}),
+                "ariadne.adapters.postex.PostExAdapter",
+            ),
+            *bounded(
+                "postex",
+                ("winpeas", "seatbelt"),
+                frozenset({"impacket-smbexec"}),
+                "ariadne.adapters.postex.PostExAdapter",
+            ),
+            *bounded(
+                "pivot",
+                ("start_tunnel",),
+                frozenset({"ligolo-proxy", "chisel", "ssh"}),
+                "ariadne.adapters.pivot.PivotAdapter",
+            ),
+            *bounded(
+                "pivot",
+                ("add_route", "remove_route"),
+                frozenset({"ip"}),
+                "ariadne.adapters.pivot.PivotAdapter",
+            ),
+            *bounded(
+                "pivot",
+                ("stop_tunnel",),
+                frozenset({"pkill"}),
+                "ariadne.adapters.pivot.PivotAdapter",
+            ),
+            *bounded(
+                "active_directory",
+                ("domain_discovery",),
+                frozenset({"nltest"}),
+                "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
+            ),
+            *bounded(
+                "active_directory",
+                ("ldap_rootdse",),
+                frozenset({"ldapsearch"}),
+                "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
+            ),
+            *bounded(
+                "active_directory",
+                ("smb_enumeration",),
+                frozenset({"smbclient"}),
+                "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
+            ),
+            *bounded(
+                "active_directory",
+                ("kerberos_user_validation", "password_spray"),
+                frozenset({"kerbrute", "netexec"}),
+                "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
+            ),
+            *bounded(
+                "active_directory",
+                ("bloodhound_collection",),
+                frozenset({"bloodhound-python"}),
+                "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
+            ),
+            *bounded(
+                "active_directory",
+                ("certipy_find", "certipy_relay"),
+                frozenset({"certipy"}),
+                "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
+            ),
+            *bounded(
+                "active_directory",
+                ("credential_dump",),
+                frozenset({"impacket-secretsdump"}),
+                "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
+            ),
+            *bounded(
+                "active_directory",
+                ("ntlm_poisoning",),
+                frozenset({"responder"}),
+                "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
+            ),
+            *bounded(
+                "active_directory",
+                ("ntlm_relay",),
+                frozenset({"ntlmrelayx.py"}),
+                "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
+            ),
+            *bounded(
+                "active_directory",
+                ("ticket_manipulation",),
+                frozenset({"impacket-ticketer"}),
+                "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
+            ),
+            *bounded(
+                "active_directory",
+                ("object_modification",),
+                frozenset({"bloodyad"}),
+                "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
+            ),
         ]
         return cls({
             (contract.adapter, contract.operation): contract
@@ -274,6 +449,7 @@ class GuardedRuntime:
                 "First runtime ProcessSpec differs from the authorized initial spec",
                 spec,
             )
+        self._prepare_runtime_workspace(spec)
         self._attempts = next_attempt
         async with self._coordinator.slot():
             result = await self._runtime.run(spec)
@@ -399,7 +575,379 @@ class GuardedRuntime:
         if self._contract.adapter == "research":
             self._validate_research(spec)
             return 1, 1
+        if self._contract.adapter == "httpx":
+            return self._validate_httpx(spec)
+        if self._contract.adapter == "nuclei":
+            return self._validate_nuclei(spec), 1
+        if self._contract.adapter == "zap":
+            self._validate_zap(spec)
+            return 1, 1
+        if self._contract.adapter == "screenshot":
+            self._validate_screenshot(spec)
+            return 1, 1
+        if self._contract.adapter == "postex":
+            self._validate_postex(spec)
+            return 1, 1
+        if self._contract.adapter == "active_directory":
+            self._validate_active_directory(spec)
+            return 1, 1
+        if self._contract.adapter == "pivot":
+            self._deny("Pivot execution requires a dedicated scope boundary", spec)
         self._deny("Unsupported execution contract validator", spec)
+
+    def _validate_httpx(self, spec: ProcessSpec) -> tuple[int, int]:
+        argv = spec.argv
+        if len(argv) != 11 or argv[:4] != ("httpx", "-l", "-", "-p"):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        if argv[5:8] != ("-json", "-no-fallback", "-t") or argv[9] != "-timeout":
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        if not argv[4] or spec.stdin is None:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        target = self._envelope.exact_target.host
+        expected_stdin = f"https://{target}\nhttp://{target}\n".encode()
+        if spec.stdin != expected_stdin:
+            self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+        try:
+            threads = int(argv[8])
+            timeout = int(argv[10])
+        except (IndexError, ValueError):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        if (
+            threads < 1
+            or timeout < 1
+        ):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        return threads, 1
+
+    def _validate_nuclei(self, spec: ProcessSpec) -> int:
+        argv = spec.argv
+        target = self._envelope.exact_target.host
+        if len(argv) < 10 or argv[:2] != ("nuclei", "-t"):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        target_index = argv.index("-target") if "-target" in argv else -1
+        if (
+            target_index <= 2
+            or argv.count("-target") != 1
+            or any(token.startswith("-") for token in argv[2:target_index])
+            or argv[target_index + 1:target_index + 3] != (target, "-json")
+            or argv[target_index + 3] != "-rate-limit"
+            or argv[target_index + 5] != "-timeout"
+            or target_index + 7 != len(argv)
+        ):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        if argv[target_index + 1] != target:
+            self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+        try:
+            rate = int(argv[target_index + 4])
+            timeout = int(argv[target_index + 6])
+        except (IndexError, ValueError):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        if rate < 1 or timeout < 1:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        return rate
+
+    def _validate_zap(self, spec: ProcessSpec) -> None:
+        if spec.argv != ("zap.sh", "-cmd", "-autorun", "-") or spec.stdin is None:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        try:
+            automation = yaml.safe_load(spec.stdin)
+            if not isinstance(automation, dict) or set(automation) != {"env", "jobs"}:
+                self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+            env = automation["env"]
+            if not isinstance(env, dict) or set(env) != {"contexts"}:
+                self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+            contexts = env["contexts"]
+            jobs = automation["jobs"]
+        except (KeyError, TypeError, yaml.YAMLError, IndexError):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        target_url = f"https://{self._envelope.exact_target.host}"
+        include_path = (
+            f"https://{re.escape(self._envelope.exact_target.host)}/.*"
+        )
+        expected_context = {
+            "name": "ariadne",
+            "urls": [target_url],
+            "includePaths": [include_path],
+            "excludePaths": [],
+        }
+        if contexts != [expected_context]:
+            self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+        if not isinstance(jobs, list):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        operation = self._contract.operation
+        expected_types = {
+            "passive_scan": ["passiveScan-config", "spider"],
+            "spider": ["passiveScan-config", "spider"],
+            "active_scan": ["passiveScan-config", "spider", "activeScan"],
+        }[operation]
+        if [job.get("type") for job in jobs if isinstance(job, dict)] != expected_types:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        if len(jobs) != len(expected_types):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        for job, job_type in zip(jobs, expected_types, strict=True):
+            if not isinstance(job, dict) or set(job) != {"type", "parameters"}:
+                self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+            parameters = job["parameters"]
+            if not isinstance(parameters, dict):
+                self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+            if job_type == "passiveScan-config":
+                valid = parameters == {"maxAlertsPerRule": 10}
+            elif job_type == "spider":
+                valid = (
+                    set(parameters) == {"maxDepth", "maxDuration"}
+                    and _positive_int(parameters["maxDepth"], maximum=20)
+                    and _positive_int(parameters["maxDuration"], maximum=60)
+                )
+            else:
+                valid = (
+                    set(parameters) == {"maxDuration"}
+                    and _positive_int(parameters["maxDuration"], maximum=120)
+                )
+            if not valid:
+                self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+
+    def _validate_screenshot(self, spec: ProcessSpec) -> None:
+        target = self._envelope.exact_target.host
+        output = next((item for item in spec.argv if item.startswith("--screenshot=")), "")
+        profile = next((item for item in spec.argv if item.startswith("--user-data-dir=")), "")
+        allowed = (
+            self._envelope.run_root / "artifacts" / "screenshots"
+        ).resolve()
+        expected_prefix = (
+            "chromium",
+            "--headless",
+            "--disable-gpu",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--window-size=1280,720",
+        )
+        urls = {f"https://{target}", f"http://{target}"}
+        if (
+            not output
+            or not profile
+            or len(spec.argv) != 11
+            or spec.argv[:6] != expected_prefix
+            or spec.argv[6] != profile
+            or spec.argv[7] != output
+            or spec.argv[-1] not in urls
+            or spec.argv[-3] != "--hide-scrollbars"
+            or not spec.argv[-2].startswith("--virtual-time-budget=")
+            or not Path(output.removeprefix("--screenshot=")).resolve().is_relative_to(allowed)
+            or not Path(profile.removeprefix("--user-data-dir=")).resolve().is_relative_to(allowed)
+        ):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        try:
+            budget = int(spec.argv[-2].removeprefix("--virtual-time-budget="))
+        except ValueError:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        if budget < 1:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+
+    def _validate_postex(self, spec: ProcessSpec) -> None:
+        target = self._envelope.exact_target.host
+        operation = self._contract.operation
+        linux_commands = {
+            "identity": "id",
+            "sudo_rules": "sudo -l -n",
+            "suid_files": (
+                "find / -type f \\( -perm -4000 -o -perm -2000 \\) "
+                "-exec ls -la {} \\; 2>/dev/null"
+            ),
+            "file_capabilities": (
+                "getcap -r / 2>/dev/null || echo 'getcap not available'"
+            ),
+            "scheduled_jobs": (
+                "cat /etc/crontab 2>/dev/null; "
+                "ls -la /etc/cron.d/ 2>/dev/null; "
+                "systemctl list-timers --all 2>/dev/null || true"
+            ),
+            "services": (
+                "systemctl list-units --type=service --all 2>/dev/null || "
+                "service --status-all 2>/dev/null || echo 'no service manager'"
+            ),
+            "linpeas": (
+                "bash /opt/tools/linpeas.sh 2>/dev/null || echo 'linpeas not found'"
+            ),
+            "pspy_bounded": (
+                "timeout 60 /opt/tools/pspy64 2>/dev/null || echo 'pspy not found'"
+            ),
+        }
+        if spec.argv[0] == "ssh":
+            if spec.argv != ("ssh", target, linux_commands.get(operation, "")):
+                self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+            return
+        windows_commands = {
+            "identity": ("impacket-wmiexec", target, "whoami"),
+            "token_privileges": (
+                "impacket-wmiexec", "-whoami", "/priv", target,
+            ),
+            "services": ("impacket-wmiexec", target, "sc query"),
+            "scheduled_tasks": (
+                "impacket-wmiexec", target, "schtasks /query /fo CSV /v",
+            ),
+            "registry": (
+                "impacket-wmiexec",
+                target,
+                (
+                    "reg query HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\"
+                    "Uninstall /s"
+                ),
+            ),
+        }
+        if operation in windows_commands:
+            if spec.argv != windows_commands[operation]:
+                self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+            return
+        self._validate_postex_upload(spec, target, operation)
+
+    def _validate_postex_upload(
+        self,
+        spec: ProcessSpec,
+        target: str,
+        operation: str,
+    ) -> None:
+        expected = {
+            "winpeas": (
+                "impacket-smbexec", "/opt/tools/winPEASx64.exe", ".exe",
+                ("&&", "cmd", "/c"),
+            ),
+            "privesccheck": (
+                "impacket-wmiexec", "/opt/tools/PrivescCheck.ps1", ".ps1",
+                ("&&", "powershell", "-ExecutionPolicy", "Bypass", "-File"),
+            ),
+            "seatbelt": (
+                "impacket-smbexec", "/opt/tools/Seatbelt.exe", ".exe",
+                ("&&",),
+            ),
+        }.get(operation)
+        if expected is None:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        executable, local_path, extension, middle = expected
+        if len(spec.argv) < 6:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        remote = spec.argv[4]
+        if not re.fullmatch(
+            rf"\$env:TEMP\\ariadne_[0-9a-f]{{16}}{re.escape(extension)}",
+            remote,
+        ):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        if spec.argv[:4] != (executable, target, "copy", local_path):
+            self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+        expected_argv = (
+            (executable, target, "copy", local_path, remote)
+            + middle
+            + (
+                (remote, "-group=all")
+                if operation == "seatbelt"
+                else (remote,)
+            )
+        )
+        if spec.argv != expected_argv:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+
+    def _validate_active_directory(self, spec: ProcessSpec) -> None:
+        if spec.argv[0] == "responder":
+            self._deny("Responder requires an explicit interface boundary", spec)
+        target = self._envelope.exact_target.host
+        operation = self._contract.operation
+        argv = spec.argv
+        valid = False
+        if operation == "domain_discovery":
+            valid = argv == ("nltest", "/DSGETDC", target)
+        elif operation == "ldap_rootdse":
+            valid = argv == (
+                "ldapsearch", "-H", f"ldap://{target}", "-x", "-s", "base",
+                "-b", "", "objectClass=*",
+            )
+        elif operation == "smb_enumeration":
+            valid = argv == ("smbclient", "-L", f"//{target}/", "-N")
+        elif operation == "kerberos_user_validation":
+            valid = (
+                len(argv) == 7
+                and argv[:3] == ("kerbrute", "userenum", "-d")
+                and argv[5:] == ("--dc", target)
+                and bool(argv[3])
+                and bool(argv[4])
+            )
+        elif operation == "bloodhound_collection":
+            valid = (
+                len(argv) == 8
+                and argv[0] == "bloodhound-python"
+                and argv[1] == "-d"
+                and bool(argv[2])
+                and argv[3:] == ("-dc", target, "-ns", target, "--zip")
+            )
+        elif operation == "certipy_find":
+            valid = (
+                len(argv) == 10
+                and argv[:2] == ("certipy", "find")
+                and argv[2] == "-u"
+                and argv[4] == "-p"
+                and argv[6:9] == ("-dc-ip", target, "-target")
+                and bool(argv[9])
+            )
+        elif operation == "password_spray":
+            valid = (
+                len(argv) == 10
+                and argv[:3] == ("netexec", "smb", target)
+                and argv[3] == "-d"
+                and bool(argv[4])
+                and argv[5] == "-u"
+                and bool(argv[6])
+                and argv[7] == "-p"
+                and argv[9] == "--continue-on-success"
+            )
+        elif operation == "credential_dump":
+            valid = argv == ("impacket-secretsdump", target)
+        elif operation == "ntlm_relay":
+            valid = argv == ("ntlmrelayx.py", "-t", f"smb://{target}")
+        elif operation == "ticket_manipulation":
+            valid = (
+                len(argv) == 9
+                and argv[0:2] == ("impacket-ticketer", "-nthash")
+                and argv[3] == "-domain"
+                and bool(argv[4])
+                and argv[5] == "-user"
+                and bool(argv[6])
+                and argv[7:9] == ("-dc-ip", target)
+            )
+        elif operation == "object_modification":
+            valid = (
+                len(argv) == 11
+                and argv[:3] == ("bloodyad", "-d", target)
+                and argv[3] == "-u"
+                and argv[5] == "-p"
+                and argv[7] == "--target"
+                and argv[9] == "--action"
+            )
+        elif operation == "certipy_relay":
+            valid = (
+                len(argv) == 12
+                and argv[:2] == ("certipy", "req")
+                and argv[2] == "-u"
+                and argv[4] == "-p"
+                and argv[6] == "-ca"
+                and argv[8] == "-template"
+                and argv[10:12] == ("-dc-ip", target)
+            )
+        if not valid:
+            reason = (
+                AuthorizationReason.TARGET_MISMATCH
+                if target not in " ".join(argv)
+                else AuthorizationReason.TEMPLATE_INVALID
+            )
+            self._deny(reason, spec)
+
+    def _prepare_runtime_workspace(self, spec: ProcessSpec) -> None:
+        """Create only an already-authorized adapter's narrow output directory."""
+        if self._contract.adapter != "screenshot":
+            return
+        output = next(
+            item.removeprefix("--screenshot=")
+            for item in spec.argv
+            if item.startswith("--screenshot=")
+        )
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
 
     def _validate_nmap(self, spec: ProcessSpec) -> int:
         argv = spec.argv
@@ -534,6 +1082,14 @@ def _tight_bound(plan_bound: int | None, contract_bound: int) -> int:
     return contract_bound if plan_bound is None else min(
         plan_bound,
         contract_bound,
+    )
+
+
+def _positive_int(value: object, *, maximum: int) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 1 <= value <= maximum
     )
 
 

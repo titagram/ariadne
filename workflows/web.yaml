@@ -124,11 +124,11 @@
     - adapter: nuclei
       operation: scan
       inputs:
-        template_ids:
-          - "tech-detect-apache"
-          - "tech-detect-nginx"
-          - "exposed-panel"
-          - "misconfig-dir-listing"
+        tool_card:
+          title: "Nuclei"
+          official_source_url: "https://docs.projectdiscovery.io/tools/nuclei/overview"
+          source_date: "2026-07-29"
+          summary: "Template-based scanner used only with target-bound validated candidates."
   limits:
     max_rate: 30
     max_concurrency: 2
@@ -236,6 +236,11 @@
       operation: capture
       inputs:
         proof_kind: "web_exploit"
+        tool_card:
+          title: "Chromium"
+          official_source_url: "https://www.chromium.org/developers/how-tos/run-chromium-with-flags/"
+          source_date: "2026-07-29"
+          summary: "Headless browser used for bounded evidence screenshots."
   limits:
     max_rate: 1
     max_concurrency: 1

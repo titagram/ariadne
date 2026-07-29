@@ -15,6 +15,7 @@ Verifies that the handlers enforce all guard conditions:
 
 from __future__ import annotations
 
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Barrier
@@ -42,6 +43,8 @@ from ariadne.hades_adapter.consent import (
     UnavailableConsentGateway,
 )
 from ariadne.hades_adapter.handlers import (
+    _determine_engagement_state,
+    _inspect_planned_tool,
     handle_execute_plan,
     handle_prepare_engagement,
     handle_propose_plan,
@@ -49,9 +52,14 @@ from ariadne.hades_adapter.handlers import (
 )
 from ariadne.hades_adapter.schemas import ExecutePlanInput, ProposePlanInput, RenderReportInput
 from ariadne.hades_adapter.session import ChallengeLedger
+from ariadne.knowledge import (
+    KnowledgeIndex,
+    LocalToolProbe,
+    RuntimeVerificationStore,
+    ToolCardVerifier,
+    ToolVerificationBlockedError,
+)
 from ariadne.store.run_store import ArtifactInput, Event, RunStore
-
-pytestmark = pytest.mark.asyncio
 
 
 class FakeRuntime:
@@ -68,6 +76,19 @@ class FakeRuntime:
             exit_code=self._exit_code,
             stdout=self._stdout,
             stderr="",
+        )
+
+
+class TimedOutRuntime(FakeRuntime):
+    """A bounded operation that returns partial output without success."""
+
+    async def run(self, spec: ProcessSpec) -> ProcessResult:
+        self.calls += 1
+        return ProcessResult(
+            exit_code=-1,
+            stdout="partial transcript",
+            stderr="timed out",
+            timed_out=True,
         )
 
 
@@ -105,6 +126,10 @@ class FakeConsentGateway:
     async def request_plan(self, plan: object) -> object:
         self.calls += 1
         return self.decision
+
+    async def request_contract(self, summary: object) -> object:
+        del summary
+        return ConsentDecision.ACCEPT
 
 
 class CallbackConsentGateway(FakeConsentGateway):
@@ -247,8 +272,334 @@ async def _bind_engagement(
         args,
         session_id=session_id,
         ariadne_command=command,
+        consent_gateway=FakeConsentGateway(ConsentDecision.ACCEPT),
     )
     return prepare_result["snapshot_hash"]
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "expected_card_status"),
+    [(0, "runtime_verified"), (2, "discovered")],
+)
+@pytest.mark.asyncio
+async def test_playbook_unknown_tool_is_discovered_then_promoted_only_on_success(
+    command: AriadneCommand,
+    session_id: str,
+    catalog: WorkflowCatalog,
+    registry: AdapterRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: int,
+    expected_card_status: str,
+) -> None:
+    """A playbook declaration drives JIT documentation and success promotion."""
+    executable = tmp_path / "bin" / "ping"
+    executable.parent.mkdir()
+    executable.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        '  --version) printf "lab-ping 1.0\\n" ;;\n'
+        '  --help) printf "usage: ping [options] host\\n" ;;\n'
+        "  *) exit 2 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv(
+        "PATH",
+        f"{executable.parent}:{Path(shutil.which('sh') or '/bin/sh').parent}",
+    )
+
+    knowledge_root = tmp_path / "knowledge"
+    shutil.copytree(Path(__file__).parents[2] / "knowledge", knowledge_root)
+    index = KnowledgeIndex.load(knowledge_root)
+    verification_store = RuntimeVerificationStore(tmp_path / "tool-runtime")
+    verifier = ToolCardVerifier(
+        index=index,
+        probe=LocalToolProbe(
+            timeout_seconds=1,
+            max_output_bytes=256,
+            man_executable=None,
+        ),
+        store=verification_store,
+    )
+
+    preflight = catalog.playbooks["engagement.preflight.v1"]
+    declared_action = preflight.actions[0].model_copy(
+        update={
+            "inputs": {
+                **preflight.actions[0].inputs,
+                "tool_card": {
+                    "title": "Lab Ping",
+                    "official_source_url": "https://example.test/lab-ping",
+                    "source_date": "2026-07-28",
+                    "summary": "Bounded target reachability probe.",
+                },
+            }
+        }
+    )
+    declared_catalog = WorkflowCatalog(
+        playbooks={
+            **catalog.playbooks,
+            preflight.id: preflight.model_copy(
+                update={"actions": (declared_action,)}
+            ),
+        }
+    )
+    planner = Planner(catalog=declared_catalog)
+    snapshot_hash = await _bind_engagement(command, session_id)
+    proposed = await handle_propose_plan(
+        {"snapshot_hash": snapshot_hash, "hypothesis": "runtime tool docs"},
+        session_id=session_id,
+        ariadne_command=command,
+        planner=planner,
+        catalog=declared_catalog,
+    )
+    runtime = FakeRuntime(
+        exit_code=exit_code,
+        stdout="PING target: one reply" if exit_code == 0 else "",
+    )
+
+    result = await handle_execute_plan(
+        {"plan_id": proposed["plan_id"]},
+        session_id=session_id,
+        ariadne_command=command,
+        adapter_registry=registry,
+        runtime=runtime,
+        execution_contract_registry=ExecutionContractRegistry.curated(),
+        execution_coordinator=ExecutionCoordinator(1),
+        catalog=declared_catalog,
+        tool_card_verifier=verifier,
+    )
+
+    assert runtime.calls == 1
+    assert index.node("tool.ping").status == expected_card_status
+    assert index.node("tool.ping").policy == ("preflight.check",)
+    assert index.node("tool.ping").source_date == "2026-07-28"
+    verified = verification_store.get("tool.ping")
+    if exit_code == 0:
+        assert result["status"] == "executed"
+        assert verified is not None
+        assert verified.status == "runtime_verified"
+    else:
+        assert result["status"] != "executed"
+        assert verified is None
+
+
+@pytest.mark.asyncio
+async def test_unknown_playbook_tool_without_metadata_blocks_before_execution(
+    command: AriadneCommand,
+    session_id: str,
+    catalog: WorkflowCatalog,
+    registry: AdapterRegistry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "bin" / "ping"
+    executable.parent.mkdir()
+    executable.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        '  --version) printf "lab-ping 1.0\\n" ;;\n'
+        '  --help) printf "usage: ping [options] host\\n" ;;\n'
+        "esac\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(executable.parent))
+    knowledge_root = tmp_path / "knowledge"
+    shutil.copytree(Path(__file__).parents[2] / "knowledge", knowledge_root)
+    index = KnowledgeIndex.load(knowledge_root)
+    verifier = ToolCardVerifier(
+        index=index,
+        probe=LocalToolProbe(timeout_seconds=1, max_output_bytes=256),
+        store=RuntimeVerificationStore(tmp_path / "tool-runtime"),
+    )
+    snapshot_hash = await _bind_engagement(command, session_id)
+    proposed = await handle_propose_plan(
+        {"snapshot_hash": snapshot_hash, "hypothesis": "missing tool metadata"},
+        session_id=session_id,
+        ariadne_command=command,
+        planner=Planner(catalog=catalog),
+        catalog=catalog,
+    )
+    runtime = FakeRuntime(stdout="PING target: one reply")
+
+    result = await handle_execute_plan(
+        {"plan_id": proposed["plan_id"]},
+        session_id=session_id,
+        ariadne_command=command,
+        adapter_registry=registry,
+        runtime=runtime,
+        execution_contract_registry=ExecutionContractRegistry.curated(),
+        execution_coordinator=ExecutionCoordinator(1),
+        catalog=catalog,
+        tool_card_verifier=verifier,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["boundary"] == "tool_documentation"
+    assert runtime.calls == 0
+    assert "tool.ping" not in index.nodes
+
+
+def test_unknown_tool_metadata_rejects_target_capable_probe_args(
+    tmp_path: Path,
+) -> None:
+    knowledge_root = tmp_path / "knowledge"
+    shutil.copytree(Path(__file__).parents[2] / "knowledge", knowledge_root)
+    verifier = ToolCardVerifier(
+        index=KnowledgeIndex.load(knowledge_root),
+        probe=LocalToolProbe(timeout_seconds=1, max_output_bytes=256),
+        store=RuntimeVerificationStore(tmp_path / "tool-runtime"),
+    )
+
+    with pytest.raises(ToolVerificationBlockedError, match="documentation-only"):
+        _inspect_planned_tool(
+            verifier=verifier,
+            process_argv=("unknown-probe", "--target", "10.10.10.10"),
+            action_inputs={
+                "tool_card": {
+                    "title": "Unknown Probe",
+                    "official_source_url": "https://docs.example.com/probe",
+                    "source_date": "2026-07-28",
+                    "summary": "Concise official guidance.",
+                    "help_args": ("--help", "10.10.10.10"),
+                }
+            },
+            allowed_policy=frozenset({"preflight.check"}),
+            required_policy=("preflight.check",),
+        )
+
+    with pytest.raises(ToolVerificationBlockedError, match="public HTTPS"):
+        _inspect_planned_tool(
+            verifier=verifier,
+            process_argv=("unknown-probe",),
+            action_inputs={
+                "tool_card": {
+                    "title": "Unknown Probe",
+                    "official_source_url": "https://user@127.0.0.1/docs",
+                    "source_date": "2026-07-28",
+                    "summary": "Concise official guidance.",
+                }
+            },
+            allowed_policy=frozenset({"preflight.check"}),
+            required_policy=("preflight.check",),
+        )
+
+    assert "tool.unknown-probe" not in verifier.index.nodes
+
+
+@pytest.mark.asyncio
+async def test_equivalent_unfinished_plan_is_not_proposed_twice(
+    command: AriadneCommand,
+    session_id: str,
+    planner: Planner,
+    catalog: WorkflowCatalog,
+) -> None:
+    snapshot_hash = await _bind_engagement(command, session_id)
+    first = await handle_propose_plan(
+        {"snapshot_hash": snapshot_hash, "hypothesis": "deduplicate"},
+        session_id=session_id,
+        ariadne_command=command,
+        planner=planner,
+        catalog=catalog,
+    )
+    second = await handle_propose_plan(
+        {"snapshot_hash": snapshot_hash, "hypothesis": "deduplicate"},
+        session_id=session_id,
+        ariadne_command=command,
+        planner=planner,
+        catalog=catalog,
+    )
+
+    assert first["status"] == "plan_auto_approved"
+    assert second["status"] == "blocked"
+    assert second["boundary"] == "plan_in_flight"
+    assert second["plan_id"] == first["plan_id"]
+
+
+@pytest.mark.parametrize(
+    ("runtime", "force_no_observations"),
+    [(FakeRuntime(), True), (TimedOutRuntime(), False)],
+)
+@pytest.mark.asyncio
+async def test_unknown_or_partial_execution_does_not_emit_success_outputs(
+    command: AriadneCommand,
+    session_id: str,
+    planner: Planner,
+    catalog: WorkflowCatalog,
+    registry: AdapterRegistry,
+    runtime: FakeRuntime,
+    force_no_observations: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if force_no_observations:
+        monkeypatch.setattr(
+            ResearchAdapter,
+            "parse_for_target",
+            lambda self, result, target: (),
+        )
+    snapshot_hash = await _bind_engagement(command, session_id)
+    proposed = await handle_propose_plan(
+        {"snapshot_hash": snapshot_hash, "hypothesis": "non-success"},
+        session_id=session_id,
+        ariadne_command=command,
+        planner=planner,
+        catalog=catalog,
+    )
+
+    result = await handle_execute_plan(
+        {"plan_id": proposed["plan_id"]},
+        session_id=session_id,
+        ariadne_command=command,
+        adapter_registry=registry,
+        runtime=runtime,
+        execution_contract_registry=ExecutionContractRegistry.curated(),
+        execution_coordinator=ExecutionCoordinator(1),
+        catalog=catalog,
+    )
+
+    assert result["status"] == "partial"
+    binding = command.get_session_binding(session_id)
+    assert binding is not None and binding.engagement_id is not None
+    handle = command.store.open(binding.engagement_id)
+    assert handle is not None
+    emitted = {
+        event["payload"].get("evidence_type")
+        for event in command.store.read_events(handle)
+        if event["event_type"] == "evidence_collected"
+    }
+    assert "service_discovered" not in emitted
+    assert not any(
+        event["event_type"] in {"objective_completed", "cleanup_completed"}
+        for event in command.store.read_events(handle)
+    )
+    state, _ = _determine_engagement_state(command.store, handle)
+    assert state.value == "environment_preflight"
+
+
+def _force_preflight_manual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Make the principal test playbook cross a real manual policy boundary."""
+    from ariadne.hades_adapter import handlers
+
+    real_policy = handlers._load_engagement_policy
+
+    def manual_policy(snapshot):
+        policy = real_policy(snapshot)
+        capabilities = dict(policy.capabilities)
+        capabilities["preflight.check"] = capabilities[
+            "preflight.check"
+        ].model_copy(update={"always_manual": True})
+        return policy.model_copy(update={"capabilities": capabilities})
+
+    monkeypatch.setattr(
+        handlers,
+        "_load_engagement_policy",
+        manual_policy,
+    )
 
 
 # ── Input schema tests ────────────────────────────────────────────────────────
@@ -315,6 +666,7 @@ class TestCompositionOwnership:
         )
         assert services.command is services.command
 
+    @pytest.mark.asyncio
     async def test_reserved_malicious_consent_context_cannot_override_composition(
         self,
         store: RunStore,
@@ -323,6 +675,7 @@ class TestCompositionOwnership:
         registry: AdapterRegistry,
         fake_runtime: FakeRuntime,
         session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         import json
 
@@ -342,6 +695,7 @@ class TestCompositionOwnership:
             adapter_registry=registry,
             consent_gateway=composed_gateway,
         )
+        _force_preflight_manual(monkeypatch)
         snapshot_hash = await _bind_engagement(services.command, session_id)
         proposed = await handle_propose_plan(
             {"snapshot_hash": snapshot_hash, "hypothesis": "reserved context"},
@@ -375,6 +729,7 @@ class TestProposePlanHandler:
         """The handle_propose_plan callable exists."""
         assert callable(handle_propose_plan)
 
+    @pytest.mark.asyncio
     async def test_rejects_no_active_engagement(
         self, command: AriadneCommand, session_id: str
     ) -> None:
@@ -386,6 +741,7 @@ class TestProposePlanHandler:
         )
         assert result["status"] == "error", f"Expected error, got {result}"
 
+    @pytest.mark.asyncio
     async def test_rejects_snapshot_hash_mismatch(
         self,
         command: AriadneCommand,
@@ -407,14 +763,15 @@ class TestProposePlanHandler:
         assert result["status"] == "error", f"Expected error, got {result}"
         assert "snapshot" in result.get("message", "").lower()
 
-    async def test_proposes_plan_successfully(
+    @pytest.mark.asyncio
+    async def test_controlled_mode_auto_approves_curated_in_policy_plan(
         self,
         command: AriadneCommand,
         session_id: str,
         planner: Planner,
         catalog: WorkflowCatalog,
     ) -> None:
-        """Handler proposes a valid plan when engagement is active and input correct."""
+        """Controlled mode stays autonomous until a manual boundary exists."""
         snapshot_hash = await _bind_engagement(command, session_id)
 
         result = await handle_propose_plan(
@@ -427,15 +784,19 @@ class TestProposePlanHandler:
             planner=planner,
             catalog=catalog,
         )
-        assert result["status"] == "plan_proposed", f"Expected plan_proposed, got {result}"
+        assert result["status"] == "plan_auto_approved"
         assert "plan_id" in result
         assert result["plan_id"]
         assert "actions" in result
         assert len(result["actions"]) > 0
         assert "expires_at" in result
-        assert result["approval_status"] == "awaiting_user_approval"
-        assert command.get_plan_record(result["plan_id"]).approved is False
+        assert result["approval_status"] == "auto_approved"
+        record = command.get_plan_record(result["plan_id"])
+        assert record is not None
+        assert record.approved is True
+        assert record.approval_source == "curated_in_policy"
 
+    @pytest.mark.asyncio
     async def test_full_mode_auto_approves_curated_in_policy_plan(
         self,
         command: AriadneCommand,
@@ -464,7 +825,7 @@ class TestProposePlanHandler:
         assert "call ariadne_execute_plan now" in result["message"].lower()
         assert record is not None
         assert record.approved is True
-        assert record.approval_source == "full_autonomy_policy"
+        assert record.approval_source == "curated_in_policy"
 
         binding = command.get_session_binding(session_id)
         assert binding is not None
@@ -479,8 +840,12 @@ class TestProposePlanHandler:
         assert proposed[-1]["payload"]["session_id"] == session_id
         assert proposed[-1]["payload"]["autonomy"] == "full"
         assert auto[-1]["payload"]["capabilities"] == ["preflight.check"]
-        assert auto[-1]["payload"]["reason"] == "full_autonomy_curated_in_policy"
+        assert (
+            auto[-1]["payload"]["reason"]
+            == "curated_in_policy_no_manual_boundary"
+        )
 
+    @pytest.mark.asyncio
     async def test_full_mode_does_not_auto_approve_always_manual_capability(
         self,
         command: AriadneCommand,
@@ -525,6 +890,7 @@ class TestProposePlanHandler:
         assert record is not None
         assert record.approved is False
 
+    @pytest.mark.asyncio
     async def test_auto_approval_event_failure_leaves_plan_unapproved(
         self,
         command: AriadneCommand,
@@ -562,6 +928,7 @@ class TestProposePlanHandler:
         assert record.approved is False
         assert "persist" in result["message"].lower()
 
+    @pytest.mark.asyncio
     async def test_policy_provenance_drift_blocks_plan_proposal(
         self,
         command: AriadneCommand,
@@ -590,14 +957,17 @@ class TestProposePlanHandler:
         assert result["status"] == "error"
         assert "new snapshot" in result["message"].lower()
 
+    @pytest.mark.asyncio
     async def test_plan_requires_approval_before_execution(
         self,
         command: AriadneCommand,
         session_id: str,
         planner: Planner,
         catalog: WorkflowCatalog,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A plan can be approved by the user via /ariadne approve <plan-id>."""
+        _force_preflight_manual(monkeypatch)
         snapshot_hash = await _bind_engagement(command, session_id)
         result = await handle_propose_plan(
             {
@@ -635,6 +1005,7 @@ class TestExecutePlanHandler:
             ("unexpected", (None, "invalid_response")),
         ],
     )
+    @pytest.mark.asyncio
     async def test_hades_consent_outcomes_are_normalized_fail_closed(
         self,
         command: AriadneCommand,
@@ -666,6 +1037,7 @@ class TestExecutePlanHandler:
         }
         assert mapping[decision] == expected
 
+    @pytest.mark.asyncio
     async def test_rejects_no_active_engagement(
         self, command: AriadneCommand, session_id: str
     ) -> None:
@@ -677,14 +1049,17 @@ class TestExecutePlanHandler:
         )
         assert result["status"] == "error"
 
+    @pytest.mark.asyncio
     async def test_rejects_unapproved_plan(
         self,
         command: AriadneCommand,
         session_id: str,
         planner: Planner,
         catalog: WorkflowCatalog,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Handler rejects execution of a plan that has not been approved."""
+        _force_preflight_manual(monkeypatch)
         snapshot_hash = await _bind_engagement(command, session_id)
         propose_result = await handle_propose_plan(
             {
@@ -709,6 +1084,7 @@ class TestExecutePlanHandler:
         )
         assert "approv" in result.get("message", "").lower()
 
+    @pytest.mark.asyncio
     async def test_trusted_elicitation_accept_persists_and_executes_without_slash(
         self,
         command: AriadneCommand,
@@ -720,20 +1096,8 @@ class TestExecutePlanHandler:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A manual boundary is resolved inside the model-tool turn."""
-        from ariadne.hades_adapter import handlers
-
+        _force_preflight_manual(monkeypatch)
         snapshot_hash = await _bind_engagement(command, session_id, autonomy="full")
-        real_policy = handlers._load_engagement_policy
-
-        def manual_policy(snapshot):
-            policy = real_policy(snapshot)
-            capabilities = dict(policy.capabilities)
-            capabilities["preflight.check"] = capabilities[
-                "preflight.check"
-            ].model_copy(update={"always_manual": True})
-            return policy.model_copy(update={"capabilities": capabilities})
-
-        monkeypatch.setattr(handlers, "_load_engagement_policy", manual_policy)
         proposed = await handle_propose_plan(
             {"snapshot_hash": snapshot_hash, "hypothesis": "manual boundary"},
             session_id=session_id,
@@ -765,6 +1129,7 @@ class TestExecutePlanHandler:
         ("decision", "label"),
         [("decline", "declined"), ("cancel", "cancelled")],
     )
+    @pytest.mark.asyncio
     async def test_elicitation_decline_or_cancel_is_durable_and_never_executes(
         self,
         command: AriadneCommand,
@@ -775,7 +1140,9 @@ class TestExecutePlanHandler:
         fake_runtime: FakeRuntime,
         decision: str,
         label: str,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        _force_preflight_manual(monkeypatch)
         snapshot_hash = await _bind_engagement(command, session_id)
         proposed = await handle_propose_plan(
             {"snapshot_hash": snapshot_hash, "hypothesis": label},
@@ -808,6 +1175,7 @@ class TestExecutePlanHandler:
         )
         assert record is not None and record.rejected and not record.approved
 
+    @pytest.mark.asyncio
     async def test_accepted_decision_is_recovered_without_second_elicitation(
         self,
         command: AriadneCommand,
@@ -816,7 +1184,9 @@ class TestExecutePlanHandler:
         catalog: WorkflowCatalog,
         registry: AdapterRegistry,
         fake_runtime: FakeRuntime,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        _force_preflight_manual(monkeypatch)
         snapshot_hash = await _bind_engagement(command, session_id)
         proposed = await handle_propose_plan(
             {"snapshot_hash": snapshot_hash, "hypothesis": "remember consent"},
@@ -856,6 +1226,7 @@ class TestExecutePlanHandler:
         assert "claimed" in second["message"].lower()
         assert must_not_run.calls == 0
 
+    @pytest.mark.asyncio
     async def test_approved_then_explicit_reject_is_irreversible_and_blocks(
         self,
         command: AriadneCommand,
@@ -900,6 +1271,7 @@ class TestExecutePlanHandler:
         assert result["status"] == "blocked"
         assert fake_runtime.calls == 0
 
+    @pytest.mark.asyncio
     async def test_cross_session_reject_is_denied(
         self,
         command: AriadneCommand,
@@ -923,6 +1295,7 @@ class TestExecutePlanHandler:
         record = command.get_plan_record(proposed["plan_id"])
         assert record is not None and not record.rejected
 
+    @pytest.mark.asyncio
     async def test_missing_elicitation_api_fails_closed_even_with_yolo_context(
         self,
         command: AriadneCommand,
@@ -931,7 +1304,9 @@ class TestExecutePlanHandler:
         catalog: WorkflowCatalog,
         registry: AdapterRegistry,
         fake_runtime: FakeRuntime,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        _force_preflight_manual(monkeypatch)
         snapshot_hash = await _bind_engagement(command, session_id)
         proposed = await handle_propose_plan(
             {"snapshot_hash": snapshot_hash, "hypothesis": "no api"},
@@ -957,6 +1332,7 @@ class TestExecutePlanHandler:
         assert "consent" in result["message"].lower()
         assert fake_runtime.calls == 0
 
+    @pytest.mark.asyncio
     async def test_yolo_context_still_calls_trusted_consent(
         self,
         command: AriadneCommand,
@@ -965,7 +1341,9 @@ class TestExecutePlanHandler:
         catalog: WorkflowCatalog,
         registry: AdapterRegistry,
         fake_runtime: FakeRuntime,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        _force_preflight_manual(monkeypatch)
         snapshot_hash = await _bind_engagement(command, session_id)
         proposed = await handle_propose_plan(
             {"snapshot_hash": snapshot_hash, "hypothesis": "yolo is irrelevant"},
@@ -993,6 +1371,7 @@ class TestExecutePlanHandler:
         assert len(requester.calls) == 1
         assert fake_runtime.calls == 0
 
+    @pytest.mark.asyncio
     async def test_rejects_unknown_plan(
         self,
         command: AriadneCommand,
@@ -1007,6 +1386,7 @@ class TestExecutePlanHandler:
         )
         assert result["status"] == "error"
 
+    @pytest.mark.asyncio
     async def test_rejects_plan_created_by_different_trusted_session(
         self,
         command: AriadneCommand,
@@ -1053,6 +1433,7 @@ class TestExecutePlanHandler:
             for event in command.store.read_events(handle)
         )
 
+    @pytest.mark.asyncio
     async def test_rejects_plan_after_active_snapshot_changes(
         self,
         command: AriadneCommand,
@@ -1131,6 +1512,7 @@ class TestExecutePlanHandler:
             for event in command.store.read_events(handle)
         )
 
+    @pytest.mark.asyncio
     async def test_executes_approved_plan(
         self,
         command: AriadneCommand,
@@ -1175,6 +1557,7 @@ class TestExecutePlanHandler:
         assert result["status"] in ("executed", "partial"), f"Expected executed, got {result}"
         assert "plan_id" in result
 
+    @pytest.mark.asyncio
     async def test_unknown_contract_is_audited_before_adapter_plan(
         self,
         command: AriadneCommand,
@@ -1228,6 +1611,7 @@ class TestExecutePlanHandler:
         assert blocked[-1]["payload"]["adapter"] == "research"
         assert blocked[-1]["payload"]["operation"] == "investigate"
 
+    @pytest.mark.asyncio
     async def test_full_mode_executes_auto_approved_plan_without_slash_approve(
         self,
         command: AriadneCommand,
@@ -1268,6 +1652,7 @@ class TestExecutePlanHandler:
         assert result["next_action"] == "continue_until_complete_then_render_offline_report"
         assert "offline report" in result["message"].lower()
 
+    @pytest.mark.asyncio
     async def test_policy_provenance_drift_blocks_approved_plan_execution(
         self,
         command: AriadneCommand,
@@ -1312,6 +1697,7 @@ class TestExecutePlanHandler:
         assert "new snapshot" in result["message"].lower()
         assert fake_runtime.calls == 0
 
+    @pytest.mark.asyncio
     async def test_restart_recovers_and_executes_durable_auto_approval(
         self,
         command: AriadneCommand,
@@ -1357,8 +1743,9 @@ class TestExecutePlanHandler:
         )
         assert recovered is not None
         assert recovered.approved is True
-        assert recovered.approval_source == "full_autonomy_policy"
+        assert recovered.approval_source == "curated_in_policy"
 
+    @pytest.mark.asyncio
     async def test_restart_manual_approval_is_durable_and_session_bound(
         self,
         command: AriadneCommand,
@@ -1367,7 +1754,9 @@ class TestExecutePlanHandler:
         catalog: WorkflowCatalog,
         registry: AdapterRegistry,
         fake_runtime: FakeRuntime,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        _force_preflight_manual(monkeypatch)
         snapshot_hash = await _bind_engagement(command, session_id)
         proposed = await handle_propose_plan(
             {"snapshot_hash": snapshot_hash, "hypothesis": "manual restart"},
@@ -1417,6 +1806,7 @@ class TestExecutePlanHandler:
         assert recovered is not None
         assert recovered.approval_source == "user"
 
+    @pytest.mark.asyncio
     async def test_tampered_durable_plan_fails_closed_after_restart(
         self,
         command: AriadneCommand,
@@ -1466,6 +1856,7 @@ class TestExecutePlanHandler:
         assert result["status"] == "error"
         assert fake_runtime.calls == 0
 
+    @pytest.mark.asyncio
     async def test_plan_proposal_event_contains_complete_recoverable_record(
         self,
         command: AriadneCommand,
@@ -1503,6 +1894,7 @@ class TestExecutePlanHandler:
         assert payload["approval_state"] == "pending"
         assert payload["approval_correlation_id"]
 
+    @pytest.mark.asyncio
     async def test_restart_after_execution_claim_cannot_execute_again(
         self,
         command: AriadneCommand,
@@ -1550,6 +1942,7 @@ class TestExecutePlanHandler:
         assert counting.plan_calls == 0
         assert fake_runtime.calls == 0
 
+    @pytest.mark.asyncio
     async def test_legacy_plan_executed_event_is_terminal_after_restart(
         self,
         command: AriadneCommand,
@@ -1603,6 +1996,7 @@ class TestExecutePlanHandler:
         )
 
     @pytest.mark.parametrize("failure_mode", ["policy_drift", "tamper"])
+    @pytest.mark.asyncio
     async def test_change_between_consent_and_claim_has_no_side_effect(
         self,
         command: AriadneCommand,
@@ -1616,6 +2010,7 @@ class TestExecutePlanHandler:
     ) -> None:
         from ariadne.hades_adapter import commands
 
+        _force_preflight_manual(monkeypatch)
         snapshot_hash = await _bind_engagement(command, session_id)
         proposed = await handle_propose_plan(
             {
@@ -1681,6 +2076,7 @@ class TestExecutePlanHandler:
             for event in command.store.read_events(handle)
         )
 
+    @pytest.mark.asyncio
     async def test_concurrent_reject_wins_before_claim_with_zero_side_effect(
         self,
         command: AriadneCommand,
@@ -1689,9 +2085,11 @@ class TestExecutePlanHandler:
         catalog: WorkflowCatalog,
         registry: AdapterRegistry,
         fake_runtime: FakeRuntime,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         import asyncio
 
+        _force_preflight_manual(monkeypatch)
         snapshot_hash = await _bind_engagement(command, session_id)
         proposed = await handle_propose_plan(
             {"snapshot_hash": snapshot_hash, "hypothesis": "reject race"},
@@ -1728,6 +2126,7 @@ class TestExecutePlanHandler:
         assert counting.plan_calls == 0
         assert fake_runtime.calls == 0
 
+    @pytest.mark.asyncio
     async def test_execution_claim_wins_and_reject_is_denied(
         self,
         command: AriadneCommand,
@@ -1789,6 +2188,7 @@ class TestExecutePlanHandler:
         assert first["status"] in ("executed", "partial")
         assert pausing_runtime.calls == 1
 
+    @pytest.mark.asyncio
     async def test_claim_and_reject_share_one_serialized_transition(
         self,
         command: AriadneCommand,
@@ -1853,6 +2253,7 @@ class TestRenderReportHandler:
         """The handle_render_report callable exists."""
         assert callable(handle_render_report)
 
+    @pytest.mark.asyncio
     async def test_rejects_no_active_engagement(
         self, command: AriadneCommand, session_id: str
     ) -> None:
@@ -1864,6 +2265,7 @@ class TestRenderReportHandler:
         )
         assert result["status"] == "error"
 
+    @pytest.mark.asyncio
     async def test_renders_walkthrough(
         self,
         command: AriadneCommand,
@@ -1889,6 +2291,7 @@ class TestRenderReportHandler:
         assert "path" in result
         assert result["path"]
 
+    @pytest.mark.asyncio
     async def test_renders_professional(
         self,
         command: AriadneCommand,

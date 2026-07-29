@@ -6,6 +6,8 @@ and SHA-256 recording for the headless screenshot adapter.
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -23,22 +25,26 @@ from ariadne.runtime.process import ProcessResult
 
 
 @pytest.fixture
-def context() -> AdapterContext:
+def context(tmp_path: Path) -> AdapterContext:
     return AdapterContext(
         target=TargetSpec(host="10.10.10.10"),
         snapshot_hash="abc123",
         engagement_id=UUID("00000000-0000-0000-0000-000000000001"),
         adapter_name="screenshot",
+        run_root=tmp_path,
+        cwd=tmp_path,
     )
 
 
 @pytest.fixture
-def context_fqdn() -> AdapterContext:
+def context_fqdn(tmp_path: Path) -> AdapterContext:
     return AdapterContext(
         target=TargetSpec(host="scanme.nmap.org"),
         snapshot_hash="abc123",
         engagement_id=UUID("00000000-0000-0000-0000-000000000001"),
         adapter_name="screenshot",
+        run_root=tmp_path,
+        cwd=tmp_path,
     )
 
 
@@ -92,6 +98,25 @@ class TestScreenshotPlan:
         assert 1 <= spec.timeout_seconds <= 3600
         assert spec.max_output_bytes >= 1024
 
+    def test_capture_writes_only_inside_run_artifacts(self, tmp_path: Path) -> None:
+        context = AdapterContext(
+            target=TargetSpec(host="10.10.10.10"),
+            snapshot_hash="abc123",
+            engagement_id=UUID("00000000-0000-0000-0000-000000000001"),
+            adapter_name="screenshot",
+            run_root=tmp_path,
+            cwd=tmp_path,
+            action_digest="d" * 64,
+        )
+
+        spec = ScreenshotAdapter().plan(action("capture"), context)
+
+        assert all("/tmp/" not in argument for argument in spec.argv)
+        screenshot_arg = next(arg for arg in spec.argv if arg.startswith("--screenshot="))
+        assert Path(screenshot_arg.removeprefix("--screenshot=")).is_relative_to(
+            tmp_path / "artifacts" / "screenshots"
+        )
+
 
 # ── Parse ─────────────────────────────────────────────────────────────────────
 
@@ -128,6 +153,73 @@ class TestScreenshotParse:
         )
         obs = ScreenshotAdapter().parse(result)
         assert isinstance(obs, tuple)
+
+    def test_collect_returns_only_existing_artifact_relative_to_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        screenshot = tmp_path / "artifacts" / "screenshots" / "capture.png"
+        screenshot.parent.mkdir(parents=True)
+        screenshot.write_bytes(b"PNG")
+        result = ProcessResult(
+            exit_code=0,
+            stdout=f"Screenshot saved to {screenshot}\nhttps://10.10.10.10/",
+            stderr="",
+        )
+
+        collected = asyncio.run(ScreenshotAdapter().collect(result, object()))
+
+        assert collected == ("screenshots/capture.png",)
+
+    def test_collect_ignores_missing_screenshot(self, tmp_path: Path) -> None:
+        missing = tmp_path / "artifacts" / "screenshots" / "missing.png"
+        result = ProcessResult(
+            exit_code=0,
+            stdout=f"Screenshot saved to {missing}",
+            stderr="",
+        )
+
+        assert asyncio.run(ScreenshotAdapter().collect(result, object())) == ()
+
+    def test_actual_planned_file_is_evidence_without_url_in_chromium_output(
+        self,
+        context: AdapterContext,
+    ) -> None:
+        adapter = ScreenshotAdapter()
+        spec = adapter.plan(action("capture"), context)
+        screenshot_arg = next(
+            item for item in spec.argv if item.startswith("--screenshot=")
+        )
+        screenshot = Path(screenshot_arg.removeprefix("--screenshot="))
+        screenshot.parent.mkdir(parents=True)
+        screenshot.write_bytes(b"PNG")
+        result = ProcessResult(
+            exit_code=0,
+            stdout=f"321 bytes written to file {screenshot}",
+            stderr="",
+        )
+
+        observations = adapter.parse_for_spec(result, context.target, spec)
+        collected = asyncio.run(adapter.collect_for_spec(result, spec, object()))
+
+        assert len(observations) == 1
+        assert observations[0].target == context.target
+        assert observations[0].data["path"] == str(screenshot)
+        assert collected == ("screenshots/" + screenshot.name,)
+
+    def test_missing_planned_file_is_not_screenshot_evidence(
+        self,
+        context: AdapterContext,
+    ) -> None:
+        adapter = ScreenshotAdapter()
+        spec = adapter.plan(action("capture"), context)
+        result = ProcessResult(
+            exit_code=0,
+            stdout="321 bytes written to file /tmp/not-the-plan.png",
+            stderr="",
+        )
+
+        assert adapter.parse_for_spec(result, context.target, spec) == ()
+        assert asyncio.run(adapter.collect_for_spec(result, spec, object())) == ()
 
 
 # ── Probe ─────────────────────────────────────────────────────────────────────

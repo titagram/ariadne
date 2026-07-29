@@ -10,8 +10,8 @@ Provides bounded tunnel and route management operations:
 Ligolo-ng is primary; Chisel and SSH are explicit fallbacks (selected via
 input parameter ``tunnel_type``).
 
-Discovered hosts are always ``observed_only``.  No route is added for an
-unconfirmed network.  Scanning discovered hosts requires a scope amendment.
+Distinct discovered hosts are always ``scope_candidate``. No route is added
+for an unconfirmed network. Scanning them requires a scope amendment.
 """
 
 from __future__ import annotations
@@ -371,11 +371,19 @@ class PivotAdapter:
     def _make_observation(self, data: dict[str, object]) -> Observation:
         from ariadne.core.engagement import TargetSpec
 
+        normalized = dict(data)
+        discovered_host = normalized.get("discovered_host")
+        if isinstance(discovered_host, str) and discovered_host:
+            normalized["status"] = "scope_candidate"
+            normalized["scope_candidate"] = True
+            host = discovered_host
+        else:
+            host = "0.0.0.0"
         return Observation(
             observation_id=uuid4(),
-            target=TargetSpec(host="0.0.0.0"),
+            target=TargetSpec(host=host),
             source="pivot",
-            data=data,
+            data=normalized,
         )
 
     # ── Classify ──────────────────────────────────────────────────────────

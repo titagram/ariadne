@@ -12,7 +12,27 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+ObjectiveAnswer = (
+    Literal["user_flag", "root_flag", "domain_admin", "proof"]
+    | dict[str, str]
+)
+
+
+def _validate_objective_answers(
+    values: list[ObjectiveAnswer],
+) -> list[ObjectiveAnswer]:
+    for value in values:
+        if isinstance(value, dict) and (
+            set(value) != {"kind", "description"}
+            or value.get("kind") != "custom"
+            or not value.get("description", "").strip()
+        ):
+            raise ValueError(
+                "Custom objectives require exactly kind='custom' and a description"
+            )
+    return values
 
 
 def _build_schema(model_cls: type[BaseModel], description: str = "") -> dict:
@@ -44,14 +64,6 @@ class PrepareEngagementInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    authorization_attested: bool = Field(
-        ...,
-        description="True if the user has attested authorization for this engagement.",
-    )
-    disclaimer_version: str = Field(
-        ...,
-        description="Version string of the disclaimer accepted by the user (e.g. '2026-07-28').",
-    )
     profile: Literal["private-lab", "htb"] = Field(
         ...,
         description="Environment profile. Must be one of: 'private-lab' or 'htb'.",
@@ -60,37 +72,37 @@ class PrepareEngagementInput(BaseModel):
         ...,
         description="Target host IP address or FQDN (e.g. '192.168.2.148').",
     )
-    objectives: list[
-        Literal["user_flag", "root_flag", "domain_admin", "proof"]
-    ] = Field(
+    objectives: list[ObjectiveAnswer] = Field(
         ...,
         min_length=1,
         description=(
             "List of objective kinds. Each must be one of: 'user_flag', "
-            "'root_flag', 'domain_admin', 'proof'."
+            "'root_flag', 'domain_admin', 'proof', or a custom objective "
+            "object with kind and description."
         ),
+    )
+
+    _validate_objectives = field_validator("objectives")(
+        _validate_objective_answers
     )
     autonomy: Literal["controlled", "full"] = Field(
         default="controlled",
         description="Autonomy mode: 'controlled' (default) or 'full'.",
+    )
+    intensity: Literal["low", "normal", "high"] = Field(
+        default="normal",
+        description="Operational intensity selected in the engagement contract.",
+    )
+    exclusions: list[str] = Field(
+        default_factory=list,
+        max_length=50,
+        description="Explicitly excluded techniques, services, or actions.",
     )
     time_window_minutes: int = Field(
         default=60,
         ge=1,
         le=1440,
         description="Maximum engagement duration in minutes.",
-    )
-    max_requests_per_second: int = Field(
-        default=10,
-        ge=1,
-        le=1000,
-        description="Maximum target requests per second.",
-    )
-    max_concurrent_checks: int = Field(
-        default=5,
-        ge=1,
-        le=100,
-        description="Maximum concurrent target checks.",
     )
     notes: str = Field(
         default="",
@@ -101,9 +113,48 @@ class PrepareEngagementInput(BaseModel):
 
 PREPARE_ENGAGEMENT_SCHEMA = _build_schema(
     PrepareEngagementInput,
-    "Lock and activate an engagement after the interactive Q/A. Provide the "
-    "authorized target, profile, objectives, limits, autonomy, and accepted "
-    "server-controlled disclaimer version.",
+    "Present one trusted Hades summary confirmation, then lock and activate an "
+    "engagement from the collected profile, target, objectives, intensity, "
+    "exclusions, and bounded limits. Consent is never supplied as tool input.",
+)
+
+
+class AmendEngagementInput(BaseModel):
+    """One targeted amendment to the active immutable engagement version."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    add_targets: list[str] = Field(default_factory=list, max_length=20)
+    objectives: list[ObjectiveAnswer] | None = None
+    intensity: Literal["low", "normal", "high"] | None = None
+    exclusions: list[str] | None = Field(default=None, max_length=50)
+    candidate_id: str = Field(default="", max_length=100)
+    reason: str = Field(..., min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def _requires_change(self) -> AmendEngagementInput:
+        if not (
+            self.add_targets
+            or self.objectives is not None
+            or self.intensity is not None
+            or self.exclusions is not None
+        ):
+            raise ValueError("An amendment must change at least one contract field")
+        return self
+
+    @field_validator("objectives")
+    @classmethod
+    def _validate_amended_objectives(
+        cls,
+        values: list[ObjectiveAnswer] | None,
+    ) -> list[ObjectiveAnswer] | None:
+        return None if values is None else _validate_objective_answers(values)
+
+
+AMEND_ENGAGEMENT_SCHEMA = _build_schema(
+    AmendEngagementInput,
+    "Propose a targeted amendment to the active engagement. Hades displays one "
+    "trusted summary confirmation, then Ariadne creates a linked immutable version.",
 )
 
 # ── ariadne_status ──────────────────────────────────────────────────────
@@ -143,9 +194,9 @@ class ProposePlanInput(BaseModel):
 PROPOSE_PLAN_SCHEMA = _build_schema(
     ProposePlanInput,
     "Propose a bounded action plan for the current engagement. Requires the "
-    "snapshot hash from ariadne_prepare_engagement. Controlled and manual-only "
-    "plans receive trusted Hades UI consent during execution; eligible full "
-    "plans are durably auto-approved.",
+    "snapshot hash from ariadne_prepare_engagement. Curated in-policy plans are "
+    "durably auto-approved in every autonomy mode; only real manual boundaries "
+    "receive trusted Hades consent.",
 )
 
 # ── ariadne_execute_plan ────────────────────────────────────────────────
@@ -181,6 +232,14 @@ class RenderReportInput(BaseModel):
         default="walkthrough",
         description="Report style: 'walkthrough' (default) or 'professional'.",
     )
+    include_flags: bool = Field(
+        default=False,
+        description="Include captured CTF flags. Defaults to redacted.",
+    )
+    include_secrets: bool = Field(
+        default=False,
+        description="Include unredacted secrets. Defaults to redacted.",
+    )
 
 
 RENDER_REPORT_SCHEMA = _build_schema(
@@ -188,6 +247,26 @@ RENDER_REPORT_SCHEMA = _build_schema(
     "Render a walkthrough or professional report for the current engagement. "
     "Use 'walkthrough' for a step-by-step narrative or 'professional' for an "
     "executive-format report.",
+)
+
+
+class RunEngagementInput(BaseModel):
+    """Advance autonomously until completion or a typed boundary."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    max_steps: int = Field(
+        default=30,
+        ge=1,
+        le=100,
+        description="Safety bound for deterministic plan/execute iterations.",
+    )
+
+
+RUN_ENGAGEMENT_SCHEMA = _build_schema(
+    RunEngagementInput,
+    "Advance the active engagement autonomously until objectives and reports "
+    "complete or a true policy/scope/runtime/user-choice boundary is reached.",
 )
 
 # ── Registry ────────────────────────────────────────────────────────────
@@ -228,6 +307,13 @@ ARIADNE_TOOLS: dict[str, ToolRegistration] = {
         description="Show current engagement and state information",
         emoji="📊",
     ),
+    "ariadne_amend_engagement": ToolRegistration(
+        name="ariadne_amend_engagement",
+        schema=AMEND_ENGAGEMENT_SCHEMA,
+        handler=None,
+        description="Create a consented immutable engagement amendment",
+        emoji="🧾",
+    ),
     "ariadne_propose_plan": ToolRegistration(
         name="ariadne_propose_plan",
         schema=PROPOSE_PLAN_SCHEMA,
@@ -241,6 +327,13 @@ ARIADNE_TOOLS: dict[str, ToolRegistration] = {
         handler=None,
         description="Execute an approved bounded action plan",
         emoji="▶️",
+    ),
+    "ariadne_run": ToolRegistration(
+        name="ariadne_run",
+        schema=RUN_ENGAGEMENT_SCHEMA,
+        handler=None,
+        description="Run the engagement autonomously until complete or blocked",
+        emoji="🧭",
     ),
     "ariadne_render_report": ToolRegistration(
         name="ariadne_render_report",

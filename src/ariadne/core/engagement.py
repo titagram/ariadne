@@ -13,6 +13,19 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 from ariadne.core.enums import AutonomyMode, EnvironmentProfile
 from ariadne.core.errors import ConfirmationError, ScopeError
 
+_INTENSITY_DEFAULTS = {
+    "low": (5, 2),
+    "normal": (10, 5),
+    "high": (50, 10),
+}
+
+
+def intensity_default_limits(
+    intensity: Literal["low", "normal", "high"],
+) -> tuple[int, int]:
+    """Return bounded default rate and concurrency for contract intensity."""
+    return _INTENSITY_DEFAULTS[intensity]
+
 # FQDN: labels separated by dots, trailing dot optional, case-insensitive.
 _FQDN_RE = re.compile(
     r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+"
@@ -116,6 +129,8 @@ class EngagementDraft(BaseModel):
     autonomy: AutonomyMode
     target: TargetSpec
     objectives: list[Objective]
+    intensity: Literal["low", "normal", "high"] = "normal"
+    exclusions: tuple[str, ...] = ()
 
     @field_validator("objectives")
     @classmethod
@@ -123,6 +138,14 @@ class EngagementDraft(BaseModel):
         if len(v) < 1:
             raise ValueError("At least one objective is required")
         return v
+
+    @field_validator("exclusions")
+    @classmethod
+    def _normalize_exclusions(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(dict.fromkeys(value.strip() for value in values if value.strip()))
+        if len(normalized) > 50:
+            raise ValueError("At most 50 exclusions may be declared")
+        return normalized
 
 
 class Confirmation(BaseModel):
@@ -167,6 +190,8 @@ class EngagementSnapshot(BaseModel):
     autonomy: AutonomyMode
     targets: tuple[TargetSpec, ...]
     objectives: tuple[Objective, ...]
+    intensity: Literal["low", "normal", "high"] = "normal"
+    exclusions: tuple[str, ...] = ()
     constraints: EngagementConstraints = Field(default_factory=EngagementConstraints)
     policy_source_digests: tuple[str, ...] = ()
 
@@ -192,6 +217,8 @@ def calculate_snapshot_hash(snapshot: EngagementSnapshot) -> str:
         "objectives": [
             objective.model_dump(mode="json") for objective in snapshot.objectives
         ],
+        "intensity": snapshot.intensity,
+        "exclusions": list(snapshot.exclusions),
         "constraints": snapshot.constraints.model_dump(mode="json"),
         "policy_source_digests": list(snapshot.policy_source_digests),
     }
@@ -256,6 +283,8 @@ def lock_engagement(
         "autonomy": draft.autonomy.value,
         "targets": [t.model_dump(mode="json") for t in (draft.target,)],
         "objectives": [o.model_dump(mode="json") for o in draft.objectives],
+        "intensity": draft.intensity,
+        "exclusions": list(draft.exclusions),
         "constraints": constraints.model_dump(mode="json"),
         "policy_source_digests": list(policy_source_digests),
     }
@@ -273,6 +302,8 @@ def lock_engagement(
         autonomy=draft.autonomy,
         targets=(draft.target,),
         objectives=tuple(draft.objectives),
+        intensity=draft.intensity,
+        exclusions=draft.exclusions,
         constraints=constraints,
         policy_source_digests=policy_source_digests,
     )
@@ -319,6 +350,8 @@ def lock_attested_engagement(
         "autonomy": draft.autonomy.value,
         "targets": [draft.target.model_dump(mode="json")],
         "objectives": [o.model_dump(mode="json") for o in draft.objectives],
+        "intensity": draft.intensity,
+        "exclusions": list(draft.exclusions),
         "constraints": constraints.model_dump(mode="json"),
         "policy_source_digests": list(policy_source_digests),
     }
@@ -335,6 +368,8 @@ def lock_attested_engagement(
         autonomy=draft.autonomy,
         targets=(draft.target,),
         objectives=tuple(draft.objectives),
+        intensity=draft.intensity,
+        exclusions=draft.exclusions,
         constraints=constraints,
         policy_source_digests=policy_source_digests,
     )
@@ -367,37 +402,74 @@ def amend_scope(
     if confirmation.expires_at < now:
         raise ConfirmationError("Confirmation has expired")
 
-    engagement_id = snapshot.engagement_id
-    constraints = snapshot.constraints
+    return amend_engagement(
+        snapshot,
+        targets=targets,
+        confirmed_at=confirmation.confirmed_at,
+    )
 
+
+def amend_engagement(
+    snapshot: EngagementSnapshot,
+    *,
+    targets: tuple[TargetSpec, ...] | None = None,
+    objectives: tuple[Objective, ...] | None = None,
+    intensity: Literal["low", "normal", "high"] | None = None,
+    exclusions: tuple[str, ...] | None = None,
+    constraints: EngagementConstraints | None = None,
+    confirmed_at: datetime | None = None,
+) -> EngagementSnapshot:
+    """Create the next immutable contract version after trusted Hades consent.
+
+    Consent is deliberately handled at the Hades composition boundary.  This
+    pure function only creates a linked snapshot and never mutates the prior
+    version.
+    """
+    next_targets = snapshot.targets if targets is None else targets
+    next_objectives = snapshot.objectives if objectives is None else objectives
+    if not next_targets:
+        raise ScopeError("An engagement must retain at least one target")
+    if not next_objectives:
+        raise ScopeError("An engagement must retain at least one objective")
+    next_intensity = snapshot.intensity if intensity is None else intensity
+    next_constraints = snapshot.constraints if constraints is None else constraints
+    next_exclusions = snapshot.exclusions if exclusions is None else tuple(
+        dict.fromkeys(value.strip() for value in exclusions if value.strip())
+    )
+    amended_at = confirmed_at or datetime.now(UTC)
     data = {
-        "engagement_id": str(engagement_id),
+        "engagement_id": str(snapshot.engagement_id),
         "revision": snapshot.revision + 1,
         "previous_snapshot_hash": snapshot.snapshot_hash,
-        "confirmed_at": confirmation.confirmed_at.isoformat(),
+        "confirmed_at": amended_at.isoformat(),
         "authorization_attested": snapshot.authorization_attested,
         "disclaimer_version": snapshot.disclaimer_version,
         "profile": snapshot.profile.value,
         "autonomy": snapshot.autonomy.value,
-        "targets": [t.model_dump(mode="json") for t in targets],
-        "objectives": [o.model_dump(mode="json") for o in snapshot.objectives],
-        "constraints": constraints.model_dump(mode="json"),
+        "targets": [target.model_dump(mode="json") for target in next_targets],
+        "objectives": [
+            objective.model_dump(mode="json") for objective in next_objectives
+        ],
+        "intensity": next_intensity,
+        "exclusions": list(next_exclusions),
+        "constraints": next_constraints.model_dump(mode="json"),
         "policy_source_digests": list(snapshot.policy_source_digests),
     }
     snapshot_hash = _make_content_hash(data)
-
     return EngagementSnapshot(
-        engagement_id=engagement_id,
+        engagement_id=snapshot.engagement_id,
         revision=snapshot.revision + 1,
         previous_snapshot_hash=snapshot.snapshot_hash,
         snapshot_hash=snapshot_hash,
-        confirmed_at=confirmation.confirmed_at,
+        confirmed_at=amended_at,
         authorization_attested=snapshot.authorization_attested,
         disclaimer_version=snapshot.disclaimer_version,
         profile=snapshot.profile,
         autonomy=snapshot.autonomy,
-        targets=targets,
-        objectives=snapshot.objectives,
-        constraints=constraints,
+        targets=next_targets,
+        objectives=next_objectives,
+        intensity=next_intensity,
+        exclusions=next_exclusions,
+        constraints=next_constraints,
         policy_source_digests=snapshot.policy_source_digests,
     )

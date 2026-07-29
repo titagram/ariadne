@@ -14,7 +14,9 @@ from ariadne.core.engagement import (
 from ariadne.core.enums import AutonomyMode, EnvironmentProfile
 from ariadne.core.errors import PolicyConfigurationError
 from ariadne.hades_adapter.commands import CURRENT_DISCLAIMER_VERSION, AriadneCommand
+from ariadne.hades_adapter.consent import ConsentDecision
 from ariadne.hades_adapter.handlers import (
+    handle_amend_engagement,
     handle_prepare_engagement,
     handle_status,
 )
@@ -40,6 +42,19 @@ def command(store) -> AriadneCommand:
     return AriadneCommand(ledger=ChallengeLedger(), store=store)
 
 
+class ContractConsent:
+    def __init__(self, decision: ConsentDecision = ConsentDecision.ACCEPT) -> None:
+        self.decision = decision
+
+    async def request_contract(self, summary: object) -> ConsentDecision:
+        del summary
+        return self.decision
+
+    async def request_amendment(self, summary: object) -> ConsentDecision:
+        del summary
+        return self.decision
+
+
 @pytest.fixture
 def valid_answers() -> dict:
     return {
@@ -56,6 +71,41 @@ def valid_answers() -> dict:
 
 def test_public_registry_has_no_bind_tool() -> None:
     assert "ariadne_bind_engagement" not in ARIADNE_TOOLS
+
+
+def test_prepare_schema_never_accepts_model_supplied_consent() -> None:
+    properties = ARIADNE_TOOLS["ariadne_prepare_engagement"].schema[
+        "parameters"
+    ]["properties"]
+
+    assert "authorization_attested" not in properties
+    assert "disclaimer_version" not in properties
+
+
+def test_prepare_schema_accepts_an_explicit_custom_objective() -> None:
+    parsed = PrepareEngagementInput.model_validate(
+        {
+            "profile": "private-lab",
+            "target_host": "lab.test",
+            "objectives": [
+                {
+                    "kind": "custom",
+                    "description": "Prove access to the test application",
+                }
+            ],
+        }
+    )
+
+    assert parsed.objectives[0]["kind"] == "custom"
+
+
+def test_render_schema_exposes_explicit_sensitive_report_options() -> None:
+    parsed = RenderReportInput.model_validate(
+        {"style": "professional", "include_flags": True, "include_secrets": True}
+    )
+
+    assert parsed.include_flags is True
+    assert parsed.include_secrets is True
 
 
 @pytest.mark.parametrize(
@@ -95,6 +145,7 @@ async def test_prepare_atomically_locks_and_binds_trusted_session(
         valid_answers,
         session_id="trusted-hades-session",
         ariadne_command=command,
+        consent_gateway=ContractConsent(),
     )
 
     assert result["status"] == "active"
@@ -108,10 +159,33 @@ async def test_prepare_atomically_locks_and_binds_trusted_session(
     snapshot = command.store.open(binding.engagement_id).snapshot
     assert len(snapshot.policy_source_digests) == 3
     assert all(snapshot.policy_source_digests)
+    assert snapshot.intensity == "normal"
+    assert snapshot.constraints.max_requests_per_second == 10
+    assert snapshot.constraints.max_concurrent_checks == 5
     events = command.store.read_events(command.store.open(binding.engagement_id))
     assert events[0]["payload"]["policy_source_digests"] == list(
         snapshot.policy_source_digests,
     )
+
+
+@pytest.mark.asyncio
+async def test_high_intensity_sets_bounded_defaults(
+    command: AriadneCommand,
+    valid_answers: dict,
+) -> None:
+    result = await handle_prepare_engagement(
+        {**valid_answers, "intensity": "high"},
+        session_id="high-intensity-session",
+        ariadne_command=command,
+        consent_gateway=ContractConsent(),
+    )
+
+    binding = command.get_session_binding("high-intensity-session")
+    assert result["status"] == "active"
+    assert binding is not None and binding.engagement_id is not None
+    snapshot = command.store.open(binding.engagement_id).snapshot
+    assert snapshot.constraints.max_requests_per_second == 50
+    assert snapshot.constraints.max_concurrent_checks == 10
 
 
 @pytest.mark.asyncio
@@ -128,27 +202,19 @@ async def test_prepare_fails_closed_without_trusted_session(
     assert list(command.store.iter_snapshots()) == []
 
 
-@pytest.mark.parametrize(
-    ("override", "expected"),
-    [
-        ({"authorization_attested": False}, "authorization"),
-        ({"disclaimer_version": "stale-version"}, "disclaimer"),
-    ],
-)
 @pytest.mark.asyncio
-async def test_prepare_rejects_missing_authorization_or_wrong_disclaimer(
+async def test_prepare_fails_closed_when_trusted_confirmation_is_declined(
     command: AriadneCommand,
     valid_answers: dict,
-    override: dict,
-    expected: str,
 ) -> None:
     result = await handle_prepare_engagement(
-        valid_answers | override,
+        valid_answers,
         session_id="trusted-hades-session",
         ariadne_command=command,
+        consent_gateway=ContractConsent(ConsentDecision.DECLINE),
     )
-    assert result["status"] == "error"
-    assert expected in result["message"].lower()
+    assert result["status"] == "blocked"
+    assert "not confirmed" in result["message"].lower()
     assert list(command.store.iter_snapshots()) == []
 
 
@@ -169,6 +235,7 @@ async def test_prepare_fails_closed_when_policy_sources_cannot_load(
         valid_answers,
         session_id="trusted-hades-session",
         ariadne_command=command,
+        consent_gateway=ContractConsent(),
     )
 
     assert result["status"] == "error"
@@ -186,6 +253,7 @@ async def test_binding_survives_service_recreation(
         valid_answers,
         session_id="restart-safe-session",
         ariadne_command=first,
+        consent_gateway=ContractConsent(),
     )
     assert created["status"] == "active"
 
@@ -203,6 +271,80 @@ async def test_binding_survives_service_recreation(
     assert recreated.get_session_binding("restart-safe-session") is not None
 
 
+@pytest.mark.asyncio
+async def test_amendment_creates_linked_revision_and_rebinds_session(
+    command: AriadneCommand,
+    valid_answers: dict,
+) -> None:
+    created = await handle_prepare_engagement(
+        valid_answers,
+        session_id="amend-session",
+        ariadne_command=command,
+        consent_gateway=ContractConsent(),
+    )
+
+    amended = await handle_amend_engagement(
+        {
+            "add_targets": ["192.168.2.149"],
+            "intensity": "high",
+            "exclusions": ["dos"],
+            "reason": "Distinct host discovered from local route evidence.",
+            "candidate_id": "candidate-1",
+        },
+        session_id="amend-session",
+        ariadne_command=command,
+        consent_gateway=ContractConsent(),
+    )
+
+    assert amended["status"] == "active"
+    assert amended["snapshot_hash"] != created["snapshot_hash"]
+    binding = command.get_session_binding("amend-session")
+    assert binding is not None
+    snapshot = command.store.open(binding.engagement_id).snapshot
+    assert snapshot.revision == 2
+    assert snapshot.previous_snapshot_hash == created["snapshot_hash"]
+    assert snapshot.intensity == "high"
+    assert snapshot.constraints.max_requests_per_second == 50
+    assert snapshot.constraints.max_concurrent_checks == 10
+    assert {target.host for target in snapshot.targets} == {
+        "192.168.2.148",
+        "192.168.2.149",
+    }
+
+
+@pytest.mark.asyncio
+async def test_declined_scope_candidate_is_recorded_and_not_reprompted(
+    command: AriadneCommand,
+    valid_answers: dict,
+) -> None:
+    await handle_prepare_engagement(
+        valid_answers,
+        session_id="decline-session",
+        ariadne_command=command,
+        consent_gateway=ContractConsent(),
+    )
+    payload = {
+        "add_targets": ["192.168.2.149"],
+        "reason": "Container discovered locally.",
+        "candidate_id": "candidate-declined",
+    }
+    declined = await handle_amend_engagement(
+        payload,
+        session_id="decline-session",
+        ariadne_command=command,
+        consent_gateway=ContractConsent(ConsentDecision.DECLINE),
+    )
+    repeated = await handle_amend_engagement(
+        payload,
+        session_id="decline-session",
+        ariadne_command=command,
+        consent_gateway=ContractConsent(),
+    )
+
+    assert declined["boundary"] == "amendment_declined"
+    assert repeated["boundary"] == "scope_candidate_declined"
+
+
 class FailSecondEventStore(RunStore):
     """Fault-injection store that fails before persisting session_bound."""
 
@@ -217,6 +359,43 @@ class FailSecondEventStore(RunStore):
         super().append_event(handle, event)
 
 
+class FailSessionReboundStore(RunStore):
+    def append_event(self, handle, event) -> None:
+        if event.event_type == "session_rebound":
+            raise OSError("injected amendment failure")
+        super().append_event(handle, event)
+
+
+@pytest.mark.asyncio
+async def test_failed_amendment_restores_previous_active_revision(
+    tmp_path,
+    valid_answers: dict,
+) -> None:
+    store = FailSessionReboundStore(base_path=tmp_path)
+    command = AriadneCommand(ledger=ChallengeLedger(), store=store)
+    created = await handle_prepare_engagement(
+        valid_answers,
+        session_id="rollback-session",
+        ariadne_command=command,
+        consent_gateway=ContractConsent(),
+    )
+
+    failed = await handle_amend_engagement(
+        {
+            "add_targets": ["192.168.2.149"],
+            "reason": "candidate",
+        },
+        session_id="rollback-session",
+        ariadne_command=command,
+        consent_gateway=ContractConsent(),
+    )
+
+    binding = command.get_session_binding("rollback-session")
+    assert failed["status"] == "error"
+    assert binding is not None and binding.snapshot_hash == created["snapshot_hash"]
+    assert store.open(binding.engagement_id).snapshot.revision == 1
+
+
 def test_partial_prepare_never_binds_in_memory_or_after_restart(
     tmp_path,
     valid_answers: dict,
@@ -225,7 +404,11 @@ def test_partial_prepare_never_binds_in_memory_or_after_restart(
     command = AriadneCommand(ledger=ChallengeLedger(), store=store)
 
     with pytest.raises(OSError, match="injected"):
-        command.prepare(valid_answers, session_id="partial-session")
+        command.prepare(
+            valid_answers,
+            session_id="partial-session",
+            trusted_confirmation_digest="a" * 64,
+        )
 
     assert command.ledger.get_session_binding("partial-session") is None
     recreated = AriadneCommand(
@@ -239,7 +422,11 @@ def test_prepare_persists_adjacent_correlated_transaction_events(
     command: AriadneCommand,
     valid_answers: dict,
 ) -> None:
-    created = command.prepare(valid_answers, session_id="correlated-session")
+    created = command.prepare(
+        valid_answers,
+        session_id="correlated-session",
+        trusted_confirmation_digest="a" * 64,
+    )
     handle = command.store.open(created.engagement_id)
     assert handle is not None
     events = command.store.read_events(handle)
@@ -302,7 +489,11 @@ async def test_recovery_rejects_tampered_lock_even_with_updated_manifest(
         ledger=ChallengeLedger(),
         store=RunStore(base_path=tmp_path),
     )
-    created = command.prepare(valid_answers, session_id="tampered-session")
+    created = command.prepare(
+        valid_answers,
+        session_id="tampered-session",
+        trusted_confirmation_digest="a" * 64,
+    )
     handle = command.store.open(created.engagement_id)
     assert handle is not None
     lock_path = handle.path / "engagement.lock.yaml"
@@ -334,7 +525,11 @@ def test_recovery_fails_closed_on_manifest_or_event_tampering(
         ledger=ChallengeLedger(),
         store=RunStore(base_path=tmp_path),
     )
-    created = command.prepare(valid_answers, session_id=f"{tamper}-session")
+    created = command.prepare(
+        valid_answers,
+        session_id=f"{tamper}-session",
+        trusted_confirmation_digest="a" * 64,
+    )
     handle = command.store.open(created.engagement_id)
     assert handle is not None
     if tamper == "manifest":

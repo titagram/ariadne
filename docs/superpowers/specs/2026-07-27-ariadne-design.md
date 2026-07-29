@@ -1,5 +1,10 @@
 # Ariadne: Hades-Native Agentic Lab Pentesting
 
+> Historical baseline. The definitive July 29 decisions implemented in the
+> current skill, architecture, and operator guide supersede references below
+> to per-plan controlled approvals, mandatory Docker, confirmation tokens, and
+> `observed_only` semantics for distinct lateral hosts.
+
 **Status:** Approved design  
 **Date:** 2026-07-27  
 **Initial host:** Hades/Hermes  

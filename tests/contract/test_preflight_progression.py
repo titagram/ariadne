@@ -17,6 +17,7 @@ import pytest
 
 from ariadne.adapters import AdapterRegistry, build_default_registry
 from ariadne.adapters.base import ProcessResult, ProcessSpec
+from ariadne.core.enums import EngagementState
 from ariadne.core.planner import Planner
 from ariadne.core.policy import CapabilityRule, EffectivePolicy
 from ariadne.core.workflow import WorkflowCatalog
@@ -26,6 +27,7 @@ from ariadne.execution.contracts import (
 )
 from ariadne.hades_adapter.commands import CURRENT_DISCLAIMER_VERSION, AriadneCommand
 from ariadne.hades_adapter.handlers import (
+    _determine_engagement_state,
     _get_run_handle,  # type: ignore[attr-defined]
     handle_execute_plan,
     handle_prepare_engagement,
@@ -138,8 +140,17 @@ async def _bind_engagement(command: AriadneCommand, session_id: str) -> str:
         args,
         session_id=session_id,
         ariadne_command=command,
+        consent_gateway=_AcceptContract(),
     )
     return prepare_result["snapshot_hash"]
+
+
+class _AcceptContract:
+    async def request_contract(self, summary: object) -> object:
+        del summary
+        from ariadne.hades_adapter.consent import ConsentDecision
+
+        return ConsentDecision.ACCEPT
 
 
 # ── RED tests (expected to fail before fixes) ───────────────────────────────
@@ -179,8 +190,8 @@ class TestPreflightEligibility:
         )
 
         # Should propose the preflight playbook
-        assert result["status"] == "plan_proposed", (
-            f"Expected plan_proposed, got {result}. "
+        assert result["status"] == "plan_auto_approved", (
+            f"Expected plan_auto_approved, got {result}. "
             f"If this fails with 'no eligible playbooks', the state is still DISCOVERY"
         )
         assert result["playbook_id"] == "engagement.preflight.v1", (
@@ -236,7 +247,7 @@ class TestPreflightEligibility:
         # preflight.check is missing from the effective policy
         #
         # If the handler never gets past state matching, this fails differently
-        assert result["status"] in ("error", "plan_proposed"), (
+        assert result["status"] in ("error", "plan_auto_approved"), (
             f"Got {result}. With the fix, either the plan is proposed "
             f"(if policy includes preflight.check) or rejected (if not)."
         )
@@ -278,7 +289,7 @@ class TestAdapterExecution:
             planner=planner,
             catalog=full_catalog,
         )
-        assert propose_result["status"] == "plan_proposed"
+        assert propose_result["status"] == "plan_auto_approved"
         plan_id = propose_result["plan_id"]
 
         # Approve via /ariadne
@@ -383,7 +394,7 @@ class TestAdapterExecution:
 
         # Preflight should be proposed — it has preflight.check which is allowed
         # This test passes once the state progression fix is in place
-        assert propose_result["status"] == "plan_proposed"
+        assert propose_result["status"] == "plan_auto_approved"
         assert propose_result["playbook_id"] == "engagement.preflight.v1"
 
 
@@ -444,10 +455,60 @@ class TestProgressionToDiscovery:
         # With the fix, it should read preflight evidence from the store,
         # set state=DISCOVERY, and observations={preflight_passed},
         # making network.tcp-discovery.v1 eligible.
-        assert propose_result["status"] == "plan_proposed", (
-            f"Expected plan_proposed, got {propose_result}. "
+        assert propose_result["status"] == "plan_auto_approved", (
+            f"Expected plan_auto_approved, got {propose_result}. "
             f"State progression from preflight to discovery should be driven by store evidence."
         )
         assert propose_result["playbook_id"] == "preflight.tcp-discovery.v1", (
             f"Expected tcp-discovery, got {propose_result.get('playbook_id')}"
+        )
+
+    async def test_successful_adapter_observation_advances_without_success_emits(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        full_catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+    ) -> None:
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {
+                "snapshot_hash": snapshot_hash,
+                "hypothesis": "truthful preflight observation",
+            },
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=full_catalog,
+        )
+        runtime = FakeRuntime(
+            exit_code=0,
+            stdout="PING target: reachable",
+        )
+
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=command,
+            adapter_registry=registry,
+            runtime=runtime,
+            execution_contract_registry=ExecutionContractRegistry.curated(),
+            execution_coordinator=ExecutionCoordinator(1),
+            catalog=full_catalog,
+        )
+
+        binding = command.ledger.get_session_binding(session_id)
+        assert binding is not None and binding.engagement_id is not None
+        handle = command.store.open(binding.engagement_id)
+        assert handle is not None
+        state, observations = _determine_engagement_state(command.store, handle)
+        events = command.store.read_events(handle)
+
+        assert result["status"] == "executed"
+        assert state is EngagementState.DISCOVERY
+        assert any(obs.data.get("type") == "preflight_passed" for obs in observations)
+        assert not any(
+            event["event_type"] == "success_emits"
+            for event in events
         )

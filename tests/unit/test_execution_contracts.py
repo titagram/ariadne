@@ -3,15 +3,21 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
+from uuid import UUID
 
 import pytest
+import yaml
 
+from ariadne.adapters.base import AdapterContext
+from ariadne.adapters.base import PlannedAction as AdapterPlannedAction
 from ariadne.adapters.nmap import NmapAdapter
 from ariadne.adapters.research import ResearchAdapter
+from ariadne.adapters.screenshot import ScreenshotAdapter
+from ariadne.adapters.zap import ZapAdapter
 from ariadne.core.engagement import TargetSpec
 from ariadne.core.planner import Plan, PlannedAction
-from ariadne.core.policy import CapabilityRule, EffectivePolicy
-from ariadne.core.workflow import PlaybookLimits
+from ariadne.core.policy import CapabilityRule, EffectivePolicy, load_policy
+from ariadne.core.workflow import PlaybookLimits, WorkflowCatalog
 from ariadne.execution.contracts import (
     ExecutionContractRegistry,
     ExecutionCoordinator,
@@ -34,11 +40,28 @@ class RecordingRuntime:
         return self._results.pop(0)
 
 
+class ScreenshotRuntime(RecordingRuntime):
+    async def run(self, spec: ProcessSpec) -> ProcessResult:
+        self.calls.append(spec)
+        screenshot_arg = next(
+            item for item in spec.argv if item.startswith("--screenshot=")
+        )
+        output = Path(screenshot_arg.removeprefix("--screenshot="))
+        assert output.parent.is_dir()
+        output.write_bytes(b"PNG")
+        return ProcessResult(
+            exit_code=0,
+            stdout=f"321 bytes written to file {output}",
+            stderr="",
+        )
+
+
 def _plan(
     *,
     adapter: str = "nmap",
     operation: str = "tcp_discovery",
     capability: str = "scan.tcp",
+    inputs: dict[str, object] | None = None,
     limits: PlaybookLimits | None = None,
 ) -> Plan:
     now = datetime.now(UTC)
@@ -53,7 +76,7 @@ def _plan(
             PlannedAction(
                 adapter=adapter,
                 operation=operation,
-                inputs={"ports": (22, 80)},
+                inputs=inputs if inputs is not None else {"ports": (22, 80)},
             ),
         ),
         limits=limits
@@ -158,7 +181,7 @@ def _nmap_spec(
     )
 
 
-def test_registry_contains_only_current_live_slice() -> None:
+def test_registry_contains_the_curated_workflow_operations() -> None:
     registry = ExecutionContractRegistry.curated()
 
     assert registry.get("research", "investigate") is not None
@@ -168,8 +191,39 @@ def test_registry_contains_only_current_live_slice() -> None:
         "udp_targeted",
     ):
         assert registry.get("nmap", operation) is not None
-    assert registry.get("nuclei", "scan") is None
+    assert registry.get("nuclei", "scan") is not None
     assert registry.get("nmap", "unknown") is None
+
+
+def test_builtin_workflow_actions_have_curated_contracts_and_explicit_tools() -> None:
+    """A built-in action cannot reach a subprocess through an implicit policy."""
+    root = Path(__file__).parents[2]
+    catalog = WorkflowCatalog.load(root / "workflows")
+    policy = load_policy(root / "policies" / "base.yaml")
+    registry = ExecutionContractRegistry.curated()
+    boundary_only = {("pivot", "scan_discovered_host")}
+
+    for playbook in catalog.playbooks.values():
+        for action in playbook.actions:
+            if (action.adapter, action.operation) in boundary_only:
+                # The pivot adapter raises ScopeAmendmentRequiredError from
+                # plan() before it can return a ProcessSpec or send traffic.
+                continue
+            contract = registry.get(action.adapter, action.operation)
+            assert contract is not None, (
+                f"{playbook.id} has no curated contract for "
+                f"{action.adapter}:{action.operation}"
+            )
+            for capability in playbook.capabilities:
+                allowed_tools = policy.capabilities[capability].allowed_tools
+                assert allowed_tools, (
+                    f"{playbook.id} capability {capability} has no explicit "
+                    "allowed_tools"
+                )
+                assert contract.executable_ids & allowed_tools, (
+                    f"{playbook.id} capability {capability} cannot authorize "
+                    f"any executable in {action.adapter}:{action.operation}"
+                )
 
 
 def test_contract_registry_is_immutable_and_binds_exact_adapter_type() -> None:
@@ -325,6 +379,200 @@ def test_empty_allowed_tools_is_not_unrestricted_at_execution_boundary(
 
     with pytest.raises(ProcessAuthorizationError, match="tool"):
         guard.authorize_initial(_nmap_spec())
+
+
+def test_generic_curated_contract_accepts_target_bound_httpx_and_denies_shell_token(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(adapter="httpx", operation="scan", capability="web.fingerprint")
+    guard = _guard(
+        tmp_path,
+        RecordingRuntime(),
+        plan=plan,
+        policy=_policy(capability="web.fingerprint", tools=frozenset({"httpx"})),
+    )
+    spec = ProcessSpec(
+        argv=(
+            "httpx", "-l", "-", "-p", "80", "-json", "-no-fallback",
+            "-t", "10", "-timeout", "10",
+        ),
+        stdin=b"https://10.10.10.10\nhttp://10.10.10.10\n",
+        timeout_seconds=30,
+        max_output_bytes=4096,
+    )
+
+    guard.authorize_initial(spec)
+    with pytest.raises(ProcessAuthorizationError, match="template|token"):
+        guard.authorize_initial(
+            spec.model_copy(update={"argv": spec.argv + ("&&", "curl")})
+        )
+
+
+@pytest.mark.parametrize(
+    ("adapter", "operation", "capability", "tool", "spec", "mutated"),
+    [
+        (
+            "postex",
+            "identity",
+            "postex.linux.identity",
+            "ssh",
+            ProcessSpec(
+                argv=("ssh", "10.10.10.10", "id"),
+                timeout_seconds=30,
+                max_output_bytes=4096,
+            ),
+            ProcessSpec(
+                argv=("ssh", "10.10.10.10", "uname -a"),
+                timeout_seconds=30,
+                max_output_bytes=4096,
+            ),
+        ),
+        (
+            "active_directory",
+            "ldap_rootdse",
+            "ad.enum",
+            "ldapsearch",
+            ProcessSpec(
+                argv=(
+                    "ldapsearch",
+                    "-H",
+                    "ldap://10.10.10.10",
+                    "-x",
+                    "-s",
+                    "base",
+                    "-b",
+                    "",
+                    "objectClass=*",
+                ),
+                timeout_seconds=30,
+                max_output_bytes=4096,
+            ),
+            ProcessSpec(
+                argv=(
+                    "ldapsearch",
+                    "-H",
+                    "ldap://10.10.10.11",
+                    "-x",
+                    "-s",
+                    "base",
+                    "-b",
+                    "",
+                    "objectClass=*",
+                ),
+                timeout_seconds=30,
+                max_output_bytes=4096,
+            ),
+        ),
+    ],
+)
+def test_remote_operation_contracts_accept_exact_embedded_target_and_reject_mutation(
+    tmp_path: Path,
+    adapter: str,
+    operation: str,
+    capability: str,
+    tool: str,
+    spec: ProcessSpec,
+    mutated: ProcessSpec,
+) -> None:
+    plan = _plan(
+        adapter=adapter,
+        operation=operation,
+        capability=capability,
+        inputs={},
+    )
+    guard = _guard(
+        tmp_path,
+        RecordingRuntime(),
+        plan=plan,
+        policy=_policy(capability=capability, tools=frozenset({tool})),
+    )
+
+    guard.authorize_initial(spec)
+    with pytest.raises(ProcessAuthorizationError, match="target|template"):
+        guard.authorize_initial(mutated)
+
+
+def test_zap_contract_accepts_only_the_exact_operation_yaml_shape(
+    tmp_path: Path,
+) -> None:
+    capability = "web.passive_scan"
+    plan = _plan(
+        adapter="zap",
+        operation="passive_scan",
+        capability=capability,
+        inputs={},
+    )
+    guard = _guard(
+        tmp_path,
+        RecordingRuntime(),
+        plan=plan,
+        policy=_policy(capability=capability, tools=frozenset({"zap.sh"})),
+    )
+    context = AdapterContext(
+        target=plan.target,
+        snapshot_hash=plan.snapshot_hash,
+        engagement_id=UUID("00000000-0000-0000-0000-000000000001"),
+        adapter_name="zap",
+    )
+    spec = ZapAdapter().plan(
+        AdapterPlannedAction(
+            operation="passive_scan",
+            inputs={"timeout": 30, "max_output": 4096},
+        ),
+        context,
+    )
+
+    guard.authorize_initial(spec)
+    automation = yaml.safe_load(spec.stdin)
+    automation["env"]["contexts"][0]["urls"].append("https://10.10.10.11")
+    automation["jobs"].append({"type": "requestor", "parameters": {}})
+    automation["unexpected"] = True
+    with pytest.raises(ProcessAuthorizationError, match="target|template"):
+        guard.authorize_initial(
+            spec.model_copy(update={"stdin": yaml.safe_dump(automation).encode()})
+        )
+
+
+@pytest.mark.asyncio
+async def test_screenshot_workspace_is_created_only_after_authorization(
+    tmp_path: Path,
+) -> None:
+    capability = "web.screenshot"
+    plan = _plan(
+        adapter="screenshot",
+        operation="capture",
+        capability=capability,
+        inputs={},
+    )
+    runtime = ScreenshotRuntime()
+    guard = _guard(
+        tmp_path,
+        runtime,
+        plan=plan,
+        policy=_policy(capability=capability, tools=frozenset({"chromium"})),
+    )
+    context = AdapterContext(
+        target=plan.target,
+        snapshot_hash=plan.snapshot_hash,
+        engagement_id=UUID("00000000-0000-0000-0000-000000000001"),
+        adapter_name="screenshot",
+        run_root=tmp_path,
+    )
+    adapter = ScreenshotAdapter()
+    spec = adapter.plan(
+        AdapterPlannedAction(
+            operation="capture",
+            inputs={"timeout": 30, "max_output": 4096},
+        ),
+        context,
+    )
+    screenshots = tmp_path / "artifacts" / "screenshots"
+
+    assert not screenshots.exists()
+    guard.authorize_initial(spec)
+    assert not screenshots.exists()
+    await adapter.execute(spec, guard)
+    assert screenshots.is_dir()
 
 
 @pytest.mark.asyncio

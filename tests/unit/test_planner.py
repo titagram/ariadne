@@ -7,8 +7,14 @@ from uuid import uuid4
 import pytest
 
 from ariadne.core.engagement import EngagementSnapshot, TargetSpec
-from ariadne.core.enums import AutonomyMode, EngagementState, EnvironmentProfile
-from ariadne.core.observations import Hypothesis
+from ariadne.core.enums import (
+    AssetStatus,
+    AutonomyMode,
+    EngagementState,
+    EnvironmentProfile,
+)
+from ariadne.core.errors import WorkflowConfigurationError
+from ariadne.core.observations import Asset, Hypothesis
 from ariadne.core.policy import CapabilityRule, EffectivePolicy
 from ariadne.core.workflow import PlanningContext, WorkflowCatalog
 
@@ -141,6 +147,28 @@ class TestPlanCarriesSnapshotAndExpiry:
         assert plan.requires_manual_approval is False
         assert plan.manual_capabilities == ()
         assert plan.approval_reasons == ()
+
+    def test_scope_candidate_cannot_be_planned_before_amendment(
+        self,
+        catalog: WorkflowCatalog,
+        planning_context: PlanningContext,
+    ) -> None:
+        from ariadne.core.planner import Planner
+
+        candidate = Asset(
+            asset_id=uuid4(),
+            target=planning_context.hypothesis.target,
+            status=AssetStatus.SCOPE_CANDIDATE,
+        )
+        candidate_context = planning_context.model_copy(
+            update={"assets": (candidate,)},
+        )
+
+        with pytest.raises(WorkflowConfigurationError, match="scope_candidate"):
+            Planner(catalog).build(
+                "network.tcp-discovery.v1",
+                candidate_context,
+            )
 
     @pytest.mark.parametrize(
         "capability",

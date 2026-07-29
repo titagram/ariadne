@@ -16,8 +16,10 @@ from ariadne.hades_adapter.commands import AriadneCommand
 ARIADNE_TOOLS: frozenset[str] = frozenset({
     "ariadne_prepare_engagement",
     "ariadne_status",
+    "ariadne_amend_engagement",
     "ariadne_propose_plan",
     "ariadne_execute_plan",
+    "ariadne_run",
     "ariadne_render_report",
 })
 

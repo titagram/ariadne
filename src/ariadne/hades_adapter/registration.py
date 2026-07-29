@@ -11,10 +11,12 @@ from typing import Any
 
 from ariadne.composition import ServiceContainer
 from ariadne.hades_adapter.handlers import (
+    handle_amend_engagement,
     handle_execute_plan,
     handle_prepare_engagement,
     handle_propose_plan,
     handle_render_report,
+    handle_run_engagement,
     handle_status,
 )
 from ariadne.hades_adapter.schemas import ARIADNE_TOOLS
@@ -81,7 +83,7 @@ def _register_command(ctx: Any, services: ServiceContainer) -> None:
         handler=command_handler,
         description="Ariadne pentesting engagement commands",
         args_hint=(
-            "[new|status|plan|approve <plan-id>|"
+            "[new|status|run|plan|amend-scope|approve <plan-id>|"
             "reject <plan-id>|evidence|report|abort|doctor]"
         ),
     )
@@ -155,6 +157,7 @@ def _handler_for(tool_name: str, services: ServiceContainer) -> object:
             services.execution_contract_registry
         )
         context["execution_coordinator"] = services.execution_coordinator
+        context["tool_card_verifier"] = services.tool_card_verifier
         result = await raw(args, **context)
         return json.dumps(result)
 
@@ -164,7 +167,9 @@ def _handler_for(tool_name: str, services: ServiceContainer) -> object:
 _HANDLER_MAP: dict[str, Any] = {
     "ariadne_prepare_engagement": handle_prepare_engagement,
     "ariadne_status": handle_status,
+    "ariadne_amend_engagement": handle_amend_engagement,
     "ariadne_propose_plan": handle_propose_plan,
     "ariadne_execute_plan": handle_execute_plan,
+    "ariadne_run": handle_run_engagement,
     "ariadne_render_report": handle_render_report,
 }

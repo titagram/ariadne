@@ -154,6 +154,9 @@ class ReportValidator:
 
         # ── 3. Integrity manifest ──────────────────────────────────────────────
         manifest = _read_manifest(run_path)
+        resolved_run_path = run_path.resolve()
+        if not manifest:
+            errors.append("Missing or empty integrity.manifest")
         for rel_path_str, expected_hex in manifest.items():
             if not _SHA256_RE.match(expected_hex):
                 errors.append(
@@ -161,6 +164,11 @@ class ReportValidator:
                 )
                 continue
             abs_path = (run_path / rel_path_str).resolve()
+            if not abs_path.is_relative_to(resolved_run_path):
+                errors.append(
+                    f"Manifest path escapes the run directory: {rel_path_str!r}"
+                )
+                continue
             try:
                 actual = hashlib.sha256(abs_path.read_bytes()).hexdigest()
             except (FileNotFoundError, PermissionError, OSError):
@@ -175,7 +183,7 @@ class ReportValidator:
                 )
 
         # ── 4. Evidence artifacts exist ────────────────────────────────────────
-        artifacts_dir = run_path / "artifacts"
+        artifacts_dir = (run_path / "artifacts").resolve()
         evidence_events = [
             e for e in events
             if isinstance(e, dict) and e.get("event_type") == "evidence_collected"
@@ -187,8 +195,11 @@ class ReportValidator:
             artifact_name = payload.get("artifact")
             if not isinstance(artifact_name, str):
                 continue
-            art_path = artifacts_dir / artifact_name
-            if not art_path.is_file():
+            art_path = (artifacts_dir / artifact_name).resolve()
+            if (
+                not art_path.is_relative_to(artifacts_dir)
+                or not art_path.is_file()
+            ):
                 errors.append(
                     f"Evidence references missing artifact: {artifact_name!r}"
                 )
@@ -209,11 +220,31 @@ class ReportValidator:
             e for e in events
             if isinstance(e, dict) and e.get("event_type") == "objective_completed"
         ]
-        if not obj_events:
-            errors.append(
-                "No objective_completed event found — no proof that "
-                "engagement objectives were met"
+        snapshot_objectives = snapshot.get("objectives", [])
+        for objective in (
+            snapshot_objectives
+            if isinstance(snapshot_objectives, (list, tuple))
+            else ()
+        ):
+            if not isinstance(objective, dict):
+                continue
+            kind = objective.get("kind")
+            description = objective.get("description", "")
+            matched = any(
+                isinstance(event.get("payload"), dict)
+                and event["payload"].get("objective_kind") == kind
+                and (
+                    kind != "custom"
+                    or not description
+                    or event["payload"].get("description") == description
+                )
+                for event in obj_events
             )
+            if not matched:
+                errors.append(
+                    "No objective_completed proof for "
+                    f"{kind!r}: {description!r}"
+                )
 
         # ── 7. Secret scan ────────────────────────────────────────────────────
         if not options.include_secrets:
@@ -224,8 +255,11 @@ class ReportValidator:
                 artifact_name = payload.get("artifact")
                 if not isinstance(artifact_name, str):
                     continue
-                art_path = artifacts_dir / artifact_name
-                if not art_path.is_file():
+                art_path = (artifacts_dir / artifact_name).resolve()
+                if (
+                    not art_path.is_relative_to(artifacts_dir)
+                    or not art_path.is_file()
+                ):
                     continue
                 try:
                     content = art_path.read_bytes()

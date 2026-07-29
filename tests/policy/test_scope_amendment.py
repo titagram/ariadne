@@ -1,6 +1,6 @@
 """Negative and positive policy tests for pivot scope amendment constraints.
 
-Verifies that pivot discovery produces observed_only observations, that
+Verifies that pivot discovery produces scope_candidate observations, that
 scanning discovered hosts requires a scope amendment, and that no route is
 added for an unconfirmed network.
 """
@@ -61,20 +61,20 @@ def load_fixture(name: str) -> str:
 
 
 class TestPivotScopeAmendment:
-    """Verify pivot discovery produces observed_only observations and requires
+    """Verify pivot discovery produces scope_candidate observations and requires
     scope amendment for active actions."""
 
     def test_pivot_discovery_never_expands_scope(
         self, adapter: PivotAdapter, pivot_context: AdapterContext
     ) -> None:
-        """Discovered hosts are observed_only and cannot be directly acted upon."""
+        """Discovered hosts are candidates and cannot be directly acted upon."""
         observations = adapter.parse(
             ProcessResult(exit_code=0, stdout=load_fixture("discovered-host.json"), stderr="")
         )
         assert len(observations) >= 1
-        # The observation's data should indicate the host status is observed_only
         data = observations[0].data
-        assert data.get("status") == "observed_only"
+        assert data.get("status") == "scope_candidate"
+        assert observations[0].target.host == "172.16.5.10"
         with pytest.raises(ScopeAmendmentRequiredError):
             adapter.plan(action("scan_discovered_host"), pivot_context)
 
@@ -91,14 +91,14 @@ class TestPivotScopeAmendment:
         self, adapter: PivotAdapter, pivot_context: AdapterContext
     ) -> None:
         """Observations from pivot discovery should reflect the asset
-        is observed_only and not automatically in scope."""
+        is a scope candidate and not automatically in scope."""
         observations = adapter.parse(
             ProcessResult(exit_code=0, stdout=load_fixture("discovered-host.json"), stderr="")
         )
         assert len(observations) >= 1
         data = observations[0].data
-        assert data.get("status") == "observed_only", (
-            f"Expected observed_only status, got {data.get('status')!r}"
+        assert data.get("status") == "scope_candidate", (
+            f"Expected scope_candidate status, got {data.get('status')!r}"
         )
         assert data.get("discovered_host"), "Missing discovered_host in observation data"
 

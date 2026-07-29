@@ -213,11 +213,183 @@ class RunStore:
 
         lock_digest = hashlib.sha256(lock_data.encode("utf-8")).hexdigest()
         self._update_manifest(path, "engagement.lock.yaml", lock_digest)
+        versions_dir = path / "snapshots"
+        versions_dir.mkdir(parents=True, exist_ok=True)
+        set_strict_permissions(versions_dir, 0o700)
+        version_path = versions_dir / f"{snapshot.revision:04d}.json"
+        fd, tmp = tempfile.mkstemp(dir=str(versions_dir), prefix=".snapshot_tmp_")
+        try:
+            os.write(fd, lock_data.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, version_path)
+        set_strict_permissions(version_path, 0o600)
+        self._update_manifest(
+            path,
+            f"snapshots/{version_path.name}",
+            lock_digest,
+        )
 
         return RunHandle(
             engagement_id=snapshot.engagement_id,
             path=path,
             snapshot=snapshot,
+        )
+
+    def write_output(
+        self,
+        handle: RunHandle,
+        filename: str,
+        content: bytes,
+    ) -> Path:
+        """Atomically write a generated run output and track its integrity."""
+        if not filename or Path(filename).name != filename:
+            raise ValueError("Output filename must be a simple basename")
+
+        import os
+        import tempfile
+
+        output_path = handle.path / filename
+        fd, tmp = tempfile.mkstemp(dir=str(handle.path), prefix=".output_tmp_")
+        try:
+            os.write(fd, content)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, output_path)
+        set_strict_permissions(output_path, 0o600)
+        self._update_manifest(
+            handle.path,
+            filename,
+            hashlib.sha256(content).hexdigest(),
+        )
+        return output_path
+
+    def amend_snapshot(
+        self,
+        handle: RunHandle,
+        snapshot: EngagementSnapshot,
+    ) -> RunHandle:
+        """Persist a linked immutable version and move the active pointer.
+
+        Every revision is written once under ``snapshots/``. The active
+        ``engagement.lock.yaml`` is an integrity-tracked pointer to the latest
+        immutable version.
+        """
+        if snapshot.engagement_id != handle.engagement_id:
+            raise ValueError("Amendment engagement_id does not match the active run")
+        if snapshot.revision != handle.snapshot.revision + 1:
+            raise ValueError("Amendment revision must increment by one")
+        if snapshot.previous_snapshot_hash != handle.snapshot.snapshot_hash:
+            raise ValueError("Amendment does not link to the active snapshot")
+
+        import json
+        import os
+        import tempfile
+
+        lock_data = json.dumps(
+            snapshot.model_dump(mode="json"),
+            sort_keys=True,
+            indent=2,
+            ensure_ascii=False,
+        )
+        digest = hashlib.sha256(lock_data.encode("utf-8")).hexdigest()
+        versions_dir = handle.path / "snapshots"
+        versions_dir.mkdir(parents=True, exist_ok=True)
+        set_strict_permissions(versions_dir, 0o700)
+        version_path = versions_dir / f"{snapshot.revision:04d}.json"
+        if version_path.exists():
+            raise FileExistsError(f"Snapshot revision already exists: {snapshot.revision}")
+
+        fd, tmp = tempfile.mkstemp(dir=str(versions_dir), prefix=".snapshot_tmp_")
+        try:
+            os.write(fd, lock_data.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, version_path)
+        set_strict_permissions(version_path, 0o600)
+        self._update_manifest(
+            handle.path,
+            f"snapshots/{version_path.name}",
+            digest,
+        )
+
+        lock_path = handle.path / "engagement.lock.yaml"
+        fd, tmp = tempfile.mkstemp(dir=str(handle.path), prefix=".lock_tmp_")
+        try:
+            os.write(fd, lock_data.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, lock_path)
+        set_strict_permissions(lock_path, 0o600)
+        self._update_manifest(handle.path, "engagement.lock.yaml", digest)
+        return RunHandle(snapshot.engagement_id, handle.path, snapshot)
+
+    def rollback_amendment(
+        self,
+        amended_handle: RunHandle,
+        previous_snapshot: EngagementSnapshot,
+    ) -> RunHandle:
+        """Restore the prior active pointer after an uncommitted amendment."""
+        if (
+            amended_handle.snapshot.previous_snapshot_hash
+            != previous_snapshot.snapshot_hash
+            or amended_handle.engagement_id != previous_snapshot.engagement_id
+        ):
+            raise ValueError("Rollback snapshot does not match the amendment")
+
+        import json
+        import os
+        import tempfile
+
+        lock_data = json.dumps(
+            previous_snapshot.model_dump(mode="json"),
+            sort_keys=True,
+            indent=2,
+            ensure_ascii=False,
+        )
+        lock_path = amended_handle.path / "engagement.lock.yaml"
+        fd, tmp = tempfile.mkstemp(
+            dir=str(amended_handle.path),
+            prefix=".rollback_lock_tmp_",
+        )
+        try:
+            os.write(fd, lock_data.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, lock_path)
+        set_strict_permissions(lock_path, 0o600)
+
+        version_name = f"snapshots/{amended_handle.snapshot.revision:04d}.json"
+        (amended_handle.path / version_name).unlink(missing_ok=True)
+        manifest_path = amended_handle.path / "integrity.manifest"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest.pop(version_name, None)
+        manifest["engagement.lock.yaml"] = hashlib.sha256(
+            lock_data.encode("utf-8")
+        ).hexdigest()
+        fd, tmp = tempfile.mkstemp(
+            dir=str(amended_handle.path),
+            prefix=".rollback_manifest_tmp_",
+        )
+        try:
+            os.write(
+                fd,
+                json.dumps(manifest, sort_keys=True, indent=2).encode("utf-8"),
+            )
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, manifest_path)
+        set_strict_permissions(manifest_path, 0o600)
+        return RunHandle(
+            previous_snapshot.engagement_id,
+            amended_handle.path,
+            previous_snapshot,
         )
 
     def append_event(self, handle: RunHandle, event: Event) -> None:
@@ -408,7 +580,10 @@ class RunStore:
                 continue
             events = self.read_events(handle)
             for index, event in enumerate(events[:-1]):
-                if event.get("event_type") != "engagement_locked":
+                if event.get("event_type") not in {
+                    "engagement_locked",
+                    "engagement_amended",
+                }:
                     continue
                 payload = event.get("payload", {})
                 transaction_id = payload.get("transaction_id")
@@ -416,18 +591,25 @@ class RunStore:
                     continue
                 lock_valid = (
                     payload.get("snapshot_hash") == snapshot.snapshot_hash
-                    and payload.get("authorization_attested")
-                    is snapshot.authorization_attested
                     and snapshot.authorization_attested
-                    and payload.get("disclaimer_version")
-                    == snapshot.disclaimer_version
                 )
+                if event.get("event_type") == "engagement_locked":
+                    lock_valid = (
+                        lock_valid
+                        and payload.get("authorization_attested")
+                        is snapshot.authorization_attested
+                        and payload.get("disclaimer_version")
+                        == snapshot.disclaimer_version
+                    )
                 if not lock_valid:
                     continue
                 binding_event = events[index + 1]
                 binding_payload = binding_event.get("payload", {})
                 if (
-                    binding_event.get("event_type") == "session_bound"
+                    binding_event.get("event_type") in {
+                        "session_bound",
+                        "session_rebound",
+                    }
                     and binding_payload.get("transaction_id") == transaction_id
                     and binding_payload.get("session_id") == session_id
                     and binding_payload.get("snapshot_hash")

@@ -146,17 +146,28 @@ def build_default_registry() -> AdapterRegistry:
     Returns:
         An ``AdapterRegistry`` instance with all built-in adapters.
     """
+    from ariadne.adapters.active_directory import ActiveDirectoryAdapter
+    from ariadne.adapters.httpx import HttpxAdapter
+    from ariadne.adapters.metasploit import MetasploitAdapter
     from ariadne.adapters.nmap import NmapAdapter
+    from ariadne.adapters.nuclei import NucleiAdapter
+    from ariadne.adapters.pivot import PivotAdapter
+    from ariadne.adapters.postex import PostExAdapter
     from ariadne.adapters.research import ResearchAdapter
+    from ariadne.adapters.screenshot import ScreenshotAdapter
+    from ariadne.adapters.zap import ZapAdapter
 
     registry = AdapterRegistry()
     registry.register("nmap", NmapAdapter())
     registry.register("research", ResearchAdapter())
-
-    # Register no-op adapters for playbooks without real tool backing
-    noop = NoopAdapter()
-    for name in ("nuclei", "screenshot", "postex", "pivot", "httpx", "zap", "metasploit"):
-        registry.register(name, noop)
+    registry.register("httpx", HttpxAdapter())
+    registry.register("zap", ZapAdapter())
+    registry.register("nuclei", NucleiAdapter())
+    registry.register("metasploit", MetasploitAdapter())
+    registry.register("postex", PostExAdapter())
+    registry.register("pivot", PivotAdapter())
+    registry.register("screenshot", ScreenshotAdapter())
+    registry.register("active_directory", ActiveDirectoryAdapter())
 
     registry.freeze()
     return registry

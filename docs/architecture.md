@@ -22,24 +22,18 @@ independent of the Hades runtime.
 │  │  └─────────────────────┘  └────────┬───────┘ ││
 │  │                                     │         ││
 │  │  ┌──────────────────────────────────▼────────┐││
-│  │  │          Runtime Layer                    │││
-│  │  │  (docker.py, process.py, install.py,      │││
-│  │  │   network_policy.py, preflight.py)        │││
+│  │  │  Knowledge + Runtime                      │││
+│  │  │  (canonical Markdown, local process,      │││
+│  │  │   conditional Kali, evidence dossier)     │││
 │  │  └──────────────────┬───────────────────────┘││
 │  └─────────────────────┼────────────────────────┘│
 └────────────────────────┼─────────────────────────┘
                          │
               ┌──────────▼──────────┐
-              │   Docker Engine     │
-              │  ┌──────┐ ┌──────┐  │
-              │  │Kali  │ │ ZAP  │  │
-              │  │Container│Container│
-              │  └──────┘ └──────┘  │
-              │  ┌──────────────┐   │
-              │  │  Netguard    │   │
-              │  │  (allowlist  │   │
-              │  │   sidecar)   │   │
-              │  └──────────────┘   │
+              │ Local curated tools │
+              │ or lazy Kali/OWASP  │
+              │ containers when the │
+              │ playbook requires it│
               └─────────────────────┘
 ```
 
@@ -63,6 +57,12 @@ pure Python with Pydantic models.
 | `workflow.py`  | Playbook schema and catalog |
 | `planner.py`   | Bounded plan construction and validation |
 | `errors.py`    | Typed domain exceptions (`PolicyConfigurationError`, `AdapaterError`, etc.) |
+
+Playbooks are capability-first. The planner selects an eligible workflow from
+evidence and policy; tool resolution happens afterward. A playbook may
+therefore use a tool that was not known when the playbook was authored, as long
+as Ariadne can document it, bind it to an allowed capability, and execute it
+through the same typed boundary.
 
 ### Policy intersection
 
@@ -104,7 +104,10 @@ BLOCKED, FAILED, ABORTED.
 | `run_store.py` | Snapshots, events, artifacts, active bindings   |
 | `integrity.py` | Digest manifest generation and verification     |
 
-All engagement state is append-only and hash-verified. The dossier lives at
+All engagement events are append-only and hash-verified. Contract revisions are
+immutable, linked snapshots; an accepted amendment moves the active pointer to
+the new revision without rewriting history. Generated reports are atomically
+written and included in the integrity manifest. The dossier lives at
 `~/.hermes/profiles/<name>/ariadne/` and is excluded from Git.
 
 ## Hades Adapter (src/ariadne/hades_adapter/)
@@ -118,16 +121,50 @@ All engagement state is append-only and hash-verified. The dossier lives at
 | `guard_hook.py`  | `pre_tool_call` hard blocking hook                      |
 | `session.py`     | Hades session-to-engagement binding                     |
 
+The Hades adapter owns the trusted interaction boundary. Initial activation
+uses one summary confirmation. Routine curated plans in both autonomy modes are
+durably auto-approved and atomically claimed. Amendments and manual-only
+actions use separate trusted Hades consent surfaces.
+
+## Knowledge Layer (knowledge/, src/ariadne/knowledge/)
+
+The Markdown files under `knowledge/` are simultaneously canonical nodes and
+wiki pages. Node kinds separate methodology/strategy, services, techniques,
+tools, and sources/provenance. Frontmatter uses stable `id`, `next`,
+`requires`, `policy`, and `provenance` links.
+
+`KnowledgeIndex` validates those links and may generate a deterministic
+navigation index. It is not a graph database or retrieval pipeline. Hades owns
+indexing, search, memory, and project awareness.
+
+`ToolCardVerifier` probes the installed executable's version, `--help`, and
+`man` output before any official-documentation fallback. A concise tool card is
+promoted to `runtime_verified` only after successful execution. Documentation
+discovery never authorizes uncurated code. At execution time the card id is
+derived from the authorized `ProcessSpec.argv[0]`, not from an adapter
+allowlist. For an unknown executable, curated playbook `tool_card` metadata
+supplies the official HTTPS documentation source and concise summary used by
+`inspect_or_discover`. The real action is authorized first; unknown-tool probes
+are then limited to fixed `--version` and `--help` forms. Missing metadata,
+non-public URLs, or unsafe probe arguments produce a typed
+`tool_documentation` boundary. Failed actions are never promoted.
+
 ## Runtime Layer (src/ariadne/runtime/)
 
 | Module           | Responsibility                                            |
 |------------------|-----------------------------------------------------------|
 | `platform.py`    | OS/architecture detection                                 |
-| `preflight.py`   | Docker, route, VPN, disk, and memory checks               |
+| `preflight.py`   | Host, route, VPN, disk, and optional Docker checks        |
 | `install.py`     | Curated host install proposals and execution              |
 | `docker.py`      | Docker Compose lifecycle (pull, up, down, logs)           |
 | `network_policy.py` | Target resolution, allowlist generation, DNS mapping   |
 | `process.py`     | Bounded subprocess runner (timeout, output cap, SIGTERM tree) |
+| `selection.py`   | Deterministic local/Kali/blocked runtime decision         |
+
+Runtime selection is local-first. Kali is selected only for a specialist
+toolchain, isolation, VPN/routing, or compatibility. Missing ordinary local
+utilities do not silently start a container; the workflow reports a typed
+boundary. Docker installation always remains a specific user decision.
 
 ## Tool Adapters (src/ariadne/adapters/)
 
@@ -164,5 +201,18 @@ Each adapter follows the `ToolAdapter` protocol (see
 | `validation.py` | Pre-export quality gates (evidence check, completeness) |
 | `walkthrough.py` | Markdown technical CTF walkthrough renderer     |
 | `professional.py` | HTML professional report renderer              |
+| `dossier.py`    | Evidence-only report model assembled from persisted state |
 | `pdf.py`        | Chromium PDF export of the professional report  |
 | `sysreptor.py`  | Offline bundle, preview, and explicit push       |
+
+The dossier builder never invents findings or artifacts. Only validated
+finding events and files present in the run store may appear in reports.
+
+## Scope Candidates
+
+A loopback address or service of the current target remains in scope. A
+distinct host or container is classified as `scope_candidate`. Ariadne persists
+the local discovery transcript, explains the relation, and stops before
+sending traffic. Acceptance creates a linked contract revision; rejection
+records the branch as blocked so the planner can continue without repeatedly
+asking.

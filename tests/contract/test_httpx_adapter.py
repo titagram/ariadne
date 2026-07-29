@@ -90,14 +90,16 @@ class TestHttpxPlan:
         # Should avoid automatic hostname resolution of unrelated targets
         assert "-no-fallback" in argv_str or "-no-scan" in argv_str or "nh" in argv_str
 
-    def test_scan_plan_follows_redirects_with_owner_approval(self, context: AdapterContext) -> None:
-        """The owner-approved policy retains httpx redirect following."""
+    def test_scan_plan_does_not_follow_redirects_outside_scope(
+        self, context: AdapterContext
+    ) -> None:
+        """Redirects are evidence only until a targeted scope amendment."""
         spec = HttpxAdapter().plan(
             action("scan", ports=(80,)),
             context,
         )
         argv_str = " ".join(spec.argv)
-        assert "-fr" in argv_str
+        assert "-fr" not in argv_str
 
     def test_scan_plan_fqdn_uses_target_in_stdin(
         self, context_fqdn: AdapterContext
@@ -152,10 +154,10 @@ class TestHttpxParse:
         assert "tech" in obs[0].data
         assert "Ubuntu" in obs[0].data["tech"]
 
-    def test_redirect_marks_external_host_observed_only(
+    def test_redirect_marks_external_host_as_scope_candidate(
         self, load_fixture
     ) -> None:
-        """A redirect to an unconfirmed host should be marked observed_only."""
+        """A distinct redirect host should require a targeted amendment."""
         result = ProcessResult(
             exit_code=0,
             stdout=load_fixture("redirect.jsonl"),
@@ -173,14 +175,12 @@ class TestHttpxParse:
             "redirect host external-host.com"
         )
 
-        # The synthetic external-host observation must carry an explicit
-        # observed_only marker so downstream scope enforcement can reject
-        # active probing of this unconfirmed host.
         for o in ext_obs:
-            assert o.data.get("observed_only") is True, (
+            assert o.data.get("scope_candidate") is True, (
                 f"External-host observation {o.observation_id} is missing "
-                f"observed_only=True marker"
+                f"scope_candidate=True marker"
             )
+            assert o.data.get("status") == "scope_candidate"
 
         # The redirect observation should still reference the location
         redirect_obs = [o for o in obs if o.data.get("redirect") is True]

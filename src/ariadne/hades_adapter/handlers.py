@@ -9,22 +9,44 @@ operations. Session identity always comes from trusted Hades context.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import ipaddress
+import re
 from copy import deepcopy
 from datetime import UTC, datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
+from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
 from ariadne.adapters import AdapterRegistry
 from ariadne.adapters.base import AdapterContext, Runtime
+from ariadne.adapters.nuclei import is_official_nuclei_template_provenance
 from ariadne.core.canonical import canonical_digest
-from ariadne.core.engagement import EngagementSnapshot, TargetSpec
-from ariadne.core.enums import AssetStatus, AutonomyMode, EngagementState
-from ariadne.core.errors import PolicyConfigurationError, WorkflowConfigurationError
-from ariadne.core.observations import Asset, Hypothesis, Observation
+from ariadne.core.engagement import (
+    EngagementSnapshot,
+    TargetSpec,
+    intensity_default_limits,
+)
+from ariadne.core.enums import AssetStatus, EngagementState
+from ariadne.core.errors import (
+    AdapterPolicyError,
+    PolicyConfigurationError,
+    ScopeAmendmentRequiredError,
+    WorkflowConfigurationError,
+)
+from ariadne.core.observations import (
+    Asset,
+    Hypothesis,
+    Observation,
+    create_scope_candidate,
+    discovered_asset_status,
+)
 from ariadne.core.planner import Planner
 from ariadne.core.policy import EffectivePolicy
-from ariadne.core.workflow import PlanningContext, WorkflowCatalog
+from ariadne.core.workflow import PlanningContext, Playbook, WorkflowCatalog
 from ariadne.evidence.collector import EvidenceCollector
 from ariadne.execution.contracts import (
     AuthorizationReason,
@@ -32,16 +54,240 @@ from ariadne.execution.contracts import (
     ExecutionCoordinator,
     ExecutionEnvelope,
     GuardedRuntime,
-    ProcessAuthorizationError,
 )
-from ariadne.hades_adapter.commands import AriadneCommand
+from ariadne.hades_adapter.commands import CURRENT_DISCLAIMER_VERSION, AriadneCommand
 from ariadne.hades_adapter.consent import ConsentDecision, ConsentGateway
-from ariadne.hades_adapter.schemas import PrepareEngagementInput
+from ariadne.hades_adapter.schemas import AmendEngagementInput, PrepareEngagementInput
+from ariadne.knowledge import (
+    RuntimeVerification,
+    ToolCardVerifier,
+    ToolDiscovery,
+    ToolVerificationBlockedError,
+)
 from ariadne.reporting.models import RenderedReport
 from ariadne.reporting.professional import ProfessionalRenderer
 from ariadne.reporting.validation import ReportOptions, ReportValidator
 from ariadne.reporting.walkthrough import WalkthroughRenderer
-from ariadne.store.run_store import RunHandle, RunStore
+from ariadne.store.run_store import ArtifactInput, Event, RunHandle, RunStore
+
+_DOS_ALIASES = frozenset({
+    "dos",
+    "denial of service",
+    "denial service",
+    "resource exhaustion",
+    "resource stress",
+})
+_EXCLUSION_CAPABILITY_ALIASES = {
+    "port scan": frozenset({"scan.tcp", "scan.udp"}),
+    "port scanning": frozenset({"scan.tcp", "scan.udp"}),
+    "password spray": frozenset({"auth.spray", "ad.password_spray"}),
+    "password spraying": frozenset({"auth.spray", "ad.password_spray"}),
+    "brute force": frozenset({"auth.brute_force"}),
+    "active web scan": frozenset({"web.active_scan"}),
+    "web fuzzing": frozenset({"web.fuzz"}),
+    "metasploit": frozenset({"exploit.metasploit"}),
+}
+_TRUSTED_FINDING_ISSUER = "ariadne.evidence.findings.FindingService"
+_TRUSTED_FINDING_VALIDATION_SOURCE = "FindingService.validate"
+
+
+def _tool_id_for_executable(executable: str) -> str:
+    """Derive a stable knowledge id from the authorized ProcessSpec."""
+    slug = re.sub(
+        r"[^a-z0-9_.-]+",
+        "-",
+        Path(executable).name.casefold(),
+    ).strip("-.")
+    if not slug or not slug[0].isalpha():
+        raise ToolVerificationBlockedError(
+            f"Cannot derive a tool-card id from executable {executable!r}"
+        )
+    return f"tool.{slug}"
+
+
+def _inspect_planned_tool(
+    *,
+    verifier: ToolCardVerifier,
+    process_argv: tuple[str, ...],
+    action_inputs: dict[str, Any],
+    allowed_policy: frozenset[str],
+    required_policy: tuple[str, ...],
+) -> RuntimeVerification | None:
+    """Inspect a canonical card or discover one declared by the playbook.
+
+    ``tool_card`` is reserved playbook metadata.  Its executable is never
+    trusted: the executable and resulting id are derived from the already
+    planned, subsequently authorized ``ProcessSpec``.
+    """
+    tool_id = _tool_id_for_executable(process_argv[0])
+    if not set(required_policy).issubset(allowed_policy):
+        raise ToolVerificationBlockedError(
+            f"{tool_id}: playbook tool policy is not allowed"
+        )
+    declaration = action_inputs.get("tool_card")
+    if tool_id in verifier.index.nodes:
+        return verifier.inspect(tool_id, allowed_policy=allowed_policy)
+    if declaration is None:
+        raise ToolVerificationBlockedError(
+            f"{tool_id}: no canonical card or curated playbook tool_card metadata"
+        )
+    if not isinstance(declaration, dict):
+        raise ToolVerificationBlockedError(
+            f"{tool_id}: playbook tool_card metadata must be a mapping"
+        )
+
+    metadata = cast(dict[str, object], declaration)
+    allowed_metadata = {
+        "title",
+        "official_source_url",
+        "source_date",
+        "summary",
+        "version_args",
+        "help_args",
+    }
+    if set(metadata) - allowed_metadata:
+        raise ToolVerificationBlockedError(
+            f"{tool_id}: playbook tool_card contains unsupported metadata"
+        )
+    official_url = metadata.get("official_source_url")
+    if not isinstance(official_url, str) or not _safe_official_url(official_url):
+        raise ToolVerificationBlockedError(
+            f"{tool_id}: playbook tool_card requires a public HTTPS official source"
+        )
+    source_date = metadata.get("source_date")
+    if not isinstance(source_date, str):
+        raise ToolVerificationBlockedError(
+            f"{tool_id}: playbook tool_card requires an explicit source_date"
+        )
+    title = metadata.get("title", Path(process_argv[0]).name)
+    summary = metadata.get(
+        "summary",
+        f"Concise runtime guidance for {Path(process_argv[0]).name}.",
+    )
+    if not isinstance(title, str) or not isinstance(summary, str):
+        raise ToolVerificationBlockedError(
+            f"{tool_id}: playbook tool_card title and summary must be strings"
+        )
+    version_args = metadata.get("version_args", ("--version",))
+    help_args = metadata.get("help_args", ("--help",))
+    if (
+        not isinstance(version_args, (list, tuple))
+        or not isinstance(help_args, (list, tuple))
+        or tuple(version_args) != ("--version",)
+        or tuple(help_args) != ("--help",)
+    ):
+        raise ToolVerificationBlockedError(
+            f"{tool_id}: unknown-tool probes are documentation-only "
+            "and fixed to --version/--help"
+        )
+
+    slug = tool_id.removeprefix("tool.")
+    try:
+        discovery = ToolDiscovery(
+            tool_id=tool_id,
+            title=title,
+            executable=process_argv[0],
+            policy=tuple(sorted(required_policy)),
+            official_source_id=f"source.{slug}.official",
+            official_source_url=official_url,
+            source_date=source_date,
+            summary=summary,
+            version_args=("--version",),
+            help_args=("--help",),
+        )
+    except ValidationError as exc:
+        raise ToolVerificationBlockedError(
+            f"{tool_id}: invalid playbook tool_card metadata"
+        ) from exc
+    return verifier.inspect_or_discover(
+        discovery,
+        allowed_policy=allowed_policy,
+    )
+
+
+def _safe_official_url(value: str) -> bool:
+    """Accept only public HTTPS documentation origins from curated metadata."""
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or parsed.fragment
+    ):
+        return False
+    normalized = hostname.casefold().rstrip(".")
+    if (
+        "." not in normalized
+        or normalized == "localhost"
+        or normalized.endswith((".localhost", ".local", ".internal", ".lan"))
+    ):
+        return False
+    try:
+        ipaddress.ip_address(normalized)
+    except ValueError:
+        return all(
+            label
+            and len(label) <= 63
+            and label[0].isalnum()
+            and label[-1].isalnum()
+            and all(character.isalnum() or character == "-" for character in label)
+            for label in normalized.split(".")
+        )
+    return False
+
+
+def _exclusion_conflict(
+    playbook: Playbook,
+    exclusions: tuple[str, ...],
+) -> str | None:
+    """Return the exclusion that blocks a playbook, if any."""
+    capabilities = set(playbook.capabilities)
+    action_names = {
+        value
+        for action in playbook.actions
+        for value in (
+            action.adapter,
+            action.operation,
+            f"{action.adapter}:{action.operation}",
+        )
+    }
+    for raw_exclusion in exclusions:
+        normalized = (
+            raw_exclusion.casefold()
+            .replace("_", " ")
+            .replace("-", " ")
+            .replace(".", " ")
+            .strip()
+        )
+        if normalized in _DOS_ALIASES and capabilities & {
+            "resource.stress",
+            "resource.exhaustion",
+        }:
+            return raw_exclusion
+        if capabilities & _EXCLUSION_CAPABILITY_ALIASES.get(
+            normalized,
+            frozenset(),
+        ):
+            return raw_exclusion
+        candidates = capabilities | action_names
+        if any(
+            normalized
+            == candidate.casefold()
+            .replace("_", " ")
+            .replace("-", " ")
+            .replace(".", " ")
+            .strip()
+            for candidate in candidates
+        ):
+            return raw_exclusion
+    return None
 
 
 def _get_command(context: dict[str, Any]) -> AriadneCommand:
@@ -165,34 +411,65 @@ def _determine_engagement_state(
         event_type = evt.get("event_type", "")
         payload = evt.get("payload", {})
 
+        # Completion transitions must come from an explicit persisted proof or
+        # from an adapter cleanup result.  Do not infer either state from a
+        # playbook's declarative ``success_emits`` metadata.
+        if event_type == "objective_completed":
+            evidence_types.add("objective_proven")
+            continue
+        if event_type == "cleanup_completed":
+            evidence_types.add("cleanup_complete")
+            continue
+
         if event_type == "evidence_collected":
             evidence_type = payload.get("evidence_type", "")
-            if evidence_type:
+            classification = payload.get("execution_classification")
+            if evidence_type and classification in (None, "success"):
                 evidence_types.add(evidence_type)
+            observation_data = payload.get("observation_data", {})
+            if (
+                classification == "success"
+                and isinstance(observation_data, dict)
+                and isinstance(observation_data.get("type"), str)
+                and observation_data["type"]
+            ):
+                evidence_types.add(observation_data["type"])
 
-            # Build a synthetic observation from the evidence
-            from uuid import uuid4
+            if classification in (None, "success"):
+                # Reconstruct only evidence that is either a trusted imported
+                # record or the successful result of an executed action.
+                from uuid import uuid4
 
-            obs = Observation(
-                observation_id=uuid4(),
-                target=run_handle.snapshot.targets[0]
-                if run_handle.snapshot.targets
-                else TargetSpec(host="unknown"),
-                source=evidence_type or "unknown",
-                data={
-                    "event_type": event_type,
-                    "finding": payload.get("finding", ""),
-                    "artifact": payload.get("artifact", ""),
-                },
-            )
-            observations.append(obs)
+                obs = Observation(
+                    observation_id=uuid4(),
+                    target=run_handle.snapshot.targets[0]
+                    if run_handle.snapshot.targets
+                    else TargetSpec(host="unknown"),
+                    source=evidence_type or "unknown",
+                    data={
+                        "event_type": event_type,
+                        "finding": payload.get("finding", ""),
+                        "artifact": payload.get("artifact", ""),
+                        **(
+                            observation_data
+                            if isinstance(observation_data, dict)
+                            else {}
+                        ),
+                    },
+                )
+                observations.append(obs)
 
     # Get already-executed playbook IDs from the store
     executed_playbooks: set[str] = set()
     for evt in events:
         if evt.get("event_type") == "plan_executed":
             payload = evt.get("payload", {})
-            if payload.get("status") in ("executed", "success", "failed"):
+            if payload.get("status") in (
+                "executed",
+                "success",
+                "failed",
+                "blocked_scope_candidate",
+            ):
                 pb_id = payload.get("playbook_id", "")
                 if pb_id:
                     executed_playbooks.add(pb_id)
@@ -236,6 +513,216 @@ def _determine_engagement_state(
     return EngagementState.ENVIRONMENT_PREFLIGHT, ()
 
 
+def _typed_progression_observations(
+    *,
+    playbook_id: str,
+    adapter: str,
+    operation: str,
+    action_inputs: dict[str, Any],
+    target: TargetSpec,
+    observations: tuple[Observation, ...],
+    classification_kind: str,
+) -> tuple[Observation, ...]:
+    """Add narrowly justified workflow evidence after a successful action."""
+    if classification_kind != "success":
+        return observations
+
+    from uuid import uuid4
+
+    additions: list[Observation] = []
+
+    def add(kind: str, observation: Observation) -> None:
+        if any(
+            existing.source == kind
+            and existing.target == observation.target
+            for existing in (*observations, *additions)
+        ):
+            return
+        additions.append(
+            Observation(
+                observation_id=uuid4(),
+                target=observation.target,
+                source=kind,
+                data={**observation.data, "type": kind},
+            )
+        )
+
+    if (
+        playbook_id == "service.protocol-routing.v1"
+        and adapter == "nmap"
+        and operation == "service_fingerprint"
+    ):
+        for observation in observations:
+            if (
+                observation.target == target
+                and observation.source == "service_fingerprinted"
+                and isinstance(observation.data.get("port"), int)
+                and isinstance(observation.data.get("protocol"), str)
+                and bool(observation.data.get("protocol"))
+                and isinstance(observation.data.get("service"), str)
+                and bool(observation.data.get("service"))
+            ):
+                add("protocol_routed", observation)
+
+    if adapter == "nuclei" and operation == "scan":
+        validated_templates = {
+            candidate.get("template_id")
+            for candidate in action_inputs.get("validated_candidates", ())
+            if isinstance(candidate, dict)
+            and candidate.get("target") == target.host
+            and candidate.get("validation_status") == "validated"
+        }
+        for observation in observations:
+            if (
+                observation.target == target
+                and observation.source == "nuclei"
+                and observation.data.get("template_id") in validated_templates
+                and isinstance(observation.data.get("matched_at"), str)
+                and bool(observation.data.get("matched_at"))
+            ):
+                add("vulnerability_validated", observation)
+
+    if (
+        playbook_id == "foothold.confirmation.v1"
+        and adapter == "screenshot"
+        and operation == "capture"
+        and action_inputs.get("proof_kind") == "initial_access"
+    ):
+        for observation in observations:
+            proof_path = observation.data.get("path")
+            if (
+                observation.target == target
+                and observation.source == "screenshot"
+                and isinstance(proof_path, str)
+                and Path(proof_path).is_file()
+            ):
+                add("foothold_established", observation)
+
+    if adapter == "postex":
+        for observation in observations:
+            observation_type = observation.data.get("type")
+            if (
+                observation.target == target
+                and operation == "identity"
+                and observation_type == "user_identity"
+                and bool(observation.data.get("identity"))
+            ):
+                add("host_info_collected", observation)
+            elif (
+                observation.target == target
+                and operation == "sudo_rules"
+                and observation_type == "privilege_escalation"
+                and bool(observation.data.get("rules"))
+            ):
+                add("privesc_path_identified", observation)
+
+    return (*observations, *additions)
+
+
+def _validated_nuclei_candidates(
+    events: list[dict[str, Any]],
+    run_handle: RunHandle,
+    target: str,
+) -> tuple[dict[str, str], ...]:
+    """Resolve persisted, target-bound Nuclei candidates fail-closed.
+
+    A candidate is usable only when its validation event follows a real
+    evidence artifact in the same run, references that evidence by id, binds
+    to the current target, and cites the curated ProjectDiscovery template
+    repository.
+    """
+    artifact_root = (run_handle.path / "artifacts").resolve()
+    evidence_by_id: set[str] = set()
+    candidates: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for event in events:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+
+        if event.get("event_type") == "evidence_collected":
+            evidence_id = payload.get("evidence_id")
+            artifact = payload.get("artifact")
+            asset = payload.get("asset")
+            classification = payload.get("execution_classification")
+            expected_digest = payload.get("sha256")
+            if (
+                not isinstance(evidence_id, str)
+                or not evidence_id.strip()
+                or not isinstance(artifact, str)
+                or not artifact.strip()
+                or asset != target
+                or classification != "success"
+                or payload.get("adapter") != "research"
+                or payload.get("source") != "research:investigate"
+                or payload.get("evidence_type") != "research_complete"
+                or not isinstance(expected_digest, str)
+            ):
+                continue
+            artifact_path = (artifact_root / artifact).resolve()
+            try:
+                artifact_path.relative_to(artifact_root)
+            except ValueError:
+                continue
+            if not artifact_path.is_file():
+                continue
+            with artifact_path.open("rb") as artifact_stream:
+                actual_digest = hashlib.file_digest(
+                    artifact_stream,
+                    "sha256",
+                ).hexdigest()
+            if hmac.compare_digest(actual_digest, expected_digest):
+                evidence_by_id.add(evidence_id)
+            continue
+
+        if event.get("event_type") != "finding_validated":
+            continue
+        finding_id = payload.get("finding_id")
+        template_id = payload.get("template_id")
+        candidate_target = payload.get("target")
+        evidence_id = payload.get("evidence_id")
+        provenance = payload.get("provenance")
+        issuer = payload.get("issuer")
+        validation_source = payload.get("validation_source")
+        values = (
+            finding_id,
+            template_id,
+            candidate_target,
+            evidence_id,
+            provenance,
+        )
+        if not all(isinstance(value, str) and value.strip() for value in values):
+            continue
+        assert isinstance(finding_id, str)
+        assert isinstance(template_id, str)
+        assert isinstance(candidate_target, str)
+        assert isinstance(evidence_id, str)
+        assert isinstance(provenance, str)
+        if (
+            candidate_target != target
+            or evidence_id not in evidence_by_id
+            or issuer != _TRUSTED_FINDING_ISSUER
+            or validation_source != _TRUSTED_FINDING_VALIDATION_SOURCE
+            or not is_official_nuclei_template_provenance(provenance)
+        ):
+            continue
+        candidate_key = (finding_id, template_id)
+        if candidate_key in seen:
+            continue
+        seen.add(candidate_key)
+        candidates.append({
+            "candidate_id": finding_id,
+            "template_id": template_id,
+            "target": candidate_target,
+            "validation_status": "validated",
+            "evidence_id": evidence_id,
+            "provenance": provenance,
+        })
+
+    return tuple(candidates)
+
+
 def _get_binding(cmd: AriadneCommand, session_id: str) -> dict[str, Any] | None:
     """Check for an active engagement binding and return its metadata.
 
@@ -274,7 +761,12 @@ async def handle_prepare_engagement(
             "snapshot_hash": "",
         }
     try:
-        validated = PrepareEngagementInput.model_validate(args)
+        # Ignore the two legacy model-supplied fields for callers upgrading
+        # from 0.1. They are never authority; Hades owns the confirmation.
+        contract_inputs = dict(args)
+        contract_inputs.pop("authorization_attested", None)
+        contract_inputs.pop("disclaimer_version", None)
+        validated = PrepareEngagementInput.model_validate(contract_inputs)
     except ValidationError as exc:
         return {
             "status": "error",
@@ -283,10 +775,69 @@ async def handle_prepare_engagement(
             "snapshot_hash": "",
         }
 
+    answers = validated.model_dump()
+    default_rate, default_concurrency = intensity_default_limits(
+        answers["intensity"]
+    )
+    answers["max_requests_per_second"] = default_rate
+    answers["max_concurrent_checks"] = default_concurrency
+    contract_summary = {
+        "authorization": "user_attests_authorized_lab_or_ctf_use",
+        "disclaimer_version": CURRENT_DISCLAIMER_VERSION,
+        "disclaimer": (
+            "Use only against systems you own or are explicitly authorized "
+            "to test. Ariadne guardrails remain active in every mode."
+        ),
+        "profile": answers["profile"],
+        "target": answers["target_host"],
+        "objectives": answers["objectives"],
+        "autonomy": answers["autonomy"],
+        "intensity": answers["intensity"],
+        "exclusions": answers["exclusions"],
+        "time_window_minutes": answers["time_window_minutes"],
+        "effective_limits": {
+            "max_requests_per_second": default_rate,
+            "max_concurrent_checks": default_concurrency,
+        },
+    }
+    gateway = context.get("consent_gateway")
+    request_contract = getattr(gateway, "request_contract", None)
+    if not callable(request_contract):
+        return {
+            "status": "blocked",
+            "message": "Trusted Hades contract confirmation UI is unavailable.",
+            "engagement_id": "",
+            "snapshot_hash": "",
+        }
+    try:
+        decision = await request_contract(contract_summary)
+    except Exception:
+        decision = ConsentDecision.UNAVAILABLE
+    if decision is not ConsentDecision.ACCEPT:
+        label = (
+            decision.value
+            if isinstance(decision, ConsentDecision)
+            else ConsentDecision.UNAVAILABLE.value
+        )
+        return {
+            "status": "blocked",
+            "message": f"Engagement contract was not confirmed ({label}).",
+            "engagement_id": "",
+            "snapshot_hash": "",
+        }
+    answers["authorization_attested"] = True
+    answers["disclaimer_version"] = CURRENT_DISCLAIMER_VERSION
+    confirmation_digest = canonical_digest(
+        {
+            "trusted_session_id": session_id,
+            "contract": contract_summary,
+        }
+    )
     try:
         result = cmd.prepare(
-            validated.model_dump(),
+            answers,
             session_id=session_id,
+            trusted_confirmation_digest=confirmation_digest,
         )
     except (OSError, PolicyConfigurationError, ValueError, TypeError) as exc:
         return {
@@ -300,6 +851,119 @@ async def handle_prepare_engagement(
         "message": result.message,
         "engagement_id": str(result.engagement_id) if result.engagement_id else "",
         "snapshot_hash": result.snapshot_hash or "",
+    }
+
+
+async def handle_amend_engagement(
+    args: dict[str, Any],
+    **context: Any,
+) -> dict[str, Any]:
+    """Resolve a targeted contract boundary and persist a linked version."""
+    cmd = _get_command(context)
+    if "session_id" in args:
+        return {"status": "error", "message": "session_id is Hades-owned."}
+    session_id = context.get("session_id", "")
+    binding = _get_binding(cmd, session_id)
+    if binding is None or binding["engagement_id"] is None:
+        return {"status": "error", "message": "No active engagement."}
+    try:
+        validated = AmendEngagementInput.model_validate(args)
+    except ValidationError as exc:
+        return {"status": "error", "message": f"Invalid amendment: {exc}"}
+    handle = _get_run_handle(cmd.store, binding["engagement_id"])
+    if handle is None:
+        return {"status": "error", "message": "Active engagement is unavailable."}
+    changes = validated.model_dump()
+    candidate_id = changes.get("candidate_id", "")
+    if candidate_id and any(
+        event.get("event_type") == "scope_candidate_blocked"
+        and event.get("payload", {}).get("candidate_id") == candidate_id
+        for event in cmd.store.read_events(handle)
+    ):
+        return {
+            "status": "blocked",
+            "boundary": "scope_candidate_declined",
+            "message": (
+                "This scope candidate was already declined. Continue with "
+                "alternative in-scope branches."
+            ),
+        }
+    summary = {
+        "base_snapshot_hash": handle.snapshot.snapshot_hash,
+        "base_revision": handle.snapshot.revision,
+        "add_targets": changes["add_targets"],
+        "objectives": changes["objectives"],
+        "intensity": changes["intensity"],
+        "exclusions": changes["exclusions"],
+        "candidate_id": candidate_id,
+        "reason": changes["reason"],
+    }
+    request_amendment = getattr(
+        context.get("consent_gateway"),
+        "request_amendment",
+        None,
+    )
+    if not callable(request_amendment):
+        return {
+            "status": "blocked",
+            "boundary": "amendment_consent_unavailable",
+            "message": "Trusted Hades amendment confirmation UI is unavailable.",
+        }
+    try:
+        decision = await request_amendment(summary)
+    except Exception:
+        decision = ConsentDecision.UNAVAILABLE
+    if decision is not ConsentDecision.ACCEPT:
+        if candidate_id:
+            from ariadne.store.run_store import Event
+
+            cmd.store.append_event(
+                handle,
+                Event(
+                    event_type="scope_candidate_blocked",
+                    payload={
+                        "candidate_id": candidate_id,
+                        "target": (
+                            changes["add_targets"][0]
+                            if changes["add_targets"]
+                            else ""
+                        ),
+                        "reason": changes["reason"],
+                        "decision": (
+                            decision.value
+                            if isinstance(decision, ConsentDecision)
+                            else "unavailable"
+                        ),
+                    },
+                    timestamp=datetime.now(UTC),
+                ),
+            )
+        return {
+            "status": "blocked",
+            "boundary": "amendment_declined",
+            "message": (
+                "Amendment declined; the branch is recorded as blocked. "
+                "Continue with alternative in-scope branches."
+            ),
+        }
+    digest = canonical_digest(
+        {"trusted_session_id": session_id, "amendment": summary}
+    )
+    try:
+        result = cmd.amend(
+            changes,
+            session_id=session_id,
+            trusted_confirmation_digest=digest,
+            expected_snapshot_hash=summary["base_snapshot_hash"],
+            expected_revision=summary["base_revision"],
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        return {"status": "error", "message": f"Amendment failed: {exc}"}
+    return {
+        "status": result.status,
+        "engagement_id": str(result.engagement_id or ""),
+        "snapshot_hash": result.snapshot_hash or "",
+        "message": result.message,
     }
 
 
@@ -340,9 +1004,9 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
     - All playbook preconditions (capabilities allowed, adapters registered)
 
     Builds a PlanningContext from the engagement snapshot, selects an
-    eligible playbook, and constructs a bounded Plan.  The plan is
-    recorded in the command's plan ledger. Controlled and manual-only plans
-    await the user; eligible full-autonomy plans are durably auto-approved.
+    eligible playbook, and constructs a bounded Plan. The plan is recorded in
+    the command ledger. Routine curated, in-policy plans are durably
+    auto-approved; only explicit manual boundaries await trusted Hades consent.
     """
     cmd = _get_command(context)
     if "session_id" in args:
@@ -460,9 +1124,43 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
 
     # 5. Find eligible playbooks and build the first plan
     eligible = catalog.eligible(planning_context)
+    last_completed_playbook = next(
+        (
+            event.get("payload", {}).get("playbook_id")
+            for event in reversed(events)
+            if event.get("event_type") == "plan_executed"
+            and event.get("payload", {}).get("status") in {"executed", "success"}
+        ),
+        None,
+    )
+    if last_completed_playbook in catalog.playbooks:
+        allowed_next = catalog.playbooks[last_completed_playbook].next_playbooks
+        eligible = tuple(playbook for playbook in eligible if playbook.id in allowed_next)
     # Filter out playbooks already executed in this engagement
     eligible = tuple(p for p in eligible if p.id not in executed_playbooks)
+    excluded = tuple(
+        (playbook, conflict)
+        for playbook in eligible
+        if (conflict := _exclusion_conflict(playbook, snapshot.exclusions))
+        is not None
+    )
+    eligible = tuple(
+        playbook
+        for playbook in eligible
+        if _exclusion_conflict(playbook, snapshot.exclusions) is None
+    )
     if not eligible:
+        if excluded:
+            return {
+                "status": "blocked",
+                "boundary": "contract_exclusion",
+                "message": (
+                    "Eligible work conflicts with an explicit contract "
+                    f"exclusion: {excluded[0][1]!r}. An amendment is required "
+                    "to change that exclusion."
+                ),
+                "plan_id": "",
+            }
         # No eligible playbooks — check if any playbook exists at all
         if not catalog.playbooks:
             return {
@@ -480,6 +1178,32 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         }
 
     playbook = eligible[0]
+    terminal_plan_ids = {
+        event.get("payload", {}).get("plan_id")
+        for event in events
+        if event.get("event_type") in {
+            "plan_executed",
+            "plan_rejected",
+        }
+    }
+    for event in reversed(events):
+        if event.get("event_type") != "plan_proposed":
+            continue
+        payload = event.get("payload", {})
+        if (
+            payload.get("snapshot_hash") == snapshot.snapshot_hash
+            and payload.get("playbook_id") == playbook.id
+            and payload.get("plan_id") not in terminal_plan_ids
+        ):
+            return {
+                "status": "blocked",
+                "boundary": "plan_in_flight",
+                "message": (
+                    "An equivalent plan is already pending or executing; "
+                    "Ariadne will not duplicate it or reset its limits."
+                ),
+                "plan_id": payload.get("plan_id", ""),
+            }
     try:
         plan = planner.build(playbook.id, planning_context)
     except WorkflowConfigurationError as exc:
@@ -488,6 +1212,29 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             "message": f"Plan construction failed: {exc}",
             "plan_id": "",
         }
+
+    validated_candidates = _validated_nuclei_candidates(
+        events,
+        run_handle,
+        plan.target.host,
+    )
+    if validated_candidates:
+        plan = plan.model_copy(update={
+            "actions": tuple(
+                action.model_copy(update={
+                    "inputs": {
+                        **action.inputs,
+                        "validated_candidates": [
+                            dict(candidate)
+                            for candidate in validated_candidates
+                        ],
+                    },
+                })
+                if action.adapter == "nuclei" and action.operation == "scan"
+                else action
+                for action in plan.actions
+            ),
+        })
 
     # 6. Persist the proposal before exposing it through the in-memory ledger.
     from ariadne.store.run_store import Event
@@ -537,8 +1284,8 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
     )
 
     should_auto_approve = (
-        snapshot.autonomy == AutonomyMode.FULL
-        and not plan.requires_manual_approval
+        not plan.requires_manual_approval
+        and not plan.manual_capabilities
     )
     if should_auto_approve:
         approved_at = datetime.now(UTC)
@@ -553,10 +1300,10 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                         "trusted_session_id": input_session_id,
                         "approval_correlation_id": approval_correlation_id,
                         "approval_state": "approved",
-                        "approval_source": "full_autonomy_policy",
+                        "approval_source": "curated_in_policy",
                         "approved_at": approved_at.isoformat(),
                         "capabilities": capabilities,
-                        "reason": "full_autonomy_curated_in_policy",
+                        "reason": "curated_in_policy_no_manual_boundary",
                     },
                     timestamp=approved_at,
                 ),
@@ -578,7 +1325,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         "auto_approved" if should_auto_approve else "awaiting_user_approval"
     )
     message = (
-        f"Plan {plan.plan_id[:8]} auto-approved for full continuous mode. "
+        f"Plan {plan.plan_id[:8]} auto-approved for continuous execution. "
         "Call ariadne_execute_plan now; do not request /ariadne approve."
         if should_auto_approve
         else (
@@ -938,6 +1685,9 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             )
             continue
 
+        tool_card_verifier = context.get("tool_card_verifier")
+        pending_tool_verification = None
+
         # Build adapter context and planned action
         adapter_ctx = AdapterContext(
             target=record.plan.target,
@@ -1007,6 +1757,51 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             )
             guarded_runtime.authorize_initial(process_spec)
 
+            if isinstance(tool_card_verifier, ToolCardVerifier):
+                allowed_policy = frozenset(
+                    capability
+                    for capability, rule in execution_policy.capabilities.items()
+                    if rule.allowed
+                )
+                try:
+                    pending_tool_verification = _inspect_planned_tool(
+                        verifier=tool_card_verifier,
+                        process_argv=process_spec.argv,
+                        action_inputs=action.inputs,
+                        allowed_policy=allowed_policy,
+                        required_policy=record.plan.capabilities,
+                    )
+                except ToolVerificationBlockedError as exc:
+                    actions_failed += 1
+                    cmd.store.append_event(
+                        run_handle,
+                        Event(
+                            event_type="tool_documentation_blocked",
+                            payload={
+                                "plan_id": plan_id,
+                                "tool_card_id": _tool_id_for_executable(
+                                    process_spec.argv[0]
+                                ),
+                                "adapter": action.adapter,
+                                "reason": str(exc),
+                                "next_boundary": "kali_or_tool_availability",
+                            },
+                            timestamp=datetime.now(UTC),
+                        ),
+                    )
+                    return {
+                        "status": "blocked",
+                        "boundary": "tool_documentation",
+                        "plan_id": plan_id,
+                        "tool_card_id": _tool_id_for_executable(
+                            process_spec.argv[0]
+                        ),
+                        "message": str(exc),
+                        "actions_executed": actions_executed,
+                        "actions_failed": actions_failed,
+                        "evidence_artifacts": evidence_artifacts,
+                    }
+
             # Execute via runtime
             process_result = await adapter.execute(
                 process_spec,
@@ -1014,13 +1809,20 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             )
 
             # Parse observations from output
+            parse_for_spec = getattr(adapter, "parse_for_spec", None)
             parse_for_target = getattr(adapter, "parse_for_target", None)
             parse_for_operation = getattr(
                 adapter,
                 "parse_for_operation",
                 None,
             )
-            if callable(parse_for_target):
+            if callable(parse_for_spec):
+                observations = parse_for_spec(
+                    process_result,
+                    record.plan.target,
+                    process_spec,
+                )
+            elif callable(parse_for_target):
                 observations = parse_for_target(
                     process_result,
                     record.plan.target,
@@ -1032,21 +1834,144 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 )
             else:
                 observations = adapter.parse(process_result)
-            if any(
-                observation.target != record.plan.target
+            candidate_observations = [
+                observation
                 for observation in observations
-            ):
-                audit_block(
-                    AuthorizationReason.TARGET_MISMATCH,
-                    process_spec,
-                    guarded_runtime.attempts,
+                if observation.target != record.plan.target
+                and discovered_asset_status(
+                    observation.target,
+                    record.plan.target,
                 )
-                raise ProcessAuthorizationError(
-                    AuthorizationReason.TARGET_MISMATCH
+                is AssetStatus.SCOPE_CANDIDATE
+            ]
+            if candidate_observations:
+                local_transcript = process_result.stdout.encode(
+                    "utf-8",
+                    errors="replace",
                 )
+                candidate_artifact = cmd.store.add_bytes(
+                    run_handle,
+                    local_transcript,
+                    ArtifactInput(
+                        media_type="text/plain",
+                        evidence_type="scope_candidate",
+                        source_name=f"{action.adapter}:{action.operation}",
+                        maximum_bytes=max(len(local_transcript), 1),
+                    ),
+                )
+                relation = (
+                    "route"
+                    if action.adapter == "pivot"
+                    else "redirect"
+                    if action.adapter == "httpx"
+                    else "lateral_host"
+                )
+                for observation in candidate_observations:
+                    reason = str(
+                        observation.data.get("summary")
+                        or observation.data.get("type")
+                        or f"{action.adapter} discovered a distinct host"
+                    )
+                    candidate = create_scope_candidate(
+                        target=observation.target,
+                        source_target=record.plan.target,
+                        reason=reason,
+                        evidence_ids=(str(candidate_artifact.artifact_id),),
+                        relation=relation,
+                    )
+                    cmd.store.append_event(
+                        run_handle,
+                        Event(
+                            event_type="scope_candidate_discovered",
+                            payload={
+                                "candidate_id": str(candidate.candidate_id),
+                                "target": candidate.target.host,
+                                "source_target": candidate.source_target.host,
+                                "reason": candidate.reason,
+                                "relation": candidate.relation,
+                                "evidence_artifact": (
+                                    candidate_artifact.path.name
+                                ),
+                                "status": candidate.status.value,
+                            },
+                            timestamp=datetime.now(UTC),
+                        ),
+                    )
+                candidate_payload = next(
+                    event.get("payload", {})
+                    for event in reversed(cmd.store.read_events(run_handle))
+                    if event.get("event_type") == "scope_candidate_discovered"
+                )
+                cmd.store.append_event(
+                    run_handle,
+                    Event(
+                        event_type="scope_amendment_required",
+                        payload={
+                            "plan_id": plan_id,
+                            "playbook_id": record.plan.playbook_id,
+                            "adapter": action.adapter,
+                            "operation": action.operation,
+                            "target": candidate_payload.get("target", ""),
+                            "candidate_id": candidate_payload.get("candidate_id", ""),
+                            "reason": candidate_payload.get("reason", ""),
+                        },
+                        timestamp=datetime.now(UTC),
+                    ),
+                )
+                return {
+                    "status": "blocked",
+                    "boundary": "scope_amendment",
+                    "plan_id": plan_id,
+                    "candidate": candidate_payload,
+                    "message": (
+                        f"Discovered distinct target "
+                        f"{candidate_payload.get('target')} from local evidence. "
+                        "A targeted amendment is required before sending traffic."
+                    ),
+                    "actions_executed": actions_executed,
+                    "actions_failed": actions_failed,
+                    "evidence_artifacts": evidence_artifacts,
+                }
 
             # Classify the result
             classification = adapter.classify(process_result, observations)
+            observations = _typed_progression_observations(
+                playbook_id=record.plan.playbook_id,
+                adapter=action.adapter,
+                operation=action.operation,
+                action_inputs=action.inputs,
+                target=record.plan.target,
+                observations=observations,
+                classification_kind=classification.kind,
+            )
+            if (
+                action.adapter == "screenshot"
+                and classification.kind == "success"
+                and isinstance(action.inputs.get("proof_kind"), str)
+                and action.inputs["proof_kind"].strip()
+            ):
+                observations = tuple(
+                    observation.model_copy(
+                        update={
+                            "data": {
+                                **observation.data,
+                                "objective_proof": {
+                                    "kind": action.inputs["proof_kind"],
+                                    "description": str(
+                                        action.inputs.get(
+                                            "proof_description",
+                                            "",
+                                        )
+                                    ),
+                                    "proof": str(
+                                        observation.data.get("path", "")
+                                    ),
+                                },
+                            },
+                        },
+                    )
+                    for observation in observations
+                )
 
             # Collect evidence
             evidence_collector = EvidenceCollector(
@@ -1054,17 +1979,78 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 plan_id=plan_id,
                 engagement_id=engagement_id,
             )
-            evidence_results = await adapter.collect(
-                process_result, evidence_collector
+            collect_for_spec = getattr(adapter, "collect_for_spec", None)
+            if callable(collect_for_spec):
+                evidence_results = await collect_for_spec(
+                    process_result,
+                    process_spec,
+                    evidence_collector,
+                )
+            else:
+                evidence_results = await adapter.collect(
+                    process_result, evidence_collector
+                )
+            transcript = process_result.stdout.encode("utf-8", errors="replace")
+            if process_result.stderr:
+                transcript += (
+                    b"\n--- stderr ---\n"
+                    + process_result.stderr.encode("utf-8", errors="replace")
+                )
+            maximum_bytes = (
+                record.plan.limits.max_output_bytes
+                or max(len(transcript), 1)
             )
+            stored_transcript = cmd.store.add_bytes(
+                run_handle,
+                transcript,
+                ArtifactInput(
+                    media_type="text/plain",
+                    evidence_type=action.adapter,
+                    source_name=f"{action.adapter}:{action.operation}",
+                    maximum_bytes=maximum_bytes,
+                ),
+            )
+            evidence_record = evidence_collector.collect_process(
+                process_result,
+                {
+                    "target": record.plan.target,
+                    "engagement_id": engagement_id,
+                    "adapter": action.adapter,
+                    "argv": process_spec.argv,
+                    "source": record.plan.playbook_id,
+                    "confidence": classification.confidence,
+                },
+            )
+            if (
+                classification.kind == "success"
+                and pending_tool_verification is not None
+                and isinstance(tool_card_verifier, ToolCardVerifier)
+            ):
+                verified_tool = tool_card_verifier.promote_after_success(
+                    pending_tool_verification
+                )
+                cmd.store.append_event(
+                    run_handle,
+                    Event(
+                        event_type="tool_card_runtime_verified",
+                        payload={
+                            "tool_id": verified_tool.tool_id,
+                            "version": verified_tool.version,
+                            "card_digest": verified_tool.card_digest,
+                            "guidance_source": verified_tool.guidance_source,
+                            "verified_at": verified_tool.verified_at,
+                        },
+                        timestamp=datetime.now(UTC),
+                    ),
+                )
 
             # Determine status based on classification
-            status = "executed"
-            if classification.kind == "failure":
-                status = "failed"
-                actions_failed += 1
-            else:
+            status = classification.kind
+            if classification.kind == "success":
+                status = "executed"
                 actions_executed += 1
+            else:
+                actions_failed += 1
 
             # Record plan_executed event
             cmd.store.append_event(
@@ -1089,25 +2075,59 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
 
             # Record evidence collected events — one per observation
             for obs in observations:
-                evidence_artifact = (
-                    f"{action.adapter}_{action.operation}_"
-                    f"{obs.observation_id.hex[:8]}.txt"
+                evidence_artifact = stored_transcript.path.name
+                finding_candidate = (
+                    _finding_candidate_from_observation(obs)
+                    if classification.kind == "success"
+                    else None
                 )
+                evidence_payload: dict[str, Any] = {
+                    "artifact": evidence_artifact,
+                    "finding": _format_finding(action, obs),
+                    "evidence_type": obs.source,
+                    "asset": record.plan.target.host,
+                    "observation_id": str(obs.observation_id),
+                    "adapter": action.adapter,
+                    "source": f"{action.adapter}:{action.operation}",
+                    "sha256": stored_transcript.sha256,
+                    "evidence_id": str(evidence_record.evidence_id),
+                    "command_redacted": list(evidence_record.command_redacted),
+                    "observation_data": obs.data,
+                    "execution_classification": classification.kind,
+                }
+                if finding_candidate is not None:
+                    evidence_payload["finding_id"] = finding_candidate["finding_id"]
                 cmd.store.append_event(
                     run_handle,
                     Event(
                         event_type="evidence_collected",
-                        payload={
-                            "artifact": evidence_artifact,
-                            "finding": _format_finding(action, obs),
-                            "evidence_type": obs.source,
-                            "asset": record.plan.target.host,
-                            "observation_id": str(obs.observation_id),
-                            "adapter": action.adapter,
-                        },
+                        payload=evidence_payload,
                         timestamp=now,
                     ),
                 )
+                if classification.kind == "success":
+                    _record_explicit_objective_proof(
+                        cmd=cmd,
+                        run_handle=run_handle,
+                        observation=obs,
+                        plan_id=plan_id,
+                        playbook_id=record.plan.playbook_id,
+                        timestamp=now,
+                    )
+                if finding_candidate is not None:
+                    cmd.store.append_event(
+                        run_handle,
+                        Event(
+                            event_type="finding_candidate",
+                            payload={
+                                **finding_candidate,
+                                "observation_id": str(obs.observation_id),
+                                "evidence_artifact": evidence_artifact,
+                                "evidence_id": str(evidence_record.evidence_id),
+                            },
+                            timestamp=now,
+                        ),
+                    )
                 evidence_artifacts.append({
                     "artifact": evidence_artifact,
                     "observation_id": str(obs.observation_id),
@@ -1115,7 +2135,11 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
 
             # If the adapter produced its own evidence artifacts, record those too
             for ev_result in (evidence_results or ()):
-                if ev_result not in ("evidence_collected",):
+                artifact_path = run_handle.path / "artifacts" / str(ev_result)
+                if (
+                    ev_result not in ("evidence_collected",)
+                    and artifact_path.is_file()
+                ):
                     cmd.store.append_event(
                         run_handle,
                         Event(
@@ -1136,7 +2160,86 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                         "artifact": ev_result,
                     })
 
-        except Exception:
+            if classification.kind == "success":
+                playbook = _get_catalog(context).playbooks.get(record.plan.playbook_id)
+                if playbook is not None and "cleanup_complete" in playbook.success_emits:
+                    cleanup = await adapter.cleanup(adapter_ctx)
+                    if cleanup.success:
+                        cmd.store.append_event(
+                            run_handle,
+                            Event(
+                                event_type="cleanup_completed",
+                                payload={
+                                    "plan_id": plan_id,
+                                    "playbook_id": playbook.id,
+                                    "target": record.plan.target.host,
+                                    "description": cleanup.details,
+                                },
+                                timestamp=now,
+                            ),
+                        )
+
+        except ScopeAmendmentRequiredError as exc:
+            # ``adapter.plan`` raised before a ProcessSpec exists, so no
+            # subprocess, traffic, or synthetic evidence was created.
+            cmd.store.append_event(
+                run_handle,
+                Event(
+                    event_type="scope_amendment_required",
+                    payload={
+                        "plan_id": plan_id,
+                        "playbook_id": record.plan.playbook_id,
+                        "adapter": action.adapter,
+                        "operation": action.operation,
+                        "target": record.plan.target.host,
+                        "reason": str(exc),
+                    },
+                    timestamp=now,
+                ),
+            )
+            return {
+                "status": "blocked",
+                "boundary": "scope_amendment",
+                "plan_id": plan_id,
+                "message": str(exc),
+                "actions_executed": actions_executed,
+                "actions_failed": actions_failed,
+                "evidence_artifacts": evidence_artifacts,
+            }
+        except AdapterPolicyError as exc:
+            boundary = (
+                "missing_validated_candidate"
+                if action.adapter == "nuclei"
+                else "missing_evidence"
+                if action.adapter == "research" and action.inputs.get("full_chain")
+                else "adapter_policy"
+            )
+            cmd.store.append_event(
+                run_handle,
+                Event(
+                    event_type="execution_boundary",
+                    payload={
+                        "plan_id": plan_id,
+                        "playbook_id": record.plan.playbook_id,
+                        "adapter": action.adapter,
+                        "operation": action.operation,
+                        "target": record.plan.target.host,
+                        "boundary": boundary,
+                        "reason": str(exc),
+                    },
+                    timestamp=now,
+                ),
+            )
+            return {
+                "status": "blocked",
+                "boundary": boundary,
+                "plan_id": plan_id,
+                "message": str(exc),
+                "actions_executed": actions_executed,
+                "actions_failed": actions_failed,
+                "evidence_artifacts": evidence_artifacts,
+            }
+        except Exception as exc:
             actions_failed += 1
             cmd.store.append_event(
                 run_handle,
@@ -1149,69 +2252,12 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                         "operation": action.operation,
                         "status": "error",
                         "error_code": "adapter_execution_error",
+                        "error": str(exc),
                         "target": record.plan.target.host,
                     },
                     timestamp=now,
                 ),
             )
-
-    # Materialize the playbook's declared outputs after a fully successful run.
-    # Adapter observations are implementation-specific; success_emits is the
-    # workflow contract consumed by downstream playbooks and state transitions.
-    if actions_executed > 0 and actions_failed == 0:
-        catalog = _get_catalog(context)
-        playbook = catalog.playbooks.get(record.plan.playbook_id)
-        if playbook is not None:
-            existing_evidence = {
-                evt.get("payload", {}).get("evidence_type", "")
-                for evt in cmd.store.read_events(run_handle)
-                if evt.get("event_type") == "evidence_collected"
-            }
-            for evidence_type in playbook.success_emits:
-                if evidence_type not in existing_evidence:
-                    cmd.store.append_event(
-                        run_handle,
-                        Event(
-                            event_type="evidence_collected",
-                            payload={
-                                "finding": (
-                                    f"Playbook {playbook.id} emitted {evidence_type}"
-                                ),
-                                "evidence_type": evidence_type,
-                                "asset": record.plan.target.host,
-                                "playbook_id": playbook.id,
-                            },
-                            timestamp=now,
-                        ),
-                    )
-
-            # Report validation consumes lifecycle events rather than evidence
-            # types, so bridge the corresponding workflow outputs explicitly.
-            lifecycle_events = {
-                "objective_proven": "objective_completed",
-                "cleanup_complete": "cleanup_completed",
-            }
-            existing_event_types = {
-                evt.get("event_type", "")
-                for evt in cmd.store.read_events(run_handle)
-            }
-            for evidence_type, event_type in lifecycle_events.items():
-                if (
-                    evidence_type in playbook.success_emits
-                    and event_type not in existing_event_types
-                ):
-                    cmd.store.append_event(
-                        run_handle,
-                        Event(
-                            event_type=event_type,
-                            payload={
-                                "plan_id": plan_id,
-                                "playbook_id": playbook.id,
-                                "target": record.plan.target.host,
-                            },
-                            timestamp=now,
-                        ),
-                    )
 
     # Compute overall status
     overall_status = "executed" if actions_failed == 0 else "partial"
@@ -1248,6 +2294,109 @@ def _format_finding(
     return " — ".join(parts)
 
 
+def _record_explicit_objective_proof(
+    *,
+    cmd: AriadneCommand,
+    run_handle: RunHandle,
+    observation: Observation,
+    plan_id: str,
+    playbook_id: str,
+    timestamp: datetime,
+) -> None:
+    """Promote only a persisted, objective-shaped observation to completion."""
+    proof = observation.data.get("objective_proof")
+    if not isinstance(proof, dict):
+        return
+    proof_map = cast(dict[str, object], proof)
+    kind = proof_map.get("kind")
+    description = proof_map.get("description", "")
+    if not isinstance(kind, str) or not isinstance(description, str):
+        return
+    objective = next(
+        (
+            item for item in run_handle.snapshot.objectives
+            if item.kind == kind
+            and (item.kind != "custom" or item.description == description)
+        ),
+        None,
+    )
+    if objective is None:
+        return
+    existing = cmd.store.read_events(run_handle)
+    if any(
+        event.get("event_type") == "objective_completed"
+        and event.get("payload", {}).get("objective_kind") == objective.kind
+        and event.get("payload", {}).get("description", "") == objective.description
+        for event in existing
+    ):
+        return
+    cmd.store.append_event(
+        run_handle,
+        Event(
+            event_type="objective_completed",
+            payload={
+                "plan_id": plan_id,
+                "playbook_id": playbook_id,
+                "target": observation.target.host,
+                "objective_kind": objective.kind,
+                "description": objective.description,
+                "observation_id": str(observation.observation_id),
+                "proof": proof_map.get("proof", ""),
+            },
+            timestamp=timestamp,
+        ),
+    )
+
+
+def _finding_candidate_from_observation(
+    observation: Observation,
+) -> dict[str, str] | None:
+    """Return a reportable candidate only for explicit vulnerability evidence.
+
+    Generic services, open ports, banners, and heuristic output are evidence,
+    not validated findings. Nuclei and ZAP expose structured match or alert
+    signals, but a single scanner alert remains a candidate until a separate
+    validation proof promotes it. This deliberately narrow conversion keeps
+    report findings
+    tied to one persisted observation and its transcript artifact.
+    """
+    data = observation.data
+    severity = str(data.get("severity") or data.get("risk") or "").casefold()
+    if severity not in {"critical", "high", "medium", "low"}:
+        return None
+
+    title = ""
+    description = ""
+    if observation.source == "nuclei":
+        template_id = str(data.get("template_id") or "").strip()
+        matched_at = str(data.get("matched_at") or "").strip()
+        title = str(data.get("name") or "").strip()
+        if not template_id or not matched_at or not title:
+            return None
+        description = f"Nuclei template {template_id} matched {matched_at}"
+    elif observation.source == "zap":
+        alert = str(data.get("alert") or "").strip()
+        alert_ref = str(data.get("alertRef") or data.get("pluginId") or "").strip()
+        url = str(data.get("url") or "").strip()
+        if not alert or not alert_ref:
+            return None
+        title = alert
+        description = str(data.get("description") or "").strip()
+        if not description:
+            description = f"ZAP alert {alert_ref}" + (f" at {url}" if url else "")
+    else:
+        return None
+
+    return {
+        "finding_id": f"finding:{observation.observation_id}",
+        "title": title,
+        "severity": severity,
+        "status": "candidate",
+        "target": observation.target.host,
+        "description": description,
+    }
+
+
 async def handle_render_report(args: dict[str, Any], **context: Any) -> dict[str, Any]:
     """Render a walkthrough or professional report.
 
@@ -1269,6 +2418,10 @@ async def handle_render_report(args: dict[str, Any], **context: Any) -> dict[str
     session_id = context.get("session_id", "")
     input_session_id = session_id
     style = args.get("style", "walkthrough")
+    options = ReportOptions(
+        include_flags=bool(args.get("include_flags", False)),
+        include_secrets=bool(args.get("include_secrets", False)),
+    )
 
     # 1. Check active engagement
     binding_info = _get_binding(cmd, input_session_id)
@@ -1306,7 +2459,7 @@ async def handle_render_report(args: dict[str, Any], **context: Any) -> dict[str
 
     # 4. Validate the run
     validator = ReportValidator()
-    validation = validator.validate(run_handle, ReportOptions())
+    validation = validator.validate(run_handle, options)
     if not validation.valid:
         return {
             "status": "error",
@@ -1321,16 +2474,19 @@ async def handle_render_report(args: dict[str, Any], **context: Any) -> dict[str
         rendered: RenderedReport
         if style == "walkthrough":
             renderer = WalkthroughRenderer()
-            rendered = renderer.render(run_handle, ReportOptions())
-            ext = "md"
+            rendered = renderer.render(run_handle, options)
+            filename = "walkthrough.md"
         else:
             renderer = ProfessionalRenderer()
-            rendered = renderer.render(run_handle, ReportOptions())
-            ext = "html"
+            rendered = renderer.render(run_handle, options)
+            filename = "professional.html"
 
         # Write to a file
-        report_path = run_handle.path / f"{style}_report.{ext}"
-        report_path.write_text(rendered.text, encoding="utf-8")
+        report_path = cmd.store.write_output(
+            run_handle,
+            filename,
+            rendered.text.encode("utf-8"),
+        )
 
         return {
             "status": "report_rendered",
@@ -1344,6 +2500,128 @@ async def handle_render_report(args: dict[str, Any], **context: Any) -> dict[str
             "message": f"Report rendering failed: {exc}",
             "path": "",
         }
+
+
+async def handle_run_engagement(
+    args: dict[str, Any],
+    **context: Any,
+) -> dict[str, Any]:
+    """Advance deterministically until completion or a true boundary."""
+    cmd = _get_command(context)
+    session_id = context.get("session_id", "")
+    max_steps = args.get("max_steps", 30)
+    if not isinstance(max_steps, int) or not 1 <= max_steps <= 100:
+        return {"status": "error", "message": "max_steps must be between 1 and 100"}
+    for step in range(1, max_steps + 1):
+        binding = _get_binding(cmd, session_id)
+        if binding is None or binding["engagement_id"] is None:
+            return {"status": "error", "message": "No active engagement."}
+        run_handle = _get_run_handle(cmd.store, binding["engagement_id"])
+        if run_handle is None:
+            return {"status": "error", "message": "Engagement run is unavailable."}
+        state, _ = _determine_engagement_state(cmd.store, run_handle)
+        if state in {EngagementState.REPORTING, EngagementState.COMPLETE}:
+            walkthrough = await handle_render_report(
+                {"style": "walkthrough"},
+                **context,
+            )
+            professional = await handle_render_report(
+                {"style": "professional"},
+                **context,
+            )
+            if (
+                walkthrough.get("status") != "report_rendered"
+                or professional.get("status") != "report_rendered"
+            ):
+                return {
+                    "status": "blocked",
+                    "boundary": "report_quality_gate",
+                    "message": (
+                        f"Offline report could not complete: "
+                        f"{walkthrough.get('message')}; "
+                        f"{professional.get('message')}"
+                    ),
+                }
+            return {
+                "status": "complete",
+                "steps": step - 1,
+                "walkthrough_path": walkthrough["path"],
+                "professional_path": professional["path"],
+                "message": "Objectives, cleanup, and both offline reports completed.",
+            }
+
+        proposed = await handle_propose_plan(
+            {
+                "snapshot_hash": binding["snapshot_hash"],
+                "hypothesis": f"Advance engagement from {state.value}",
+            },
+            **context,
+        )
+        if proposed.get("status") not in {
+            "plan_auto_approved",
+            "plan_proposed",
+        }:
+            return {
+                "status": "blocked",
+                "boundary": proposed.get("boundary", "no_eligible_plan"),
+                "message": proposed.get("message", "No eligible plan."),
+                "details": proposed,
+            }
+        executed = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            **context,
+        )
+        if executed.get("status") == "blocked":
+            return {
+                **executed,
+                "boundary": executed.get("boundary", "manual_choice"),
+                "steps": step,
+            }
+        if executed.get("status") != "executed":
+            events = cmd.store.read_events(run_handle)
+            blocked_candidate_ids = {
+                event.get("payload", {}).get("candidate_id")
+                for event in events
+                if event.get("event_type") == "scope_candidate_blocked"
+            }
+            candidate = next(
+                (
+                    event.get("payload", {})
+                    for event in reversed(events)
+                    if event.get("event_type") == "scope_candidate_discovered"
+                    and event.get("payload", {}).get("candidate_id")
+                    not in blocked_candidate_ids
+                ),
+                None,
+            )
+            if candidate is not None:
+                return {
+                    "status": "blocked",
+                    "boundary": "scope_candidate",
+                    "candidate": candidate,
+                    "steps": step,
+                    "message": (
+                        f"Discovered distinct target {candidate.get('target')} "
+                        f"from local evidence: {candidate.get('reason')}. "
+                        "A targeted amendment is required before sending traffic."
+                    ),
+                }
+            return {
+                "status": "blocked",
+                "boundary": "execution_failure",
+                "steps": step,
+                "message": executed.get(
+                    "message",
+                    "A plan could not complete safely.",
+                ),
+                "details": executed,
+            }
+    return {
+        "status": "blocked",
+        "boundary": "safety_step_limit",
+        "steps": max_steps,
+        "message": "Safety step limit reached; inspect status before continuing.",
+    }
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────

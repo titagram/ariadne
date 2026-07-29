@@ -5,7 +5,7 @@ to produce a bounded ``Plan``. Each plan:
 - references its source snapshot's hash for integrity binding;
 - intersects playbook limits with effective policy bounds;
 - sets a 15-minute expiry from the planning timestamp;
-- rejects unregistered adapters, unmet evidence, ``observed_only``
+- rejects unregistered adapters, unmet evidence, any non-``in_scope``
   targets, or denied capabilities.
 """
 
@@ -142,7 +142,7 @@ class Planner:
         Raises:
             WorkflowConfigurationError: If the playbook is unknown, an
                 adapter is unregistered, evidence is unmet, the target is
-                ``observed_only``, or a capability is denied.
+                not ``in_scope``, or a capability is denied.
         """
         # 1. Resolve playbook
         playbook = self._catalog.playbooks.get(playbook_id)
@@ -151,12 +151,12 @@ class Planner:
                 f"Unknown playbook {playbook_id!r}"
             )
 
-        # 2. Validate target status (fail-closed for observed_only)
+        # 2. Validate target status (fail-closed for every non-scope state)
         target = context.hypothesis.target
         for asset in context.assets:
-            if asset.target == target and asset.status == AssetStatus.OBSERVED_ONLY:
+            if asset.target == target and asset.status != AssetStatus.IN_SCOPE:
                 raise WorkflowConfigurationError(
-                    f"Target {target.host!r} is observed_only — "
+                    f"Target {target.host!r} is {asset.status.value} — "
                     f"planning requires an in_scope asset"
                 )
 

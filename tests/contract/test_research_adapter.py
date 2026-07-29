@@ -8,6 +8,7 @@ import pytest
 from ariadne.adapters.base import AdapterContext, PlannedAction
 from ariadne.adapters.research import ResearchAdapter
 from ariadne.core.engagement import TargetSpec
+from ariadne.core.errors import AdapterPolicyError
 from ariadne.core.workflow import PlaybookLimits
 from ariadne.runtime.process import ProcessResult, ProcessStatus
 
@@ -58,6 +59,14 @@ def test_plan_consumes_context_limits_and_exact_ping_target() -> None:
     )
     assert spec.timeout_seconds == 5
     assert spec.max_output_bytes == 4096
+
+
+def test_full_chain_requires_structured_service_evidence() -> None:
+    with pytest.raises(AdapterPolicyError, match="missing evidence"):
+        ResearchAdapter().plan(
+            PlannedAction(operation="investigate", inputs={"full_chain": True}),
+            _context(),
+        )
 
 
 @pytest.mark.asyncio

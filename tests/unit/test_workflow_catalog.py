@@ -1,12 +1,25 @@
 """Task 6: playbook catalog validation tests."""
 
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 import yaml
 
+from ariadne.core.engagement import EngagementSnapshot, TargetSpec
+from ariadne.core.enums import AutonomyMode, EngagementState, EnvironmentProfile
 from ariadne.core.errors import WorkflowConfigurationError
-from ariadne.core.workflow import WorkflowCatalog
+from ariadne.core.observations import Observation
+from ariadne.core.policy import CapabilityRule, EffectivePolicy
+from ariadne.core.workflow import (
+    Playbook,
+    PlaybookAction,
+    PlaybookLimits,
+    Trigger,
+    WorkflowCatalog,
+    WorkflowContext,
+)
 
 
 def write_workflow(directory: Path, actions: list[dict]) -> Path:
@@ -62,7 +75,63 @@ class TestCatalogRejectsShellStrings:
             tmp_path,
             actions=[{"adapter": "nmap", "operation": "tcp_scan", "inputs": {"ports": "1-1024"}}],
         )
-        # Add a second file with a shell key
         write_workflow(tmp_path, actions=[{"adapter": "nmap", "shell": "nmap {target}"}])
         with pytest.raises(WorkflowConfigurationError, match="shell"):
             WorkflowCatalog.load(tmp_path)
+
+
+def test_eligibility_honors_persisted_service_trigger_and_blocks_mismatch() -> None:
+    """Replay must preserve observation data used by typed workflow branches."""
+    playbook = Playbook(
+        id="web.fingerprint.v1",
+        version=1,
+        stage="enumeration",
+        triggers=(Trigger(kind="service_type", types=("http", "https")),),
+        required_evidence_types=frozenset({"service_fingerprinted"}),
+        capabilities=frozenset({"web.fingerprint"}),
+        actions=(PlaybookAction(adapter="httpx", operation="scan", inputs={}),),
+        limits=PlaybookLimits(),
+        stop_conditions=(),
+        success_emits=(),
+        next_playbooks=(),
+        report_sections=(),
+    )
+    snapshot = EngagementSnapshot(
+        engagement_id=uuid4(),
+        revision=1,
+        previous_snapshot_hash=None,
+        snapshot_hash="test",
+        confirmed_at=datetime.now(UTC),
+        authorization_attested=True,
+        disclaimer_version="test",
+        profile=EnvironmentProfile.PRIVATE_LAB,
+        autonomy=AutonomyMode.CONTROLLED,
+        targets=(TargetSpec(host="192.0.2.10"),),
+        objectives=(),
+    )
+    policy = EffectivePolicy(
+        name="test",
+        version=1,
+        capabilities={"web.fingerprint": CapabilityRule(allowed=True)},
+        source_digests=(),
+    )
+
+    def context_for(service: str) -> WorkflowContext:
+        return WorkflowContext(
+            snapshot=snapshot,
+            state=EngagementState.ENUMERATION,
+            observations=(
+                Observation(
+                    observation_id=uuid4(),
+                    target=snapshot.targets[0],
+                    source="service_fingerprinted",
+                    data={"type": "service_fingerprinted", "service": service},
+                ),
+            ),
+            assets=(),
+            effective_policy=policy,
+        )
+
+    catalog = WorkflowCatalog(playbooks={playbook.id: playbook})
+    assert catalog.eligible(context_for("https")) == (playbook,)
+    assert catalog.eligible(context_for("ssh")) == ()

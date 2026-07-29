@@ -50,6 +50,7 @@ class EngagementState(StrEnum):
 
 class AssetStatus(StrEnum):
     IN_SCOPE = "in_scope"
+    SCOPE_CANDIDATE = "scope_candidate"
     OBSERVED_ONLY = "observed_only"
 
 

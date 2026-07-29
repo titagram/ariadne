@@ -13,6 +13,16 @@ The base policy declares universal invariants. The environment profile
 one. The engagement snapshot adds per-run constraints. The action plan's
 requested dimensions are validated against the intersected effective policy.
 
+Policy is evaluated against the active immutable contract revision. Routine
+allowed plans execute autonomously; `controlled` is not a per-command approval
+mode. Interaction occurs only where policy marks a capability `always_manual`,
+where a proposed action conflicts with a guardrail, or where a contract
+amendment is required. Autonomy mode and `--yolo` never widen effective policy.
+
+Intensity and exclusions are contract inputs. They can narrow limits and deny
+branches but cannot expand the base or environment profile. An accepted change
+creates a new linked snapshot; plans for the previous snapshot are stale.
+
 Each capability rule has the following fields:
 
 | Field              | Type      | Description                                                          |
@@ -24,7 +34,7 @@ Each capability rule has the following fields:
 | `max_attempts`     | int\|null | Maximum retry attempts                                               |
 | `max_duration_seconds` | int\|null | Maximum wall-clock duration                                      |
 | `max_output_bytes` | int\|null | Maximum output size                                                  |
-| `allowed_tools`    | list[str] | Explicitly permitted tool names (empty = unrestricted within policy) |
+| `allowed_tools`    | list[str] | Explicitly permitted executable names; empty is denied at the subprocess boundary |
 
 `null` means that layer places no restriction; the intersection preserves the
 more restrictive value from any layer.

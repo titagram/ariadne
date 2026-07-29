@@ -24,6 +24,11 @@
       operation: investigate
       inputs:
         product: "preflight"
+        tool_card:
+          title: "iputils ping"
+          official_source_url: "https://github.com/iputils/iputils"
+          source_date: "2026-07-29"
+          summary: "Bounded reachability probe used by environment preflight."
   limits:
     max_rate: 1
     max_concurrency: 1
@@ -155,6 +160,7 @@
     - snmp.enumeration.v1
     - database.enumeration.v1
     - service.unknown.v1
+    - research.service-vulnerability.v1
   report_sections:
     - "enumeration"
 
@@ -176,6 +182,11 @@
       operation: investigate
       inputs:
         full_chain: true
+        tool_card:
+          title: "SearchSploit"
+          official_source_url: "https://www.exploit-db.com/searchsploit"
+          source_date: "2026-07-29"
+          summary: "Local Exploit-DB index lookup tied to a validated service fingerprint."
   limits:
     max_rate: 5
     max_concurrency: 1
@@ -213,9 +224,11 @@
     - adapter: nuclei
       operation: scan
       inputs:
-        template_ids:
-          - "cve-2024-1234"
-          - "vuln-sql-error"
+        tool_card:
+          title: "Nuclei"
+          official_source_url: "https://docs.projectdiscovery.io/tools/nuclei/overview"
+          source_date: "2026-07-29"
+          summary: "Template-based scanner used only with target-bound validated candidates."
   limits:
     max_rate: 10
     max_concurrency: 1
@@ -252,6 +265,11 @@
       operation: capture
       inputs:
         proof_kind: "initial_access"
+        tool_card:
+          title: "Chromium"
+          official_source_url: "https://www.chromium.org/developers/how-tos/run-chromium-with-flags/"
+          source_date: "2026-07-29"
+          summary: "Headless browser used for bounded evidence screenshots."
   limits:
     max_rate: 1
     max_concurrency: 1
@@ -375,6 +393,11 @@
       operation: capture
       inputs:
         proof_kind: "objective"
+        tool_card:
+          title: "Chromium"
+          official_source_url: "https://www.chromium.org/developers/how-tos/run-chromium-with-flags/"
+          source_date: "2026-07-29"
+          summary: "Headless browser used for bounded evidence screenshots."
   limits:
     max_rate: 1
     max_concurrency: 1
@@ -444,6 +467,11 @@
       operation: capture
       inputs:
         proof_kind: "report_summary"
+        tool_card:
+          title: "Chromium"
+          official_source_url: "https://www.chromium.org/developers/how-tos/run-chromium-with-flags/"
+          source_date: "2026-07-29"
+          summary: "Headless browser used for bounded evidence screenshots."
   limits:
     max_rate: 1
     max_concurrency: 1

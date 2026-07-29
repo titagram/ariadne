@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-import tempfile
+from pathlib import Path
 from typing import ClassVar
 from uuid import uuid4
 
@@ -41,8 +41,10 @@ _OPERATIONS: frozenset = frozenset({"capture"})
 _VIEWPORT_WIDTH = 1280
 _VIEWPORT_HEIGHT = 720
 
-# Chromium user data directory prefix for fresh profiles
-_TEMP_PROFILE_PREFIX = "ariadne-chromium-profile-"
+_SAVED_SCREENSHOT_RE = re.compile(
+    r"Screenshot saved to\s+(.+?\.(?:png|jpg|jpeg|webp))(?:\r?\n|$)",
+    re.IGNORECASE,
+)
 
 
 def _compute_sha256(data: bytes) -> str:
@@ -85,14 +87,14 @@ class ScreenshotAdapter:
         if inputs.get("use_http"):
             url = f"http://{target}"
 
-        # Create a fresh temporary profile directory
-        user_data_dir = tempfile.mkdtemp(prefix=_TEMP_PROFILE_PREFIX)
-
-        # Output path: evidence mount with a unique filename
-        output_path = inputs.get(
-            "output_path",
-            f"/evidence/screenshots/{target}_{uuid4().hex[:12]}.png",
-        )
+        if context.run_root is None:
+            raise AdapterError("Screenshot capture requires an engagement run root")
+        artifacts = context.run_root.resolve() / "artifacts"
+        screenshots = artifacts / "screenshots"
+        token = (context.action_digest or uuid4().hex)[:16]
+        safe_target = re.sub(r"[^A-Za-z0-9_.-]", "_", target)
+        output_path = screenshots / f"{safe_target}_{token}.png"
+        user_data_dir = screenshots / f".chromium-profile-{token}"
 
         argv = [
             "chromium",
@@ -125,18 +127,15 @@ class ScreenshotAdapter:
         self,
         result: ProcessResult,
     ) -> tuple[Observation, ...]:
-        stdout = result.stdout
-        if not stdout.strip():
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        if not output.strip():
             return ()
 
         observations: list[Observation] = []
         from ariadne.core.engagement import TargetSpec
 
         # Try to extract the screenshot path from Chromium's stdout
-        path_match = re.search(
-            r"Screenshot saved to (.+\.(?:png|jpg|jpeg|webp))",
-            stdout,
-        )
+        path_match = _SAVED_SCREENSHOT_RE.search(output)
 
         evidence_data: dict[str, object] = {
             "url": "",
@@ -151,7 +150,7 @@ class ScreenshotAdapter:
         target_host: str | None = None
 
         # Try to extract URL from stdout
-        url_match = re.search(r"https?://([^/\s]+)", stdout)
+        url_match = re.search(r"https?://([^/\s]+)", output)
         if url_match:
             target_host = url_match.group(1)
             evidence_data["url"] = url_match.group(0)
@@ -169,6 +168,43 @@ class ScreenshotAdapter:
         observations.append(obs)
 
         return tuple(observations)
+
+    def parse_for_spec(
+        self,
+        result: ProcessResult,
+        target: object,
+        spec: ProcessSpec,
+    ) -> tuple[Observation, ...]:
+        """Recognize only the real file selected by the authorized spec."""
+        from ariadne.core.engagement import TargetSpec
+
+        screenshot = self._authorized_screenshot_file(spec)
+        if screenshot is None:
+            return ()
+        resolved_target = (
+            target
+            if isinstance(target, TargetSpec)
+            else TargetSpec(host=str(target))
+        )
+        url = next(
+            (
+                item for item in spec.argv
+                if item.startswith(("http://", "https://"))
+            ),
+            "",
+        )
+        return (
+            Observation(
+                observation_id=uuid4(),
+                target=resolved_target,
+                source="screenshot",
+                data={
+                    "path": str(screenshot),
+                    "url": url,
+                    "browser": "chromium",
+                },
+            ),
+        )
 
     def classify(
         self,
@@ -204,7 +240,60 @@ class ScreenshotAdapter:
         result: ProcessResult,
         collector: object,
     ) -> tuple[str, ...]:
-        return ()
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        match = _SAVED_SCREENSHOT_RE.search(output)
+        if match is None:
+            return ()
+        candidate = Path(match.group(1).strip()).resolve()
+        artifacts = next(
+            (parent for parent in (candidate, *candidate.parents) if parent.name == "artifacts"),
+            None,
+        )
+        if artifacts is None or not candidate.is_relative_to(artifacts) or not candidate.is_file():
+            return ()
+        return (str(candidate.relative_to(artifacts)),)
+
+    async def collect_for_spec(
+        self,
+        result: ProcessResult,
+        spec: ProcessSpec,
+        collector: object,
+    ) -> tuple[str, ...]:
+        """Collect the authorized output even when Chromium logs no URL."""
+        del result, collector
+        screenshot = self._authorized_screenshot_file(spec)
+        if screenshot is None:
+            return ()
+        artifacts = next(
+            (
+                parent for parent in screenshot.parents
+                if parent.name == "artifacts"
+            ),
+            None,
+        )
+        if artifacts is None:
+            return ()
+        return (str(screenshot.relative_to(artifacts)),)
+
+    @staticmethod
+    def _authorized_screenshot_file(spec: ProcessSpec) -> Path | None:
+        value = next(
+            (
+                item.removeprefix("--screenshot=")
+                for item in spec.argv
+                if item.startswith("--screenshot=")
+            ),
+            "",
+        )
+        if not value:
+            return None
+        candidate = Path(value).resolve()
+        if (
+            not candidate.is_file()
+            or not any(parent.name == "artifacts" for parent in candidate.parents)
+        ):
+            return None
+        return candidate
 
     async def cleanup(
         self,

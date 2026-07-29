@@ -20,6 +20,8 @@ from ariadne.core.engagement import (
     EngagementDraft,
     Objective,
     TargetSpec,
+    amend_engagement,
+    intensity_default_limits,
     lock_attested_engagement,
 )
 from ariadne.core.enums import AutonomyMode, EnvironmentProfile
@@ -43,6 +45,7 @@ _COMMANDS: dict[str, int] = {
     "new": 0,
     "status": 0,
     "plan": 0,
+    "run": 0,
     "approve": 1,
     "reject": 1,
     "amend-scope": 0,
@@ -196,10 +199,16 @@ class AriadneCommand:
         answers: dict[str, Any],
         *,
         session_id: str,
+        trusted_confirmation_digest: str = "",
     ) -> PrepareResult:
         """Atomically lock the accepted Q/A and bind its trusted session."""
         if not isinstance(session_id, str) or not session_id.strip():
             raise ValueError("A trusted Hades session_id is required")
+        if (
+            len(trusted_confirmation_digest) != 64
+            or any(char not in "0123456789abcdef" for char in trusted_confirmation_digest)
+        ):
+            raise ValueError("A trusted Hades contract confirmation is required")
         if self.get_session_binding(session_id) is not None:
             raise ValueError(
                 "This Hades session already has an active engagement; "
@@ -226,6 +235,8 @@ class AriadneCommand:
             autonomy=autonomy,
             target=TargetSpec(host=answers["target_host"]),
             objectives=objectives,
+            intensity=answers.get("intensity", "normal"),
+            exclusions=tuple(answers.get("exclusions", ())),
         )
 
         constraints = EngagementConstraints(
@@ -259,8 +270,12 @@ class AriadneCommand:
                     "autonomy": snapshot.autonomy.value,
                     "target": snapshot.targets[0].host,
                     "objectives": [o.model_dump(mode="json") for o in snapshot.objectives],
+                    "intensity": snapshot.intensity,
+                    "exclusions": list(snapshot.exclusions),
                     "time_window_minutes": snapshot.constraints.max_duration_minutes,
                     "policy_source_digests": list(snapshot.policy_source_digests),
+                    "trusted_confirmation_digest": trusted_confirmation_digest,
+                    "confirmation_surface": "hades_elicitation",
                     "notes": answers.get("notes", ""),
                 },
                 timestamp=now,
@@ -291,6 +306,131 @@ class AriadneCommand:
             engagement_id=snapshot.engagement_id,
             snapshot_hash=snapshot.snapshot_hash,
             message="Engagement locked and bound to the current Hades session.",
+        )
+
+    def amend(
+        self,
+        changes: dict[str, Any],
+        *,
+        session_id: str,
+        trusted_confirmation_digest: str,
+        expected_snapshot_hash: str,
+        expected_revision: int,
+    ) -> PrepareResult:
+        """Persist a linked contract version after trusted Hades consent."""
+        if (
+            len(trusted_confirmation_digest) != 64
+            or any(char not in "0123456789abcdef" for char in trusted_confirmation_digest)
+        ):
+            raise ValueError("A trusted Hades amendment confirmation is required")
+        binding = self.get_session_binding(session_id)
+        if binding is None or binding.engagement_id is None:
+            raise ValueError("No active engagement is bound to this Hades session")
+        handle = self.store.open(binding.engagement_id)
+        if handle is None or handle.snapshot.snapshot_hash != binding.snapshot_hash:
+            raise ValueError("Active engagement snapshot is unavailable or stale")
+        if (
+            handle.snapshot.snapshot_hash != expected_snapshot_hash
+            or handle.snapshot.revision != expected_revision
+        ):
+            raise ValueError(
+                "Active engagement changed after amendment confirmation"
+            )
+
+        targets = list(handle.snapshot.targets)
+        for raw_target in changes.get("add_targets", ()):
+            target = TargetSpec(host=raw_target)
+            if target not in targets:
+                targets.append(target)
+        raw_objectives = changes.get("objectives")
+        objectives = (
+            handle.snapshot.objectives
+            if raw_objectives is None
+            else tuple(
+                Objective(kind=value)
+                if isinstance(value, str)
+                else Objective(**value)
+                for value in raw_objectives
+            )
+        )
+        intensity = changes.get("intensity")
+        constraints = handle.snapshot.constraints
+        if intensity is not None:
+            rate, concurrency = intensity_default_limits(intensity)
+            constraints = constraints.model_copy(
+                update={
+                    "max_requests_per_second": rate,
+                    "max_concurrent_checks": concurrency,
+                }
+            )
+        amended = amend_engagement(
+            handle.snapshot,
+            targets=tuple(targets),
+            objectives=objectives,
+            intensity=intensity,
+            exclusions=(
+                None
+                if changes.get("exclusions") is None
+                else tuple(changes["exclusions"])
+            ),
+            constraints=constraints,
+        )
+        amended_handle = self.store.amend_snapshot(handle, amended)
+        transaction_id = uuid4().hex
+        now = datetime.now(UTC)
+        from ariadne.store.run_store import Event
+
+        try:
+            self.store.append_event(
+                amended_handle,
+                Event(
+                    event_type="engagement_amended",
+                    payload={
+                        "snapshot_hash": amended.snapshot_hash,
+                        "previous_snapshot_hash": amended.previous_snapshot_hash,
+                        "revision": amended.revision,
+                        "transaction_id": transaction_id,
+                        "trusted_confirmation_digest": trusted_confirmation_digest,
+                        "candidate_id": changes.get("candidate_id", ""),
+                        "reason": changes["reason"],
+                        "add_targets": [
+                            target.host
+                            for target in amended.targets
+                            if target not in handle.snapshot.targets
+                        ],
+                        "intensity": amended.intensity,
+                        "exclusions": list(amended.exclusions),
+                    },
+                    timestamp=now,
+                ),
+            )
+            self.store.append_event(
+                amended_handle,
+                Event(
+                    event_type="session_rebound",
+                    payload={
+                        "session_id": session_id,
+                        "snapshot_hash": amended.snapshot_hash,
+                        "transaction_id": transaction_id,
+                    },
+                    timestamp=now,
+                ),
+            )
+        except BaseException:
+            self.store.rollback_amendment(amended_handle, handle.snapshot)
+            raise
+        self.ledger.unbind_session(session_id)
+        self.ledger.bind_session(
+            challenge_id=f"amendment:{amended.snapshot_hash}",
+            session_id=session_id,
+            engagement_id=amended.engagement_id,
+            snapshot_hash=amended.snapshot_hash,
+        )
+        return PrepareResult(
+            status="active",
+            engagement_id=amended.engagement_id,
+            snapshot_hash=amended.snapshot_hash,
+            message=f"Engagement amended to immutable revision {amended.revision}.",
         )
 
     # ── Handle: process parsed /ariadne commands ────────────────────────
@@ -342,6 +482,15 @@ class AriadneCommand:
 
         if result.command == "plan":
             return "Use the ariadne_propose_plan tool to create a bounded action plan."
+
+        if result.command == "run":
+            return "Use ariadne_run to advance autonomously until complete or blocked."
+
+        if result.command == "amend-scope":
+            return (
+                "Use ariadne_amend_engagement; Hades will display one targeted "
+                "amendment confirmation."
+            )
 
         if result.command == "evidence":
             return "Use the ariadne_execute_plan tool to collect evidence."
@@ -736,10 +885,14 @@ class AriadneCommand:
                 return None
             source = payload.get("approval_source")
             if event_type == "plan_auto_approved":
+                valid_source = source == "curated_in_policy" or (
+                    source == "full_autonomy_policy"
+                    and handle.snapshot.autonomy == AutonomyMode.FULL
+                )
                 if (
-                    source != "full_autonomy_policy"
+                    not valid_source
                     or plan.requires_manual_approval
-                    or handle.snapshot.autonomy != AutonomyMode.FULL
+                    or plan.manual_capabilities
                 ):
                     return None
             elif (
@@ -916,15 +1069,18 @@ class AriadneCommand:
             )
 
     def auto_approve_plan(self, plan_id: str) -> None:
-        """Mark a durably auto-approved full-autonomy plan as approved."""
+        """Mark a durably auto-approved curated in-policy plan as approved."""
         record = self._plan_ledger.get(plan_id)
         if record is None:
             raise ValueError(f"Unknown plan: {plan_id!r}")
-        if record.plan.requires_manual_approval:
+        if (
+            record.plan.requires_manual_approval
+            or record.plan.manual_capabilities
+        ):
             raise ValueError("A manual-only plan cannot be auto-approved")
         record.approved = True
         record.approved_at = time.time()
-        record.approval_source = "full_autonomy_policy"
+        record.approval_source = "curated_in_policy"
 
     def is_plan_approved(self, plan_id: str) -> bool:
         """Check whether a plan has manual or automatic approval."""

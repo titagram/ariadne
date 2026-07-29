@@ -80,6 +80,7 @@ capabilities:
       - httpx
       - whatweb
       - nuclei
+      - zap.sh
   web.active_scan:
     allowed: true
     max_rate: 10
@@ -88,7 +89,7 @@ capabilities:
     max_duration_seconds: 14400
     max_output_bytes: 100_000_000
     allowed_tools:
-      - zap
+      - zap.sh
       - nuclei
   web.fuzz:
     allowed: true
@@ -153,6 +154,8 @@ capabilities:
     max_attempts: 3
     max_duration_seconds: 3600
     max_output_bytes: 50_000_000
+    allowed_tools:
+      - nuclei
 
   # ── Unrestricted stress testing (base default is unbounded; restricted
   # per profile) ────────────────────────────────────────────────────────
@@ -213,16 +216,30 @@ capabilities:
       - searchsploit
   exploit.validation:
     <<: *workflow_low
+    allowed_tools:
+      - nuclei
+      - chromium
   exploit.payload_upload:
     <<: *workflow_low
+    allowed_tools:
+      - impacket-smbexec
+      - impacket-wmiexec
   foothold.confirm:
     <<: *workflow_low
+    allowed_tools:
+      - chromium
   objective.check:
     <<: *workflow_low
+    allowed_tools:
+      - chromium
   cleanup.execute:
     <<: *workflow_low
+    allowed_tools:
+      - nmap
   report.render:
     <<: *workflow_low
+    allowed_tools:
+      - chromium
 
   # ── Protocol-specific enumeration ───────────────────────────────────
   service.dns: &service_specific
@@ -232,6 +249,8 @@ capabilities:
     max_attempts: 3
     max_duration_seconds: 1800
     max_output_bytes: 25_000_000
+    allowed_tools:
+      - nmap
   service.ssh:
     <<: *service_specific
   service.ftp:
@@ -240,10 +259,16 @@ capabilities:
     <<: *service_specific
   service.smb:
     <<: *service_specific
+    allowed_tools:
+      - smbclient
   service.ldap:
     <<: *service_specific
+    allowed_tools:
+      - ldapsearch
   service.kerberos:
     <<: *service_specific
+    allowed_tools:
+      - kerbrute
   service.winrm:
     <<: *service_specific
   service.rdp:
@@ -263,12 +288,20 @@ capabilities:
     max_attempts: 3
     max_duration_seconds: 3600
     max_output_bytes: 50_000_000
+    allowed_tools:
+      - httpx
   web.content_discovery:
     <<: *web_workflow
+    allowed_tools:
+      - httpx
   web.nuclei_scan:
     <<: *web_workflow
+    allowed_tools:
+      - nuclei
   web.specialist_test:
     <<: *web_workflow
+    allowed_tools:
+      - nmap
 
   # ── Local enumeration and privilege-escalation checks ───────────────
   postex.enum: &local_enum
@@ -278,44 +311,85 @@ capabilities:
     max_attempts: 3
     max_duration_seconds: 3600
     max_output_bytes: 50_000_000
+    allowed_tools:
+      - ssh
+      - impacket-wmiexec
   postex.linux.enum:
     <<: *local_enum
+    allowed_tools:
+      - ssh
   postex.linux.identity:
     <<: *local_enum
+    allowed_tools:
+      - ssh
   postex.windows.enum:
     <<: *local_enum
+    allowed_tools:
+      - impacket-wmiexec
   postex.windows.identity:
     <<: *local_enum
+    allowed_tools:
+      - impacket-wmiexec
   privesc.enum:
     <<: *local_enum
+    allowed_tools:
+      - ssh
   privesc.linux.sudo:
     <<: *local_enum
+    allowed_tools:
+      - ssh
   privesc.linux.suid:
     <<: *local_enum
+    allowed_tools:
+      - ssh
   privesc.linux.capabilities:
     <<: *local_enum
+    allowed_tools:
+      - ssh
   privesc.linux.scheduled_tasks:
     <<: *local_enum
+    allowed_tools:
+      - ssh
   privesc.linux.services:
     <<: *local_enum
+    allowed_tools:
+      - ssh
   privesc.linux.linpeas:
     <<: *local_enum
+    allowed_tools:
+      - ssh
   privesc.linux.pspy:
     <<: *local_enum
+    allowed_tools:
+      - ssh
   privesc.windows.token:
     <<: *local_enum
+    allowed_tools:
+      - impacket-wmiexec
   privesc.windows.services:
     <<: *local_enum
+    allowed_tools:
+      - impacket-wmiexec
   privesc.windows.scheduled_tasks:
     <<: *local_enum
+    allowed_tools:
+      - impacket-wmiexec
   privesc.windows.registry:
     <<: *local_enum
+    allowed_tools:
+      - impacket-wmiexec
   privesc.windows.winpeas:
     <<: *local_enum
+    allowed_tools:
+      - impacket-smbexec
   privesc.windows.privesccheck:
     <<: *local_enum
+    allowed_tools:
+      - impacket-wmiexec
   privesc.windows.seatbelt:
     <<: *local_enum
+    allowed_tools:
+      - impacket-smbexec
 
   # ── Active Directory discovery ──────────────────────────────────────
   ad.discovery: &ad_read
@@ -325,12 +399,22 @@ capabilities:
     max_attempts: 3
     max_duration_seconds: 3600
     max_output_bytes: 100_000_000
+    allowed_tools:
+      - nltest
   ad.enum:
     <<: *ad_read
+    allowed_tools:
+      - ldapsearch
+      - smbclient
+      - kerbrute
   ad.bloodhound:
     <<: *ad_read
+    allowed_tools:
+      - bloodhound-python
   ad.certipy_find:
     <<: *ad_read
+    allowed_tools:
+      - certipy
 
   # ── High-impact AD and pivot operations are never delegated ────────
   ad.password_spray: &high_impact_manual
@@ -341,24 +425,47 @@ capabilities:
     max_attempts: 3
     max_duration_seconds: 1800
     max_output_bytes: 50_000_000
+    allowed_tools:
+      - netexec
   ad.credential_dump:
     <<: *high_impact_manual
+    allowed_tools:
+      - impacket-secretsdump
   ad.ntlm_poisoning:
     <<: *high_impact_manual
+    allowed_tools:
+      - responder
   ad.ntlm_relay:
     <<: *high_impact_manual
+    allowed_tools:
+      - ntlmrelayx.py
   ad.ticket_manipulation:
     <<: *high_impact_manual
+    allowed_tools:
+      - impacket-ticketer
   ad.object_modification:
     <<: *high_impact_manual
+    allowed_tools:
+      - bloodyad
   ad.adcs_abuse:
     <<: *high_impact_manual
+    allowed_tools:
+      - certipy
   pivot.tunnel:
     <<: *high_impact_manual
+    allowed_tools:
+      - ligolo-proxy
+      - chisel
+      - ssh
+      - pkill
   pivot.route:
     <<: *high_impact_manual
+    allowed_tools:
+      - ip
   pivot.scan:
     <<: *high_impact_manual
+    allowed_tools:
+      - nmap
 
   # ── Evidence and cleanup ─────────────────────────────────────────────
   evidence.collect:

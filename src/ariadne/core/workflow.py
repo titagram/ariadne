@@ -263,6 +263,8 @@ class WorkflowCatalog(BaseModel):
         for playbook in self.playbooks.values():
             if not self._stage_matches(playbook, context):
                 continue
+            if not self._triggers_match(playbook, context):
+                continue
             if not self._evidence_met(playbook, context):
                 continue
             if not self._policy_allows(playbook, context):
@@ -280,8 +282,44 @@ class WorkflowCatalog(BaseModel):
         """Check that every required evidence type exists in observations."""
         if not playbook.required_evidence_types:
             return True
-        observed_types = {o.source for o in context.observations}
+        observed_types = {
+            value
+            for observation in context.observations
+            for value in (
+                observation.source,
+                str(observation.data.get("type", "")),
+            )
+            if value
+        }
         return playbook.required_evidence_types.issubset(observed_types)
+
+    @staticmethod
+    def _triggers_match(playbook: Playbook, context: WorkflowContext) -> bool:
+        """Match declared triggers against persisted, typed observations."""
+        if not playbook.triggers:
+            return True
+        for trigger in playbook.triggers:
+            values = set(trigger.types)
+            if trigger.kind == "engagement_state":
+                if context.state.value in values or (
+                    context.state.value == "environment_preflight"
+                    and "snapshot_locked" in values
+                ):
+                    return True
+                continue
+            for observation in context.observations:
+                data = observation.data
+                if trigger.kind == "observation_type":
+                    candidates = {observation.source, str(data.get("type", ""))}
+                elif trigger.kind == "service_type":
+                    candidates = {str(data.get("service", "")), str(data.get("type", ""))}
+                elif trigger.kind == "os_type":
+                    candidates = {str(data.get("os", "")), str(data.get("os_type", ""))}
+                else:
+                    continue
+                if values & candidates:
+                    return True
+        return False
 
     @staticmethod
     def _policy_allows(playbook: Playbook, context: WorkflowContext) -> bool:

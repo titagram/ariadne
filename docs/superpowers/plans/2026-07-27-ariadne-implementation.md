@@ -1,5 +1,10 @@
 # Ariadne Implementation Plan
 
+> Historical implementation baseline. The definitive July 29 decisions in the
+> current skill, architecture, and operator guide supersede references below
+> to per-plan controlled approvals, mandatory Docker, confirmation tokens, and
+> `observed_only` semantics for distinct lateral hosts.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build Ariadne as a native Hades plugin that conducts policy-bounded, evidence-driven penetration tests against explicitly authorized lab and CTF targets and produces both a technical walkthrough and a professional report.
