@@ -10,6 +10,7 @@ operations. Session identity always comes from trusted Hades context.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from inspect import isawaitable
 from typing import Any
 
 from pydantic import ValidationError
@@ -20,7 +21,7 @@ from ariadne.core.engagement import EngagementSnapshot, TargetSpec
 from ariadne.core.enums import AssetStatus, AutonomyMode, EngagementState
 from ariadne.core.errors import PolicyConfigurationError, WorkflowConfigurationError
 from ariadne.core.observations import Asset, Hypothesis, Observation
-from ariadne.core.planner import Planner
+from ariadne.core.planner import Plan, Planner
 from ariadne.core.policy import EffectivePolicy
 from ariadne.core.workflow import PlanningContext, WorkflowCatalog
 from ariadne.evidence.collector import EvidenceCollector
@@ -99,6 +100,73 @@ def _get_runtime(context: dict[str, Any]) -> Runtime:
             "No runtime available in handler context."
         )
     return runtime
+
+
+def _load_plan_consent_requester() -> Any | None:
+    """Load Hades' public, ContextVar-scoped elicitation API lazily."""
+    from importlib import import_module
+
+    try:
+        requester = import_module(
+            "tools.approval"
+        ).request_elicitation_consent
+    except (AttributeError, ImportError):
+        return None
+    return requester if callable(requester) else None
+
+
+async def _request_plan_consent(
+    requester: Any,
+    *,
+    plan: Plan,
+) -> tuple[bool | None, str]:
+    """Request one bounded user decision; ``None`` denotes cancellation."""
+    import json
+
+    actions = [
+        {"adapter": action.adapter, "operation": action.operation}
+        for action in plan.actions
+    ]
+    message = (
+        f"Authorize Ariadne plan {plan.plan_id[:8]} for target "
+        f"{plan.target.host}?"
+    )
+    description = json.dumps(
+        {
+            "plan_id": plan.plan_id,
+            "target": plan.target.host,
+            "hypothesis": plan.hypothesis[:500],
+            "capabilities": list(plan.capabilities),
+            "manual_capabilities": list(plan.manual_capabilities),
+            "approval_reasons": list(plan.approval_reasons),
+            "actions": actions,
+            "limits": plan.limits.model_dump(mode="json"),
+            "expires_at": plan.expires_at.isoformat(),
+        },
+        sort_keys=True,
+    )
+    try:
+        outcome = requester(
+            message=message,
+            description=description,
+            timeout_seconds=120,
+            surface="ariadne-plan",
+        )
+        if isawaitable(outcome):
+            outcome = await outcome
+    except TimeoutError:
+        return None, "cancelled"
+    except Exception:
+        return None, "unavailable"
+    if not isinstance(outcome, str):
+        return None, "invalid_response"
+    if outcome == "accept":
+        return True, "accepted"
+    if outcome == "decline":
+        return False, "declined"
+    if outcome == "cancel":
+        return None, "cancelled"
+    return None, "invalid_response"
 
 
 def _determine_engagement_state(
@@ -543,8 +611,8 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         else (
             f"Plan {plan.plan_id[:8]} proposed with {len(plan.actions)} action(s) "
             f"for target {plan.target.host}. "
-            f"Use /ariadne approve {plan.plan_id} to approve, "
-            f"then ariadne_execute_plan to run."
+            "Call ariadne_execute_plan; Hades will request trusted user "
+            "consent in the current UI before execution."
         )
     )
 
@@ -681,18 +749,18 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             "plan_id": plan_id,
         }
 
-    # 5. Check plan is approved
-    if not record.approved:
+    # 5. A rejection/revocation is terminal and always wins over approval.
+    if record.rejected:
         return {
-            "status": "error",
+            "status": "blocked",
             "message": (
-                f"Plan {plan_id[:8]} has not been approved yet. "
-                f"Use /ariadne approve {plan_id} first."
+                f"Plan {plan_id[:8]} was rejected or revoked and cannot execute. "
+                "Propose a new plan if the user wants to continue."
             ),
             "plan_id": plan_id,
         }
 
-    # 6. Check plan has not expired
+    # 6. Check plan has not expired before asking the user for consent.
     if cmd.is_plan_expired(plan_id):
         return {
             "status": "error",
@@ -700,7 +768,80 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             "plan_id": plan_id,
         }
 
-    # 7. Execute plan actions via registered adapters
+    # 7. Resolve pending approval in the trusted Hades UI.  This path is
+    # independent of model autonomy/--yolo and persists the decision first.
+    if not record.approved:
+        requester = context.get("plan_consent_requester")
+        if requester is None:
+            requester = _load_plan_consent_requester()
+        if requester is None or not callable(requester):
+            return {
+                "status": "blocked",
+                "message": (
+                    "Trusted Hades approval consent UI is unavailable; "
+                    "the pending plan was not executed."
+                ),
+                "plan_id": plan_id,
+            }
+        decision, reason = await _request_plan_consent(
+            requester,
+            plan=record.plan,
+        )
+        if decision is True:
+            response = cmd.approve_plan(
+                plan_id,
+                trusted_session_id=input_session_id,
+                decision_channel="hades_elicitation",
+            )
+            record = cmd.get_plan_record(plan_id)
+            if (
+                record is None
+                or not record.approved
+                or record.rejected
+            ):
+                return {
+                    "status": "blocked",
+                    "message": (
+                        "User consent was accepted but durable approval failed: "
+                        f"{response}"
+                    ),
+                    "plan_id": plan_id,
+                }
+        elif reason in {"declined", "cancelled"}:
+            response = cmd.reject_plan(
+                plan_id,
+                trusted_session_id=input_session_id,
+                decision_channel="hades_elicitation",
+                reason=f"user_{reason}",
+            )
+            record = cmd.get_plan_record(plan_id)
+            if record is None or not record.rejected:
+                return {
+                    "status": "blocked",
+                    "message": (
+                        f"Consent was {reason}; durable rejection failed: {response}"
+                    ),
+                    "plan_id": plan_id,
+                }
+            return {
+                "status": "blocked",
+                "message": (
+                    f"User consent was {reason}; plan {plan_id[:8]} is "
+                    "durably rejected and was not executed."
+                ),
+                "plan_id": plan_id,
+            }
+        else:
+            return {
+                "status": "blocked",
+                "message": (
+                    "Trusted Hades approval consent could not be obtained "
+                    f"({reason}); the plan was not executed."
+                ),
+                "plan_id": plan_id,
+            }
+
+    # 8. Execute plan actions via registered adapters
     registry = _get_adapter_registry(context)
     runtime = _get_runtime(context)
 

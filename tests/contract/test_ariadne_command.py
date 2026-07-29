@@ -91,4 +91,7 @@ class TestApprovalCommands:
         self,
         command: AriadneCommand,
     ) -> None:
-        assert "unknown" in command.handle("reject no-such-plan").lower()
+        assert "unknown" in command.handle(
+            "reject no-such-plan",
+            trusted_session_id="trusted-test-session",
+        ).lower()

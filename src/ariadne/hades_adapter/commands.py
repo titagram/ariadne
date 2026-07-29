@@ -28,6 +28,12 @@ from ariadne.hades_adapter.session import ChallengeLedger
 from ariadne.store.run_store import RunStore
 
 CURRENT_DISCLAIMER_VERSION = "2026-07-28"
+_DECISION_CHANNELS = frozenset({"hades_elicitation", "slash_command"})
+_REJECTION_REASONS = frozenset({
+    "explicit_user_rejection",
+    "user_cancelled",
+    "user_declined",
+})
 
 # ── Recognised commands and their argument counts ──────────────────────────
 
@@ -299,7 +305,10 @@ class AriadneCommand:
             )
 
         if result.command == "reject":
-            return self._handle_reject(result.args[0])
+            return self._handle_reject(
+                result.args[0],
+                trusted_session_id=trusted_session_id,
+            )
 
         if result.command == "abort":
             return self._handle_abort()
@@ -330,7 +339,23 @@ class AriadneCommand:
         *,
         trusted_session_id: str,
     ) -> str:
-        """Durably approve a plan using only trusted Hades session identity."""
+        """CLI fallback for a durable trusted-session approval."""
+        return self.approve_plan(
+            plan_id,
+            trusted_session_id=trusted_session_id,
+            decision_channel="slash_command",
+        )
+
+    def approve_plan(
+        self,
+        plan_id: str,
+        *,
+        trusted_session_id: str,
+        decision_channel: str,
+    ) -> str:
+        """Persist a pending-to-approved transition before mutating memory."""
+        if decision_channel not in _DECISION_CHANNELS:
+            return "Error: Untrusted plan approval decision channel."
         if not trusted_session_id:
             return "Error: A trusted Hades session identity is required for approval."
         record = self.get_plan_record(
@@ -378,6 +403,7 @@ class AriadneCommand:
                         "approval_correlation_id": record.approval_correlation_id,
                         "approval_state": "approved",
                         "approval_source": "user",
+                        "decision_channel": decision_channel,
                         "approved_at": approved_at.isoformat(),
                     },
                     timestamp=approved_at,
@@ -393,13 +419,90 @@ class AriadneCommand:
             f"Use ariadne_execute_plan to execute."
         )
 
-    def _handle_reject(self, plan_id: str) -> str:
-        """Reject a plan by id."""
-        record = self._plan_ledger.get(plan_id)
+    def _handle_reject(
+        self,
+        plan_id: str,
+        *,
+        trusted_session_id: str,
+    ) -> str:
+        """CLI fallback for durable rejection/revocation."""
+        return self.reject_plan(
+            plan_id,
+            trusted_session_id=trusted_session_id,
+            decision_channel="slash_command",
+            reason="explicit_user_rejection",
+        )
+
+    def reject_plan(
+        self,
+        plan_id: str,
+        *,
+        trusted_session_id: str,
+        decision_channel: str,
+        reason: str,
+    ) -> str:
+        """Durably reject or revoke a plan using trusted Hades identity."""
+        if (
+            decision_channel not in _DECISION_CHANNELS
+            or reason not in _REJECTION_REASONS
+        ):
+            return "Error: Untrusted plan rejection decision."
+        if not trusted_session_id:
+            return "Error: A trusted Hades session identity is required for rejection."
+        record = self.get_plan_record(
+            plan_id,
+            trusted_session_id=trusted_session_id,
+        )
         if record is None:
             return f"Error: Unknown plan: {plan_id!r}"
         if record.rejected:
             return f"Plan {plan_id!r} was already rejected."
+
+        binding = self.get_session_binding(trusted_session_id)
+        if (
+            binding is None
+            or binding.engagement_id is None
+            or binding.snapshot_hash != record.snapshot_hash
+        ):
+            return "Error: Plan is not bound to the active trusted Hades session."
+        handle = self.store.open(binding.engagement_id)
+        if handle is None:
+            return "Error: Engagement run is unavailable."
+
+        from ariadne.store.integrity import verify_run
+        from ariadne.store.run_store import Event
+
+        if not verify_run(handle.path).valid:
+            return "Error: Engagement event chain failed integrity verification."
+        if any(
+            event.get("event_type") == "plan_executed"
+            and event.get("payload", {}).get("plan_id") == plan_id
+            for event in self.store.read_events(handle)
+        ):
+            return "Error: An executed plan can no longer be revoked."
+        rejected_at = datetime.now(UTC)
+        try:
+            self.store.append_event(
+                handle,
+                Event(
+                    event_type="plan_rejected",
+                    payload={
+                        "plan_id": plan_id,
+                        "snapshot_hash": record.snapshot_hash,
+                        "trusted_session_id": trusted_session_id,
+                        "approval_correlation_id": record.approval_correlation_id,
+                        "approval_state": "rejected",
+                        "approval_source": "user",
+                        "decision_channel": decision_channel,
+                        "reason": reason,
+                        "rejected_at": rejected_at.isoformat(),
+                    },
+                    timestamp=rejected_at,
+                ),
+            )
+        except Exception as exc:
+            return f"Error: Could not persist plan rejection: {exc}"
+        record.approved = False
         record.rejected = True
         return f"Plan {plan_id!r} rejected."
 
@@ -530,8 +633,19 @@ class AriadneCommand:
             ):
                 return None
             if event_type == "plan_rejected":
-                if record.approved:
+                if record.rejected:
                     return None
+                try:
+                    datetime.fromisoformat(payload["rejected_at"])
+                except (KeyError, TypeError, ValueError):
+                    return None
+                if (
+                    payload.get("approval_source") != "user"
+                    or payload.get("decision_channel") not in _DECISION_CHANNELS
+                    or payload.get("reason") not in _REJECTION_REASONS
+                ):
+                    return None
+                record.approved = False
                 record.rejected = True
                 continue
             if record.rejected or record.approved:
@@ -544,7 +658,11 @@ class AriadneCommand:
                     or handle.snapshot.autonomy != AutonomyMode.FULL
                 ):
                     return None
-            elif source != "user":
+            elif (
+                source != "user"
+                or payload.get("decision_channel")
+                not in {None, *_DECISION_CHANNELS}
+            ):
                 return None
             try:
                 approved_at = datetime.fromisoformat(payload["approved_at"])
@@ -571,7 +689,7 @@ class AriadneCommand:
         record = self._plan_ledger.get(plan_id)
         if record is None:
             return False
-        return record.approved
+        return record.approved and not record.rejected
 
     def is_plan_expired(self, plan_id: str) -> bool:
         """Check whether a plan has expired (15 min TTL)."""

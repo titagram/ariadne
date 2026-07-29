@@ -144,29 +144,29 @@ PROPOSE_PLAN_SCHEMA = _build_schema(
     ProposePlanInput,
     "Propose a bounded action plan for the current engagement. Requires the "
     "snapshot hash from ariadne_prepare_engagement. Controlled and manual-only "
-    "plans require /ariadne approve; eligible full plans are durably "
-    "auto-approved.",
+    "plans receive trusted Hades UI consent during execution; eligible full "
+    "plans are durably auto-approved.",
 )
 
 # ── ariadne_execute_plan ────────────────────────────────────────────────
 
 
 class ExecutePlanInput(BaseModel):
-    """Execute an approved bounded action plan."""
+    """Execute a bounded plan, eliciting trusted consent when pending."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     plan_id: str = Field(
         ...,
-        description="The plan ID returned by ariadne_propose_plan after manual "
-        "approval or durable full-mode auto-approval.",
+        description="The plan ID returned by ariadne_propose_plan. Pending "
+        "plans trigger trusted Hades UI consent before execution.",
     )
 
 
 EXECUTE_PLAN_SCHEMA = _build_schema(
     ExecutePlanInput,
-    "Execute an approved bounded action plan. Requires the plan ID from "
-    "ariadne_propose_plan after manual or durable automatic approval.",
+    "Execute a bounded action plan. Pending plans require trusted Hades UI "
+    "consent in this tool turn; approved plans proceed without another prompt.",
 )
 
 # ── ariadne_render_report ───────────────────────────────────────────────

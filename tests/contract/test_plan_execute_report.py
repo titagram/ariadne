@@ -56,6 +56,18 @@ class FakeRuntime:
             stderr="",
         )
 
+
+class FakeConsent:
+    """Deterministic stand-in for Hades trusted elicitation UI."""
+
+    def __init__(self, result: str) -> None:
+        self.result = result
+        self.calls: list[dict[str, object]] = []
+
+    async def __call__(self, **kwargs: object) -> str:
+        self.calls.append(kwargs)
+        return self.result
+
 # ── Shared fixtures ────────────────────────────────────────────────────────────
 
 
@@ -445,6 +457,42 @@ class TestExecutePlanHandler:
         """The handle_execute_plan callable exists."""
         assert callable(handle_execute_plan)
 
+    @pytest.mark.parametrize(
+        ("outcome", "expected"),
+        [
+            ("accept", (True, "accepted")),
+            ("decline", (False, "declined")),
+            ("cancel", (None, "cancelled")),
+            ("unexpected", (None, "invalid_response")),
+        ],
+    )
+    async def test_hades_consent_outcomes_are_normalized_fail_closed(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        outcome: str,
+        expected: tuple[bool | None, str],
+    ) -> None:
+        from ariadne.hades_adapter import handlers
+
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "consent mapping"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        record = command.get_plan_record(proposed["plan_id"])
+        assert record is not None
+
+        assert await handlers._request_plan_consent(
+            FakeConsent(outcome),
+            plan=record.plan,
+        ) == expected
+
     async def test_rejects_no_active_engagement(
         self, command: AriadneCommand, session_id: str
     ) -> None:
@@ -483,8 +531,286 @@ class TestExecutePlanHandler:
             session_id=session_id,
             ariadne_command=command,
         )
-        assert result["status"] == "error", f"Expected error for unapproved plan, got {result}"
+        assert result["status"] == "blocked", (
+            f"Expected blocked for unapproved plan, got {result}"
+        )
         assert "approv" in result.get("message", "").lower()
+
+    async def test_trusted_elicitation_accept_persists_and_executes_without_slash(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A manual boundary is resolved inside the model-tool turn."""
+        from ariadne.hades_adapter import handlers
+
+        snapshot_hash = await _bind_engagement(command, session_id, autonomy="full")
+        real_policy = handlers._load_engagement_policy
+
+        def manual_policy(snapshot):
+            policy = real_policy(snapshot)
+            capabilities = dict(policy.capabilities)
+            capabilities["preflight.check"] = capabilities[
+                "preflight.check"
+            ].model_copy(update={"always_manual": True})
+            return policy.model_copy(update={"capabilities": capabilities})
+
+        monkeypatch.setattr(handlers, "_load_engagement_policy", manual_policy)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "manual boundary"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        consent = FakeConsent("accept")
+
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=command,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+            plan_consent_requester=consent,
+        )
+
+        assert proposed["requires_manual_approval"] is True
+        assert result["status"] in ("executed", "partial")
+        assert len(consent.calls) == 1
+        prompt = consent.calls[0]
+        assert prompt["surface"] == "ariadne-plan"
+        assert "10.10.10.10" in str(prompt["message"])
+        assert "preflight.check" in str(prompt["description"])
+        record = command.get_plan_record(proposed["plan_id"])
+        assert record is not None and record.approved and not record.rejected
+
+    @pytest.mark.parametrize(
+        ("decision", "label"),
+        [("decline", "declined"), ("cancel", "cancelled")],
+    )
+    async def test_elicitation_decline_or_cancel_is_durable_and_never_executes(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+        decision: str,
+        label: str,
+    ) -> None:
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": label},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        consent = FakeConsent(decision)
+
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=command,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+            plan_consent_requester=consent,
+        )
+
+        assert result["status"] == "blocked"
+        assert label in result["message"].lower()
+        assert fake_runtime.calls == 0
+        restarted = AriadneCommand(ChallengeLedger(), command.store)
+        record = restarted.get_plan_record(
+            proposed["plan_id"],
+            trusted_session_id=session_id,
+        )
+        assert record is not None and record.rejected and not record.approved
+
+    async def test_accepted_decision_is_recovered_without_second_elicitation(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+    ) -> None:
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "remember consent"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        accepted = FakeConsent("accept")
+        first = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=command,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+            plan_consent_requester=accepted,
+        )
+        restarted = AriadneCommand(ChallengeLedger(), command.store)
+        must_not_run = FakeConsent("decline")
+        second = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=restarted,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+            plan_consent_requester=must_not_run,
+        )
+
+        assert first["status"] in ("executed", "partial")
+        assert second["status"] in ("executed", "partial")
+        assert must_not_run.calls == []
+
+    async def test_approved_then_explicit_reject_is_irreversible_and_blocks(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+    ) -> None:
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "revoke"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        assert "approved" in command.handle(
+            f"approve {proposed['plan_id']}",
+            trusted_session_id=session_id,
+        ).lower()
+        assert "rejected" in command.handle(
+            f"reject {proposed['plan_id']}",
+            trusted_session_id=session_id,
+        ).lower()
+        assert "rejected" in command.handle(
+            f"approve {proposed['plan_id']}",
+            trusted_session_id=session_id,
+        ).lower()
+
+        restarted = AriadneCommand(ChallengeLedger(), command.store)
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=restarted,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+        )
+        assert result["status"] == "blocked"
+        assert fake_runtime.calls == 0
+
+    async def test_cross_session_reject_is_denied(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+    ) -> None:
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "owned"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        response = command.handle(
+            f"reject {proposed['plan_id']}",
+            trusted_session_id="other-session",
+        )
+        assert "unknown" in response.lower() or "different" in response.lower()
+        record = command.get_plan_record(proposed["plan_id"])
+        assert record is not None and not record.rejected
+
+    async def test_missing_elicitation_api_fails_closed_even_with_yolo_context(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from ariadne.hades_adapter import handlers
+
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "no api"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        monkeypatch.setattr(handlers, "_load_plan_consent_requester", lambda: None)
+
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=command,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+            yolo=True,
+        )
+
+        assert result["status"] == "blocked"
+        assert "consent" in result["message"].lower()
+        assert fake_runtime.calls == 0
+
+    async def test_yolo_context_still_calls_trusted_consent(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+    ) -> None:
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "yolo is irrelevant"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        consent = FakeConsent("unexpected")
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=command,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+            plan_consent_requester=consent,
+            yolo=True,
+        )
+        assert result["status"] == "blocked"
+        assert len(consent.calls) == 1
+        assert "invalid_response" in result["message"]
+        assert fake_runtime.calls == 0
 
     async def test_rejects_unknown_plan(
         self,
