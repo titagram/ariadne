@@ -73,7 +73,7 @@ class TestHttpxPlan:
             action("scan", ports=(80, 443)),
             context,
         )
-        assert spec.argv[0] == "httpx"
+        assert spec.argv[0] == "httpx-toolkit"
         # Should contain the target IP
         # Uses stdin to feed targets (safer than argv)
         assert any("-l" in arg for arg in spec.argv) or any(

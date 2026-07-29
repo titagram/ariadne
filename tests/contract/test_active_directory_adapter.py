@@ -68,8 +68,12 @@ class TestActiveDirectoryPlan:
         self, adapter: ActiveDirectoryAdapter, ad_context: AdapterContext
     ) -> None:
         spec = adapter.plan(action("domain_discovery"), ad_context)
-        argv_str = " ".join(spec.argv).lower()
-        assert "nltest" in argv_str or "dsgetdc" in argv_str
+        assert spec.argv == (
+            "impacket-lookupsid",
+            "-no-pass",
+            "192.168.1.10",
+            "500",
+        )
         assert spec.timeout_seconds <= 60
 
     def test_ldap_rootdse_plan(
@@ -92,8 +96,15 @@ class TestActiveDirectoryPlan:
         self, adapter: ActiveDirectoryAdapter, ad_context: AdapterContext
     ) -> None:
         spec = adapter.plan(action("kerberos_user_validation"), ad_context)
-        argv_str = " ".join(spec.argv).lower()
-        assert "kerbrute" in argv_str or "enum" in argv_str
+        assert spec.argv == (
+            "impacket-GetNPUsers",
+            "-no-pass",
+            "-dc-ip",
+            "192.168.1.10",
+            "-usersfile",
+            "/opt/tools/userlist.txt",
+            "contoso.local/",
+        )
         assert spec.timeout_seconds <= 300
 
     def test_bloodhound_collection_plan(
@@ -108,8 +119,7 @@ class TestActiveDirectoryPlan:
         self, adapter: ActiveDirectoryAdapter, ad_context: AdapterContext
     ) -> None:
         spec = adapter.plan(action("certipy_find"), ad_context)
-        argv_str = " ".join(spec.argv).lower()
-        assert "certipy" in argv_str
+        assert spec.argv[:2] == ("certipy-ad", "find")
         assert spec.timeout_seconds <= 120
 
     def test_certipy_find_is_separate_from_abuse(

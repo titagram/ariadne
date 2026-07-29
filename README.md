@@ -22,8 +22,7 @@ playbooks, typed tool adapters, evidence, and reporting.
 
 - **Hades** 0.17.0 or later (Hermes agent)
 - **Python** 3.11–3.13
-- **Docker**, only for a future Kali execution integration when isolation or a
-  specialist toolchain is required
+- **Docker**, only when Kali isolation or a specialist toolchain is selected
 - **Git** to clone the repository
 
 ### Install as a Hades plugin
@@ -54,13 +53,26 @@ hades plugins install file:///Users/gabriele/Dev/ariadne
 
 Ariadne's runtime selector prefers ordinary curated host tools and selects the
 official `kalilinux/kali-rolling` image only for specialist tooling, isolation,
-VPN/routing, or compatibility. The selector is implemented, but lifecycle and
-network execution for the Kali container are not yet wired into the Hades
-plugin; current bounded execution remains local.
+VPN/routing, missing curated tools, or compatibility. The Hades execution path
+starts the architecture-specific pinned Kali Compose service lazily. Research
+is routed per subprocess: ordinary available tools such as `curl` remain local,
+while missing SearchSploit or Metasploit executables use Kali.
+
+The derived `ariadne-kali` image starts from the minimal official base and
+installs only the packages declared in `containers/tool-manifest.yaml`. It does
+not install `kali-linux-headless`, desktop frontends, or unrelated Kali tool
+families. The manifest is the reviewable boundary for adding a curated tool;
+uncurated code still requires explicit approval.
 
 There is no VM fallback. If Docker is required but missing, Ariadne stops at a
-host-install boundary. It may offer package-manager installation where
-supported, but performs it only after specific user approval.
+typed `kali_runtime` boundary and never installs Docker implicitly.
+
+The engagement ledger and Kali root filesystem are read-only. Only
+`workspace/` (including the tool home) and `artifacts/` are writable and
+persistent; `/tmp` is an ephemeral bounded tmpfs. Before every Nuclei run,
+Ariadne verifies the container checkout commit, the mounted local index
+revision/digest, and that each selected template is unchanged from its pinned
+Git blob.
 
 ---
 
@@ -74,6 +86,22 @@ without contacting a target:
 ```
 
 There is currently no exposed `/ariadne doctor` command.
+
+## Vulnerability research and validation
+
+Research consumes a persisted service product/version/CPE fingerprint and
+queries SearchSploit, curated vendor advisories, NVD, CISA KEV, and Metasploit
+independently. A CVE remains a candidate unless authoritative version-range,
+CPE, or explicit affected-version evidence establishes applicability.
+Metasploit modules are correlated by CVE search and module metadata; search,
+`check`, and module use are separate stages. Module use additionally requires
+persisted proof that the exact module's `check` reported the exact target
+vulnerable.
+
+Nuclei never runs its default catalog. Ariadne selects a bounded set from the
+official ProjectDiscovery catalog pinned in
+`src/ariadne/catalog/nuclei/catalog.lock.yaml`, using validated CVEs and
+observed technologies.
 
 ---
 

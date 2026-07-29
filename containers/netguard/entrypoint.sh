@@ -66,3 +66,6 @@ $NFT add rule inet "$TABLE" output log prefix \"ARIADNE-DENY-OUT: \" group 0 dro
 
 # ── Default drop (already set by chain policy, but explicit never hurts) ──
 # Input, forward, and output chain policies are all "drop" from declaration above.
+
+# Keep the shared network namespace alive for Kali/ZAP after rules are loaded.
+exec tail -f /dev/null

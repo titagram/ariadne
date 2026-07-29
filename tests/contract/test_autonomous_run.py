@@ -69,8 +69,8 @@ class NucleiRuntime(DryRunRuntime):
         return ProcessResult(
             exit_code=0,
             stdout=(
-                '{"template-id":"tech-detect-apache","type":"http",'
-                '"info":{"name":"Apache Detection","severity":"info",'
+                '{"template-id":"CVE-2021-41773","type":"http",'
+                '"info":{"name":"Apache path traversal","severity":"high",'
                 '"author":"projectdiscovery"},"host":"192.0.2.10",'
                 '"matched-at":"https://192.0.2.10/"}\n'
             ),
@@ -98,6 +98,27 @@ class BuiltinProgressionRuntime(DryRunRuntime):
                     'product="Apache httpd" version="2.4.58"/>'
                     "</port></ports></host></nmaprun>"
                 ),
+                stderr="",
+            )
+        if spec.argv[0] == "searchsploit":
+            return ProcessResult(
+                exit_code=0,
+                stdout='{"RESULTS_EXPLOIT":[]}',
+                stderr="",
+            )
+        if spec.argv[0] == "curl":
+            if (
+                "services.nvd.nist.gov" in spec.argv[-1]
+                or "known_exploited_vulnerabilities" in spec.argv[-1]
+            ):
+                body = '{"vulnerabilities":[]}'
+            else:
+                body = "<html>No matching advisory</html>"
+            return ProcessResult(exit_code=0, stdout=body, stderr="")
+        if spec.argv[0] == "msfconsole":
+            return ProcessResult(
+                exit_code=0,
+                stdout="No matching modules",
                 stderr="",
             )
         raise AssertionError(f"Unexpected executable: {spec.argv[0]}")
@@ -159,9 +180,7 @@ def test_explicit_contract_exclusion_blocks_matching_playbook_only() -> None:
     )
 
     assert _exclusion_conflict(playbook, ()) is None
-    assert _exclusion_conflict(playbook, ("preflight.check",)) == (
-        "preflight.check"
-    )
+    assert _exclusion_conflict(playbook, ("preflight.check",)) == ("preflight.check")
 
     async def request_plan(self, plan: object) -> ConsentDecision:
         del plan
@@ -292,9 +311,7 @@ async def test_public_dry_run_reaches_both_offline_reports(tmp_path) -> None:
             session_id="dry-run-session",
         )
     )
-    result = json.loads(
-        await run({"max_steps": 3}, session_id="dry-run-session")
-    )
+    result = json.loads(await run({"max_steps": 3}, session_id="dry-run-session"))
 
     assert created["status"] == "active"
     assert result["status"] == "complete", result
@@ -302,9 +319,7 @@ async def test_public_dry_run_reaches_both_offline_reports(tmp_path) -> None:
     assert (tmp_path / "runs").is_dir()
     assert result["walkthrough_path"].endswith("walkthrough.md")
     assert result["professional_path"].endswith("professional.html")
-    assert (
-        tmp_path / "canonical-knowledge" / "tools" / "ping.md"
-    ).is_file()
+    assert (tmp_path / "canonical-knowledge" / "tools" / "ping.md").is_file()
 
 
 @pytest.mark.asyncio
@@ -392,9 +407,7 @@ async def test_run_returns_typed_pre_execution_boundaries(
             session_id=f"boundary-{adapter}",
         )
     )
-    result = json.loads(
-        await run({"max_steps": 1}, session_id=f"boundary-{adapter}")
-    )
+    result = json.loads(await run({"max_steps": 1}, session_id=f"boundary-{adapter}"))
 
     assert created["status"] == "active"
     assert result["status"] == "blocked"
@@ -471,9 +484,7 @@ async def test_post_execution_scope_candidate_persists_amendment_boundary(
         )
     )
 
-    result = json.loads(
-        await run({"max_steps": 1}, session_id="scope-candidate-session")
-    )
+    result = json.loads(await run({"max_steps": 1}, session_id="scope-candidate-session"))
 
     binding = services.command.get_session_binding("scope-candidate-session")
     assert binding is not None and binding.engagement_id is not None
@@ -488,7 +499,10 @@ async def test_post_execution_scope_candidate_persists_amendment_boundary(
     assert any(event["event_type"] == "scope_amendment_required" for event in events)
     assert runtime.calls == 1
     assert (
-        tmp_path / "canonical-knowledge" / "tools" / "httpx.md"
+        tmp_path
+        / "canonical-knowledge"
+        / "tools"
+        / "httpx-toolkit.md"
     ).is_file()
 
 
@@ -551,15 +565,13 @@ async def test_persisted_validated_research_injects_target_bound_nuclei_candidat
             session_id="validated-candidate-session",
         )
     )
-    binding = services.command.get_session_binding(
-        "validated-candidate-session"
-    )
+    binding = services.command.get_session_binding("validated-candidate-session")
     assert binding is not None and binding.engagement_id is not None
     handle = services.store.open(binding.engagement_id)
     assert handle is not None
     artifact = services.store.add_bytes(
         handle,
-        b"Apache 2.4 fingerprint and curated template match rationale",
+        b'{"candidate":"CVE-2021-41773","version":"2.4.49"}',
         ArtifactInput(
             media_type="text/plain",
             evidence_type="research_complete",
@@ -606,8 +618,7 @@ async def test_persisted_validated_research_injects_target_bound_nuclei_candidat
                 "issuer": "ariadne.evidence.findings.FindingService",
                 "validation_source": "FindingService.validate",
                 "provenance": (
-                    "https://github.com/projectdiscovery/"
-                    "nuclei-templates/tree/main/http/exposures"
+                    "https://github.com/projectdiscovery/nuclei-templates/tree/main/http/exposures"
                 ),
             },
             timestamp=datetime.now(UTC),
@@ -626,25 +637,49 @@ async def test_persisted_validated_research_injects_target_bound_nuclei_candidat
                 "evidence_type": "research_complete",
                 "execution_classification": "success",
                 "sha256": artifact.sha256,
-            },
-            timestamp=datetime.now(UTC),
-        ),
-    )
-    services.store.append_event(
-        handle,
-        Event(
-            event_type="finding_validated",
-            payload={
-                "finding_id": "candidate-validated-1",
-                "template_id": "tech-detect-apache",
-                "target": "192.0.2.10",
-                "evidence_id": "evidence-research-1",
-                "issuer": "ariadne.evidence.findings.FindingService",
-                "validation_source": "FindingService.validate",
-                "provenance": (
-                    "https://github.com/projectdiscovery/"
-                    "nuclei-templates/tree/main/http/technologies"
-                ),
+                "observation_data": {
+                    "type": "research_complete",
+                    "fingerprint": {
+                        "product": "Apache HTTP Server",
+                        "version": "2.4.49",
+                        "protocol": "http",
+                        "port": 80,
+                    },
+                    "candidates": [
+                        {
+                            "candidate_id": "research-41773",
+                            "cve_id": "CVE-2021-41773",
+                            "product": "Apache HTTP Server",
+                            "version": "2.4.49",
+                            "title": "Apache path traversal",
+                            "sources": [
+                                "local-searchsploit",
+                                "nvd",
+                            ],
+                            "source_urls": [
+                                "https://nvd.nist.gov/vuln/detail/CVE-2021-41773",
+                            ],
+                            "exploit_paths": [
+                                "exploits/multiple/webapps/50383.sh",
+                            ],
+                            "metasploit_modules": [],
+                            "check_supported": False,
+                            "compatible": True,
+                            "applicability_evidence": [
+                                "nvd-description:version=2.4.49",
+                            ],
+                            "validation_status": "validated",
+                            "evidence": [
+                                {
+                                    "source": "nvd",
+                                    "locator": ("https://nvd.nist.gov/vuln/detail/CVE-2021-41773"),
+                                    "sha256": "a" * 64,
+                                    "summary": "Version match",
+                                },
+                            ],
+                        },
+                    ],
+                },
             },
             timestamp=datetime.now(UTC),
         ),
@@ -669,17 +704,10 @@ async def test_persisted_validated_research_injects_target_bound_nuclei_candidat
         )
     )
 
-    assert candidates == [{
-        "candidate_id": "candidate-validated-1",
-        "template_id": "tech-detect-apache",
-        "target": "192.0.2.10",
-        "validation_status": "validated",
-        "evidence_id": "evidence-research-1",
-        "provenance": (
-            "https://github.com/projectdiscovery/"
-            "nuclei-templates/tree/main/http/technologies"
-        ),
-    }]
+    assert candidates[0]["candidate_id"] == "research-41773"
+    assert candidates[0]["cve_id"] == "CVE-2021-41773"
+    assert candidates[0]["target"] == "192.0.2.10"
+    assert candidates[0]["evidence_id"] == "evidence-research-1"
     assert executed["status"] == "executed", (
         executed,
         services.store.read_events(handle)[-1]["payload"].get("error"),
@@ -695,6 +723,7 @@ async def test_builtin_catalog_reaches_structured_research_boundary(
     registry = AdapterRegistry()
     registry.register("research", ResearchAdapter())
     registry.register("nmap", NmapAdapter())
+    registry.register("nuclei", NucleiAdapter())
     runtime = BuiltinProgressionRuntime()
     registry.default_runtime = runtime
     services = ServiceContainer(
@@ -728,9 +757,7 @@ async def test_builtin_catalog_reaches_structured_research_boundary(
             session_id="builtin-progression-session",
         )
     )
-    binding = services.command.get_session_binding(
-        "builtin-progression-session"
-    )
+    binding = services.command.get_session_binding("builtin-progression-session")
     assert binding is not None and binding.engagement_id is not None
     handle = services.store.open(binding.engagement_id)
     assert handle is not None
@@ -738,18 +765,25 @@ async def test_builtin_catalog_reaches_structured_research_boundary(
 
     assert created["status"] == "active"
     assert result["status"] == "blocked"
-    assert result["boundary"] == "missing_evidence"
-    assert runtime.calls == 4
+    assert result["boundary"] == "missing_validated_candidate", (
+        result,
+        [
+            event.get("payload", {}).get("error")
+            for event in events[-10:]
+            if event.get("payload", {}).get("error")
+        ],
+    )
+    assert runtime.calls == 9
     assert [
         event["payload"]["playbook_id"]
         for event in events
-        if event["event_type"] == "plan_executed"
-        and event["payload"]["status"] == "executed"
+        if event["event_type"] == "plan_executed" and event["payload"]["status"] == "executed"
     ] == [
         "engagement.preflight.v1",
         "network.tcp-discovery.v1",
         "network.service-fingerprint.v1",
         "service.protocol-routing.v1",
+        "research.service-vulnerability.v1",
     ]
     assert any(
         event["event_type"] == "evidence_collected"
@@ -791,9 +825,7 @@ async def test_proposal_follows_declared_next_playbooks(tmp_path) -> None:
     services = ServiceContainer(
         profile_name="next-playbook",
         store=RunStore(base_path=tmp_path),
-        catalog=WorkflowCatalog(
-            playbooks={item.id: item for item in (first, second, unrelated)}
-        ),
+        catalog=WorkflowCatalog(playbooks={item.id: item for item in (first, second, unrelated)}),
         adapter_registry=registry,
         consent_gateway=AcceptContract(),
     )
@@ -802,9 +834,12 @@ async def test_proposal_follows_declared_next_playbooks(tmp_path) -> None:
     created = json.loads(
         await prepare(
             {
-                "profile": "private-lab", "target_host": "192.0.2.10",
-                "objectives": ["proof"], "autonomy": "controlled",
-                "intensity": "normal", "exclusions": ["dos"],
+                "profile": "private-lab",
+                "target_host": "192.0.2.10",
+                "objectives": ["proof"],
+                "autonomy": "controlled",
+                "intensity": "normal",
+                "exclusions": ["dos"],
                 "time_window_minutes": 30,
             },
             session_id="next-playbook-session",

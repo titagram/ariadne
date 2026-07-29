@@ -6,14 +6,18 @@ dossier shape for the provenance-aware vulnerability research pipeline.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC
 from uuid import uuid4
 
 import pydantic
 import pytest
 
-from ariadne.adapters.base import AdapterContext
+from ariadne.adapters.base import AdapterContext, PlannedAction
+from ariadne.adapters.metasploit import MetasploitAdapter
+from ariadne.adapters.nuclei import NucleiAdapter
 from ariadne.adapters.research import ResearchPipeline
+from ariadne.core.engagement import TargetSpec
 from ariadne.core.research import (
     ConfirmationRequiredError,
     PocProvenance,
@@ -54,6 +58,77 @@ class _FakeRuntime:
             stderr="",
             status=ProcessStatus.COMPLETED,
         )
+
+
+class _StructuredResearchRuntime:
+    """Return realistic, source-specific output without network or tools."""
+
+    def __init__(
+        self,
+        *,
+        nvd_description: str = ("Apache HTTP Server 2.4.49 path traversal and RCE."),
+    ) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.nvd_description = nvd_description
+
+    async def run(self, spec: object) -> ProcessResult:
+        from ariadne.runtime.process import ProcessSpec
+
+        assert isinstance(spec, ProcessSpec)
+        self.calls.append(spec.argv)
+        if spec.argv[0] == "searchsploit":
+            return ProcessResult(
+                exit_code=0,
+                stdout=(
+                    '{"RESULTS_EXPLOIT":[{"Title":"Apache HTTP Server 2.4.49 '
+                    'Path Traversal","EDB-ID":"50383","Codes":"CVE-2021-41773",'
+                    '"Path":"exploits/multiple/webapps/50383.sh"}]}'
+                ),
+                stderr="",
+            )
+        if spec.argv[0] == "msfconsole":
+            if spec.argv[-1].startswith("info "):
+                return ProcessResult(
+                    exit_code=0,
+                    stdout=(
+                        "Name: Apache Normalization Path Traversal\n"
+                        "Module: exploit/multi/http/apache_normalize_path\n"
+                        "Check supported: Yes\n"
+                        "References:\n  CVE-2021-41773\n"
+                    ),
+                    stderr="",
+                )
+            return ProcessResult(
+                exit_code=0,
+                stdout=(
+                    "Matching Modules\n"
+                    "   #  Name                                      "
+                    "Disclosure Date  Rank       Check  Description\n"
+                    "   0  exploit/multi/http/apache_normalize_path  "
+                    "2021-10-05       excellent  Yes    "
+                    "Apache Normalization Path Traversal\n"
+                ),
+                stderr="",
+            )
+        if spec.argv[0] == "curl" and "httpd.apache.org" in spec.argv[-1]:
+            return ProcessResult(
+                exit_code=22,
+                stdout="",
+                stderr="vendor temporarily unavailable",
+            )
+        if spec.argv[0] == "curl" and "services.nvd.nist.gov" in spec.argv[-1]:
+            return ProcessResult(
+                exit_code=0,
+                stdout=(
+                    '{"vulnerabilities":[{"cve":{"id":"CVE-2021-41773",'
+                    '"descriptions":[{"lang":"en","value":'
+                    + json.dumps(self.nvd_description)
+                    + '}],"metrics":'
+                    '{"cvssMetricV31":[{"cvssData":{"baseScore":9.8}}]}}}]}'
+                ),
+                stderr="",
+            )
+        return ProcessResult(exit_code=0, stdout='{"vulnerabilities":[]}', stderr="")
 
 
 @pytest.fixture
@@ -137,6 +212,141 @@ class TestResearchOrderAndPrivacy:
         assert isinstance(dossier, ResearchDossier)
         assert len(dossier.entries) == 0
 
+    @pytest.mark.asyncio
+    async def test_sources_fail_independently_and_deduplicate_validated_candidate(
+        self,
+    ) -> None:
+        """A vendor outage cannot hide matching local, NVD, and MSF evidence."""
+        runtime = _StructuredResearchRuntime()
+        pipeline = ResearchPipeline(runtime=runtime)
+        fingerprint = ServiceFingerprint(
+            product="Apache HTTP Server",
+            version="2.4.49",
+            protocol="http",
+            port=80,
+            target_host="10.10.10.10",
+        )
+
+        dossier = await pipeline.investigate(fingerprint)
+
+        assert len(dossier.candidates) == 1
+        candidate = dossier.candidates[0]
+        assert candidate.cve_id == "CVE-2021-41773"
+        assert candidate.product == "Apache HTTP Server"
+        assert candidate.version == "2.4.49"
+        assert candidate.validation_status == "validated"
+        assert candidate.compatible is True
+        assert candidate.applicability_evidence == ("nvd-description:version=2.4.49",)
+        assert candidate.metasploit_modules == ("exploit/multi/http/apache_normalize_path",)
+        assert set(candidate.sources) == {
+            ResearchSource.LOCAL_SEARCHSPLOIT,
+            ResearchSource.NVD,
+            ResearchSource.METASPLOIT,
+        }
+        assert all(evidence.sha256 for evidence in candidate.evidence)
+        assert any("vendor" in limitation.lower() for limitation in dossier.source_limitations)
+        assert [call[0] for call in runtime.calls].count("msfconsole") == 2
+
+        operational_candidate = {
+            **candidate.model_dump(mode="json"),
+            "target": fingerprint.target_host,
+            "evidence_id": "persisted-research-evidence",
+            "provenance": candidate.source_urls[0],
+        }
+        adapter_context = AdapterContext(
+            target=TargetSpec(host=fingerprint.target_host),
+            snapshot_hash="a" * 64,
+            engagement_id=uuid4(),
+            adapter_name="dry-run",
+        )
+        nuclei_spec = NucleiAdapter().plan(
+            PlannedAction(
+                operation="scan",
+                inputs={
+                    "validated_candidates": [operational_candidate],
+                },
+            ),
+            adapter_context,
+        )
+        msf_spec = MetasploitAdapter().plan(
+            PlannedAction(
+                operation="check",
+                inputs={
+                    "module": candidate.metasploit_modules[0],
+                    "rhost": fingerprint.target_host,
+                    "rport": fingerprint.port,
+                    "validated_candidate": {
+                        **operational_candidate,
+                        "module": candidate.metasploit_modules[0],
+                    },
+                },
+            ),
+            adapter_context,
+        )
+
+        assert "CVE-2021-41773.yaml" in " ".join(nuclei_spec.argv)
+        assert msf_spec.argv[-1].endswith("check; exit")
+
+    @pytest.mark.asyncio
+    async def test_product_and_version_without_applicability_stays_candidate(
+        self,
+    ) -> None:
+        runtime = _StructuredResearchRuntime(
+            nvd_description="Apache HTTP Server path traversal advisory.",
+        )
+        dossier = await ResearchPipeline(runtime=runtime).investigate(
+            ServiceFingerprint(
+                product="Apache HTTP Server",
+                version="2.4.49",
+                protocol="http",
+                port=80,
+                target_host="10.10.10.10",
+            )
+        )
+
+        assert len(dossier.candidates) == 1
+        assert dossier.candidates[0].compatible is False
+        assert dossier.candidates[0].validation_status == "candidate"
+        assert dossier.candidates[0].applicability_evidence == ()
+
+    def test_observed_cpe_must_match_the_affected_nvd_range(self) -> None:
+        cve = {
+            "configurations": [
+                {
+                    "nodes": [
+                        {
+                            "cpeMatch": [
+                                {
+                                    "vulnerable": True,
+                                    "criteria": (
+                                        "cpe:2.3:a:apache:http_server:*:*:*:*:*:*:*:*"
+                                    ),
+                                    "versionStartIncluding": "2.4.49",
+                                    "versionEndExcluding": "2.4.50",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+        matching = ServiceFingerprint(
+            product="Apache HTTP Server",
+            version="2.4.49",
+            cpe="cpe:2.3:a:apache:http_server:2.4.49:*:*:*:*:*:*:*",
+            target_host="10.10.10.10",
+        )
+        other_product = matching.model_copy(
+            update={
+                "cpe": "cpe:2.3:a:apache:ofbiz:2.4.49:*:*:*:*:*:*:*",
+            }
+        )
+
+        assert ResearchPipeline._nvd_applicability(cve, matching, "") == (
+            "nvd-cpe:cpe:2.3:a:apache:http_server:*:*:*:*:*:*:*:*;version=2.4.49",
+        )
+        assert ResearchPipeline._nvd_applicability(cve, other_product, "") == ()
+
 
 # ── Dossier shape ─────────────────────────────────────────────────────────────
 
@@ -203,9 +413,7 @@ class TestPocProvenance:
     def test_provenance_requires_source_and_digest(self) -> None:
         p = PocProvenance(
             source_url="https://github.com/example/exploit",
-            retrieval_time=__import__("datetime").datetime.now(
-                __import__("datetime").timezone.utc
-            ),
+            retrieval_time=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
             file_digest="a" * 64,
         )
         assert p.source_url == "https://github.com/example/exploit"

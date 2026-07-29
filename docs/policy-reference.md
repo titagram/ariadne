@@ -142,7 +142,7 @@ HTTP fingerprinting, header analysis, and passive technology detection.
 | max_concurrency | 3 | (inherited) | (inherited) |
 | max_duration | 7200s | (inherited) | (inherited) |
 | max_output | 50 MB | (inherited) | (inherited) |
-| allowed_tools | curl, httpx, whatweb, nuclei | (inherited) | (inherited) |
+| allowed_tools | curl, httpx-toolkit, whatweb, nuclei | (inherited) | (inherited) |
 
 ---
 

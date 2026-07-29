@@ -37,7 +37,9 @@
   policy drift requires a new snapshot or explicit amendment.
 - HTB policy forbids denial of service, resource exhaustion, subnet scanning, and actions against other platform targets.
 - Docker is the only execution environment; there is no VM fallback.
-- The primary image is official `kalilinux/kali-rolling` with `kali-linux-headless`; ZAP runs in its official separate image.
+- The primary image derives from official `kalilinux/kali-rolling` and installs
+  only the curated `tool-manifest.yaml` packages; ZAP runs in its official
+  separate image.
 - No persistence, C2, automatic propagation, or uncontrolled resource-stress behavior is implemented in v1.
 - No shell interpolation is permitted: every executable action is an argument vector.
 - Every subprocess has a timeout, maximum output size, and process-tree termination path.
@@ -1319,9 +1321,9 @@ Expected: FAIL because the Compose file does not exist.
 
 Use build arguments `KALI_BASE_REF` and `ZAP_IMAGE_REF` populated only from
 `image-lock.yaml`. The lock records image, digest, platform, retrieval time,
-and upstream documentation URL. `Dockerfile` installs
-`kali-linux-headless` plus the exact packages in `tool-manifest.yaml`, clears
-APT lists, creates an unprivileged `ariadne` user, and contains no PoC download.
+and upstream documentation URL. `Dockerfile` installs only the exact curated
+packages in `tool-manifest.yaml`, without a bulk Kali metapackage, clears APT
+lists, creates an unprivileged `ariadne` user, and contains no PoC download.
 
 `netguard` owns `NET_ADMIN`; Kali and ZAP share its network namespace. Its
 entrypoint:

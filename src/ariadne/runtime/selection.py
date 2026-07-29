@@ -8,6 +8,10 @@ installation action occurs.
 from __future__ import annotations
 
 from enum import StrEnum
+from functools import lru_cache
+from pathlib import Path
+
+import yaml
 
 
 class RuntimeChoice(StrEnum):
@@ -30,6 +34,7 @@ def choose_runtime(
     capabilities: tuple[str, ...],
     *,
     local_tool_available: bool,
+    kali_tool_available: bool = False,
     requires_isolation: bool = False,
     requires_compatibility: bool = False,
     requires_vpn_or_routing: bool = False,
@@ -39,17 +44,24 @@ def choose_runtime(
     This function never installs or starts anything. A ``KALI`` result is only
     a proposal for the separately policy-gated container lifecycle.
     """
-    specialist = any(
-        capability.startswith(_SPECIALIST_PREFIXES)
-        for capability in capabilities
-    )
+    specialist = any(capability.startswith(_SPECIALIST_PREFIXES) for capability in capabilities)
     if (
         requires_isolation
         or requires_compatibility
         or requires_vpn_or_routing
         or (specialist and not local_tool_available)
     ):
-        return RuntimeChoice.KALI
+        return RuntimeChoice.KALI if kali_tool_available else RuntimeChoice.BLOCKED
     if local_tool_available:
         return RuntimeChoice.LOCAL
+    if kali_tool_available:
+        return RuntimeChoice.KALI
     return RuntimeChoice.BLOCKED
+
+
+@lru_cache(maxsize=1)
+def curated_kali_executables() -> frozenset[str]:
+    manifest = Path(__file__).resolve().parents[3] / "containers" / "tool-manifest.yaml"
+    payload = yaml.safe_load(manifest.read_text())
+    values = payload.get("executables", ()) if isinstance(payload, dict) else ()
+    return frozenset(str(value) for value in values if isinstance(value, str) and value.strip())

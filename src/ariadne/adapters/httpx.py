@@ -155,7 +155,7 @@ class HttpxAdapter:
         # - don't probe unrelated hostnames and don't follow redirects
         # - limited threads
         argv = [
-            "httpx",
+            "httpx-toolkit",
             "-l", "-",
             "-p", port_str,
             "-json",

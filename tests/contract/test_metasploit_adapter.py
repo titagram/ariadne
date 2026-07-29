@@ -7,7 +7,6 @@ framework adapter.
 
 from __future__ import annotations
 
-from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -34,15 +33,28 @@ def context() -> AdapterContext:
     )
 
 
-@pytest.fixture
-def run_dir(tmp_path: Path) -> Path:
-    d = tmp_path / "run"
-    d.mkdir(parents=True)
-    return d
-
-
 def action(operation: str, **inputs: object) -> PlannedAction:
     return PlannedAction(operation=operation, inputs=inputs)
+
+
+def validated_candidate(
+    *,
+    target: str = "10.10.10.10",
+    module: str = "exploit/multi/http/apache_normalize_path",
+) -> dict[str, object]:
+    return {
+        "candidate_id": "research-41773",
+        "cve_id": "CVE-2021-41773",
+        "product": "Apache HTTP Server",
+        "version": "2.4.49",
+        "target": target,
+        "validation_status": "validated",
+        "compatible": True,
+        "applicability_evidence": ["nvd-description:version=2.4.49"],
+        "module": module,
+        "evidence_id": "evidence-research-1",
+        "provenance": "https://nvd.nist.gov/vuln/detail/CVE-2021-41773",
+    }
 
 
 # ── Plan (command building) ───────────────────────────────────────────────────
@@ -61,101 +73,70 @@ class TestMetasploitPlan:
         assert "search" in argv_str.lower()
 
     def test_info_plan_includes_module(self, context: AdapterContext) -> None:
+        candidate = validated_candidate()
         spec = MetasploitAdapter().plan(
-            action("info", module="exploit/multi/http/apache_mod_cgi_bash_env_exec"),
+            action(
+                "info",
+                module=candidate["module"],
+                validated_candidate=candidate,
+            ),
             context,
         )
         argv_str = " ".join(spec.argv)
         assert "info" in argv_str.lower()
 
-    def test_check_plan_uses_resource_file(
-        self, context: AdapterContext, run_dir: Path
-    ) -> None:
+    def test_check_plan_is_explicit_and_target_bound(self, context: AdapterContext) -> None:
+        candidate = validated_candidate()
         spec = MetasploitAdapter().plan(
             action(
                 "check",
-                module="exploit/multi/http/apache_mod_cgi_bash_env_exec",
+                module=candidate["module"],
                 rhost="10.10.10.10",
                 rport=80,
-                run_dir=str(run_dir),
+                validated_candidate=candidate,
             ),
             context,
         )
-        assert "-r" in spec.argv or "-q" in spec.argv
-        # Resource file path should be inside run_dir
-        resource_arg = spec.argv[spec.argv.index("-r") + 1] if "-r" in spec.argv else ""
-        assert resource_arg
-        assert resource_arg.startswith(str(run_dir))
+        assert spec.argv[:3] == ("msfconsole", "-q", "-x")
+        assert "check" in spec.argv[-1]
+        assert "run" not in {item.strip() for item in spec.argv[-1].split(";")}
 
-    def test_run_module_requires_run_dir(
-        self, context: AdapterContext
-    ) -> None:
-        """run_module without a run_dir raises."""
-        with pytest.raises(AdapterError, match="run_dir"):
-            MetasploitAdapter().plan(
-                action(
-                    "run_module",
-                    module="exploit/multi/http/apache_mod_cgi_bash_env_exec",
-                    rhost="10.10.10.10",
-                    rport=80,
-                ),
-                context,
-            )
-
-    def test_run_module_rejects_semicolons_in_options(
-        self, context: AdapterContext, run_dir: Path
-    ) -> None:
+    def test_run_module_rejects_semicolons_in_options(self, context: AdapterContext) -> None:
         """Shell injection via semicolons in option values is rejected."""
+        candidate = validated_candidate()
         with pytest.raises(AdapterError, match="semicolon|newline|invalid"):
             MetasploitAdapter().plan(
                 action(
                     "run_module",
-                    module="exploit/multi/http/apache_mod_cgi_bash_env_exec",
+                    module=candidate["module"],
                     rhost="10.10.10.10;id",
-                    run_dir=str(run_dir),
+                    validated_candidate=candidate,
+                    check_status="vulnerable",
+                    check_evidence_id="evidence-msf-check-1",
                 ),
                 context,
             )
 
-    def test_run_module_rejects_newlines_in_options(
-        self, context: AdapterContext, run_dir: Path
-    ) -> None:
+    def test_run_module_rejects_newlines_in_options(self, context: AdapterContext) -> None:
+        candidate = validated_candidate()
         with pytest.raises(AdapterError, match="newline|invalid"):
             MetasploitAdapter().plan(
                 action(
                     "run_module",
-                    module="exploit/multi/http/apache_mod_cgi_bash_env_exec",
+                    module=candidate["module"],
                     rhost="10.10.10.10\nid",
-                    run_dir=str(run_dir),
+                    validated_candidate=candidate,
+                    check_status="vulnerable",
+                    check_evidence_id="evidence-msf-check-1",
                 ),
                 context,
             )
 
-    def test_run_module_rejects_outside_run_dir(
-        self, context: AdapterContext, tmp_path: Path
-    ) -> None:
-        """A resource-file path outside the allowed run directory is rejected."""
-        with pytest.raises(AdapterError, match="outside|run_dir"):
-            MetasploitAdapter().plan(
-                action(
-                    "run_module",
-                    module="exploit/multi/http/apache_mod_cgi_bash_env_exec",
-                    rhost="10.10.10.10",
-                    rport=80,
-                    run_dir=str(tmp_path / "other"),
-                ),
-                context,
-            )
-
-    def test_unknown_operation_raises(
-        self, context: AdapterContext
-    ) -> None:
+    def test_unknown_operation_raises(self, context: AdapterContext) -> None:
         with pytest.raises(AdapterError):
             MetasploitAdapter().plan(action("invalid_op"), context)
 
-    def test_all_operations_set_bounded_limits(
-        self, context: AdapterContext
-    ) -> None:
+    def test_all_operations_set_bounded_limits(self, context: AdapterContext) -> None:
         spec = MetasploitAdapter().plan(
             action("search", query="apache"),
             context,
@@ -163,12 +144,60 @@ class TestMetasploitPlan:
         assert 1 <= spec.timeout_seconds <= 3600
         assert spec.max_output_bytes >= 1024
 
-        spec = MetasploitAdapter().plan(
-            action("info", module="exploit/multi/http/apache_mod_cgi_bash_env_exec"),
+    def test_check_and_use_require_exact_validated_compatible_candidate(
+        self,
+        context: AdapterContext,
+    ) -> None:
+        candidate = validated_candidate()
+
+        check = MetasploitAdapter().plan(
+            action(
+                "check",
+                module=candidate["module"],
+                rhost="10.10.10.10",
+                rport=80,
+                validated_candidate=candidate,
+            ),
             context,
         )
-        assert 1 <= spec.timeout_seconds <= 3600
-        assert spec.max_output_bytes >= 1024
+        assert "check" in check.argv[-1]
+        assert "run" not in check.argv[-1].split(";")
+
+        with pytest.raises(AdapterError, match="validated|compatible|candidate"):
+            MetasploitAdapter().plan(
+                action(
+                    "check",
+                    module=candidate["module"],
+                    validated_candidate={
+                        **candidate,
+                        "target": "10.10.10.11",
+                    },
+                ),
+                context,
+            )
+
+        with pytest.raises(AdapterError, match="vulnerable|check"):
+            MetasploitAdapter().plan(
+                action(
+                    "run_module",
+                    module=candidate["module"],
+                    validated_candidate=candidate,
+                    check_status="unknown",
+                ),
+                context,
+            )
+
+        execute = MetasploitAdapter().plan(
+            action(
+                "run_module",
+                module=candidate["module"],
+                validated_candidate=candidate,
+                check_status="vulnerable",
+                check_evidence_id="evidence-msf-check-1",
+            ),
+            context,
+        )
+        assert "run" in {command.strip() for command in execute.argv[-1].split(";")}
 
 
 # ── Parse ─────────────────────────────────────────────────────────────────────

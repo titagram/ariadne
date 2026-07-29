@@ -1,13 +1,13 @@
 """Nuclei vulnerability-scanning adapter.
 
-Builds safe, bounded Nuclei command-lines using only allowlisted
-template IDs from the pinned tool manifest, and parses Nuclei JSONL
+Builds safe, bounded Nuclei command-lines using only templates selected from
+a locally indexed, commit-pinned official catalog, and parses Nuclei JSONL
 output into structured Observation objects.
 
 Safety invariants
 -----------------
-- Only template IDs and workflow IDs present in the pinned
-  ``tool-manifest.yaml`` are accepted.
+- Only catalog paths selected from observed technologies or validated CVEs
+  are accepted.
 - Arbitrary template directories (``template_dir``) are rejected
   via ``AdapterPolicyError``.
 - No shell interpolation: every argument is in the argv tuple.
@@ -19,6 +19,7 @@ Safety invariants
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from typing import ClassVar, cast
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -34,43 +35,39 @@ from ariadne.adapters.base import (
     Runtime,
     ToolProbe,
 )
+from ariadne.catalog.nuclei import (
+    NucleiCatalogError,
+    NucleiTemplateCatalog,
+)
 from ariadne.core.errors import AdapterPolicyError
 from ariadne.core.observations import Observation
 
-# Allowlisted template IDs that may be used in scan operations.
-# In a full deployment these are loaded from tool-manifest.yaml;
-# the static set below reflects the pinned template catalog for
-# local testing and CTF use.
-_ALLOWLISTED_TEMPLATES: frozenset = frozenset(
-    {
-        "tech-detect-apache",
-        "tech-detect-nginx",
-        "exposed-panel",
-        "misconfig-dir-listing",
-    }
-)
-
 _OPERATIONS: frozenset = frozenset({"scan"})
+
+
 def _positive_int(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, str)):
         raise AdapterError(f"Nuclei {label} must be a positive integer.")
     try:
         parsed = int(value)
     except ValueError as exc:
-        raise AdapterError(
-            f"Nuclei {label} must be a positive integer."
-        ) from exc
+        raise AdapterError(f"Nuclei {label} must be a positive integer.") from exc
     if parsed < 1:
         raise AdapterError(f"Nuclei {label} must be a positive integer.")
     return parsed
 
 
+@lru_cache(maxsize=1)
+def _default_catalog() -> NucleiTemplateCatalog:
+    return NucleiTemplateCatalog.load()
+
+
 def is_official_nuclei_template_provenance(value: str) -> bool:
-    """Accept only concrete files or directories in the curated GitHub repo."""
+    """Accept only a concrete file at the catalog's pinned official commit."""
     try:
         parsed = urlsplit(value)
-        port = parsed.port
-    except ValueError:
+        revision = _default_catalog().revision
+    except (ValueError, NucleiCatalogError, OSError):
         return False
     segments = parsed.path.split("/")
     return (
@@ -78,23 +75,29 @@ def is_official_nuclei_template_provenance(value: str) -> bool:
         and parsed.hostname == "github.com"
         and parsed.username is None
         and parsed.password is None
-        and port is None
-        and len(segments) >= 6
-        and segments[1:3] == ["projectdiscovery", "nuclei-templates"]
-        and segments[3] in {"blob", "tree"}
-        and bool(segments[4])
+        and parsed.port in {None, 443}
+        and len(segments) >= 7
+        and segments[1:4] == ["projectdiscovery", "nuclei-templates", "blob"]
+        and segments[4] == revision
         and all(segment not in {"", ".", ".."} for segment in segments[5:])
+        and segments[-1].endswith(".yaml")
     )
 
 
 class NucleiAdapter:
     """ToolAdapter for ProjectDiscovery Nuclei template-based scanning.
 
-    Supports ``scan`` operations with exactly allowlisted template IDs.
+    Supports ``scan`` operations with catalog-selected template paths.
     Rejects unapproved template directories via policy error.
     """
 
     name: ClassVar[str] = "nuclei"
+
+    def __init__(
+        self,
+        catalog: NucleiTemplateCatalog | None = None,
+    ) -> None:
+        self._catalog = catalog or _default_catalog()
 
     # ── ToolAdapter protocol ─────────────────────────────────────────────
 
@@ -109,8 +112,7 @@ class NucleiAdapter:
         op = action.operation
         if op not in _OPERATIONS:
             raise AdapterError(
-                f"Unknown Nuclei operation: {op!r}. "
-                f"Supported: {', '.join(sorted(_OPERATIONS))}"
+                f"Unknown Nuclei operation: {op!r}. Supported: {', '.join(sorted(_OPERATIONS))}"
             )
 
         inputs = action.inputs
@@ -126,7 +128,7 @@ class NucleiAdapter:
 
         target = str(context.target.host)
 
-        # Build argv with allowlisted templates
+        # Build argv with catalog-selected templates
         argv: list[str] = ["nuclei"]
 
         raw_candidates = inputs.get("validated_candidates", ())
@@ -135,12 +137,17 @@ class NucleiAdapter:
                 "Nuclei scan requires a validated template candidate; "
                 "do not run the default template set."
             )
-        template_ids: list[str] = []
+        cve_ids: list[str] = []
+        technologies: list[str] = []
         required_candidate_keys = {
             "candidate_id",
-            "template_id",
+            "cve_id",
+            "product",
+            "version",
             "target",
             "validation_status",
+            "compatible",
+            "applicability_evidence",
             "evidence_id",
             "provenance",
         }
@@ -152,13 +159,19 @@ class NucleiAdapter:
                 )
             candidate_map = cast(dict[str, object], candidate)
             if (
-                set(candidate_map) != required_candidate_keys
+                not required_candidate_keys.issubset(candidate_map)
                 or candidate_map.get("validation_status") != "validated"
+                or candidate_map.get("compatible") is not True
                 or not all(
                     isinstance(candidate_map.get(key), str)
                     and bool(str(candidate_map.get(key)).strip())
-                    for key in required_candidate_keys
+                    for key in required_candidate_keys - {"compatible", "applicability_evidence"}
                 )
+                or not isinstance(
+                    candidate_map.get("applicability_evidence"),
+                    (list, tuple),
+                )
+                or not candidate_map["applicability_evidence"]
             ):
                 raise AdapterPolicyError(
                     "Nuclei scan requires a structured validated template "
@@ -166,26 +179,33 @@ class NucleiAdapter:
                 )
             if candidate_map["target"] != target:
                 raise AdapterPolicyError(
-                    "Nuclei validated template candidate is not tied to "
-                    "the current target."
+                    "Nuclei validated template candidate is not tied to the current target."
                 )
-            provenance = str(candidate_map["provenance"])
-            if not is_official_nuclei_template_provenance(provenance):
-                raise AdapterPolicyError(
-                    "Nuclei validated template candidate does not cite the "
-                    "curated ProjectDiscovery template repository."
-                )
-            tid = str(candidate_map["template_id"])
-            if tid not in _ALLOWLISTED_TEMPLATES:
-                raise AdapterPolicyError(
-                    f"Template {tid!r} is not in the allowlisted "
-                    f"template catalog. Allowed: {sorted(_ALLOWLISTED_TEMPLATES)}"
-                )
-            if tid not in template_ids:
-                template_ids.append(tid)
-        argv.extend(["-t"])
-        for tid in template_ids:
-            argv.append(str(tid))
+            cve_ids.append(str(candidate_map["cve_id"]))
+            technologies.append(str(candidate_map["product"]))
+        raw_technologies = inputs.get("observed_technologies", ())
+        if not isinstance(raw_technologies, (list, tuple)) or not all(
+            isinstance(item, str) and item.strip() for item in raw_technologies
+        ):
+            raise AdapterPolicyError(
+                "Nuclei observed_technologies must contain evidence-derived names"
+            )
+        technologies.extend(cast(tuple[str, ...], tuple(raw_technologies)))
+        try:
+            templates = self._catalog.select(
+                cve_ids=tuple(cve_ids),
+                technologies=tuple(technologies),
+                maximum=20,
+            )
+        except NucleiCatalogError as exc:
+            raise AdapterPolicyError(str(exc)) from exc
+        if not templates:
+            raise AdapterPolicyError(
+                "No pinned official Nuclei template matches the validated "
+                "CVE or observed technologies."
+            )
+        for template in templates:
+            argv.extend(["-t", self._catalog.container_path(template)])
 
         # Target
         argv.extend(["-target", target])

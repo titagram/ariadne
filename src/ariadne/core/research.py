@@ -16,7 +16,9 @@ from __future__ import annotations
 import stat
 from datetime import datetime
 from enum import StrEnum
+from hashlib import sha256
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -84,6 +86,55 @@ class CveReference(BaseModel):
     source: ResearchSource
 
 
+class ResearchEvidence(BaseModel):
+    """Immutable provenance record for one source result."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source: ResearchSource
+    locator: str
+    sha256: str
+    summary: str = ""
+
+    @classmethod
+    def from_text(
+        cls,
+        *,
+        source: ResearchSource,
+        locator: str,
+        text: str,
+        summary: str = "",
+    ) -> ResearchEvidence:
+        return cls(
+            source=source,
+            locator=locator,
+            sha256=sha256(text.encode("utf-8")).hexdigest(),
+            summary=summary,
+        )
+
+
+class ResearchCandidate(BaseModel):
+    """Deduplicated vulnerability/exploit candidate for one fingerprint."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    candidate_id: str
+    product: str
+    version: str | None = None
+    cve_id: str
+    title: str = ""
+    cvss_score: float | None = None
+    sources: tuple[ResearchSource, ...]
+    source_urls: tuple[str, ...] = ()
+    exploit_paths: tuple[str, ...] = ()
+    metasploit_modules: tuple[str, ...] = ()
+    check_supported: bool = False
+    compatible: bool = False
+    applicability_evidence: tuple[str, ...] = ()
+    validation_status: Literal["candidate", "validated"] = "candidate"
+    evidence: tuple[ResearchEvidence, ...] = ()
+
+
 # ── Research dossier ──────────────────────────────────────────────────────────
 
 
@@ -99,6 +150,7 @@ class ResearchDossier(BaseModel):
     fingerprint: ServiceFingerprint
     sources_attempted: tuple[ResearchSource, ...] = ()
     entries: tuple[CveReference, ...] = ()
+    candidates: tuple[ResearchCandidate, ...] = ()
     source_limitations: tuple[str, ...] = ()
     network_queries: tuple[str, ...] = ()
 
@@ -199,9 +251,7 @@ def quarantine_poc(
     resolved = storage_dir.resolve()
     # Basic safety: reject paths that escape via parent traversal
     if ".." in str(storage_dir):
-        raise ValueError(
-            f"Storage path contains parent traversal: {storage_dir!r}"
-        )
+        raise ValueError(f"Storage path contains parent traversal: {storage_dir!r}")
     resolved.mkdir(parents=True, exist_ok=True)
     dst = resolved / name
     dst.write_bytes(data)

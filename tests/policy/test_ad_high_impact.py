@@ -111,4 +111,17 @@ class TestAdHighImpactDeny:
         """certipy_find is discovery, not abuse, so it never requires ad.adcs_abuse."""
         ctx = _ctx()
         spec = adapter.plan(action("certipy_find"), ctx)
-        assert spec is not None
+        assert spec.argv[:2] == ("certipy-ad", "find")
+
+    def test_ntlm_relay_uses_the_curated_impacket_executable(
+        self, adapter: ActiveDirectoryAdapter
+    ) -> None:
+        ctx = _ctx(extra_env={"CAPABILITY_ad_ntlm_relay": "allow"})
+
+        spec = adapter.plan(action("ntlm_relay"), ctx)
+
+        assert spec.argv == (
+            "impacket-ntlmrelayx",
+            "-t",
+            "smb://192.168.1.10",
+        )

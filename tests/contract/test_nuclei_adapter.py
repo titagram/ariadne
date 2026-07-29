@@ -51,18 +51,19 @@ def action(operation: str, **inputs: object) -> PlannedAction:
 def validated_candidate(
     *,
     target: str = "10.10.10.10",
-    template_id: str = "tech-detect-apache",
-) -> dict[str, str]:
+    cve_id: str = "CVE-2021-41773",
+) -> dict[str, object]:
     return {
-        "candidate_id": "candidate-1",
-        "template_id": template_id,
+        "candidate_id": "research-41773",
+        "cve_id": cve_id,
+        "product": "Apache HTTP Server",
+        "version": "2.4.49",
         "target": target,
         "validation_status": "validated",
+        "compatible": True,
+        "applicability_evidence": ["nvd-description:version=2.4.49"],
         "evidence_id": "evidence-1",
-        "provenance": (
-            "https://github.com/projectdiscovery/"
-            "nuclei-templates/tree/main/http/technologies"
-        ),
+        "provenance": "https://nvd.nist.gov/vuln/detail/CVE-2021-41773",
     }
 
 
@@ -81,26 +82,20 @@ class TestNucleiPlan:
         argv_str = " ".join(spec.argv)
         assert "10.10.10.10" in argv_str
 
-    def test_scan_plan_includes_allowlisted_template_ids(
-        self, context: AdapterContext
-    ) -> None:
+    def test_scan_plan_selects_exact_cve_from_pinned_catalog(self, context: AdapterContext) -> None:
         spec = NucleiAdapter().plan(
             action(
                 "scan",
-                validated_candidates=[
-                    validated_candidate(template_id="tech-detect-apache"),
-                    validated_candidate(template_id="exposed-panel"),
-                ],
+                validated_candidates=[validated_candidate()],
             ),
             context,
         )
         argv_str = " ".join(spec.argv)
-        assert "tech-detect-apache" in argv_str
-        assert "exposed-panel" in argv_str
+        assert "/opt/nuclei-templates/http/cves/2021/CVE-2021-41773.yaml" in argv_str
+        assert "apache-answer" not in argv_str
+        assert "main/http" not in argv_str
 
-    def test_rejects_unlocked_template_directory(
-        self, context: AdapterContext
-    ) -> None:
+    def test_rejects_unlocked_template_directory(self, context: AdapterContext) -> None:
         """An arbitrary template directory outside the pinned catalog is rejected."""
         with pytest.raises(AdapterPolicyError):
             NucleiAdapter().plan(
@@ -112,15 +107,11 @@ class TestNucleiPlan:
         with pytest.raises(AdapterError):
             NucleiAdapter().plan(action("unknown_op"), context)
 
-    def test_scan_requires_validated_template_candidates(
-        self, context: AdapterContext
-    ) -> None:
+    def test_scan_requires_validated_template_candidates(self, context: AdapterContext) -> None:
         with pytest.raises(AdapterPolicyError, match="validated template"):
             NucleiAdapter().plan(action("scan"), context)
 
-    def test_scan_rejects_candidate_for_another_target(
-        self, context: AdapterContext
-    ) -> None:
+    def test_scan_rejects_candidate_for_another_target(self, context: AdapterContext) -> None:
         with pytest.raises(AdapterPolicyError, match="current target"):
             NucleiAdapter().plan(
                 action(
@@ -132,9 +123,7 @@ class TestNucleiPlan:
                 context,
             )
 
-    def test_sets_bounded_timeout_and_output(
-        self, context: AdapterContext
-    ) -> None:
+    def test_sets_bounded_timeout_and_output(self, context: AdapterContext) -> None:
         spec = NucleiAdapter().plan(
             action("scan", validated_candidates=[validated_candidate()]),
             context,

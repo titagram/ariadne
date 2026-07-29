@@ -100,9 +100,7 @@ def _trusted_session_id_from_hades() -> str:
 
     identities: list[str] = []
     try:
-        get_current_session_key = import_module(
-            "tools.approval"
-        ).get_current_session_key
+        get_current_session_key = import_module("tools.approval").get_current_session_key
         primary = get_current_session_key(default="")
         if isinstance(primary, str) and primary.strip():
             identities.append(primary.strip())
@@ -110,9 +108,7 @@ def _trusted_session_id_from_hades() -> str:
         pass
 
     try:
-        get_session_env = import_module(
-            "gateway.session_context"
-        ).get_session_env
+        get_session_env = import_module("gateway.session_context").get_session_env
         secondary = get_session_env("HERMES_SESSION_ID", "")
         if isinstance(secondary, str) and secondary.strip():
             identities.append(secondary.strip())
@@ -146,6 +142,7 @@ def _handler_for(tool_name: str, services: ServiceContainer) -> object:
 
     async def wrapped(args: dict, **context: object) -> str:
         import json
+
         # Reserved dependencies are composition-owned and non-overridable.
         context["ariadne_command"] = services.command
         context["planner"] = services.planner
@@ -153,11 +150,10 @@ def _handler_for(tool_name: str, services: ServiceContainer) -> object:
         context["adapter_registry"] = services.adapter_registry
         context["runtime"] = services.adapter_registry.default_runtime
         context["consent_gateway"] = services.consent_gateway
-        context["execution_contract_registry"] = (
-            services.execution_contract_registry
-        )
+        context["execution_contract_registry"] = services.execution_contract_registry
         context["execution_coordinator"] = services.execution_coordinator
         context["tool_card_verifier"] = services.tool_card_verifier
+        context["kali_runtime_factory"] = services.kali_runtime_factory
         result = await raw(args, **context)
         return json.dumps(result)
 

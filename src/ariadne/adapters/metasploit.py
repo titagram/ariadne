@@ -9,14 +9,13 @@ safety: no shell invocation, no semicolons/newlines in option values.
 - an exact module path and compatible fingerprint
 - an eligible capability in the engagement policy
 - a bounded action plan with expected effect and cleanup
-- a resource file generated inside the designated run directory
+- a persisted positive ``check`` result for the exact target and module
 """
 
 from __future__ import annotations
 
 import re
-from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, cast
 from uuid import uuid4
 
 from ariadne.adapters.base import (
@@ -41,9 +40,7 @@ _OPERATIONS: frozenset = frozenset({"search", "info", "check", "run_module"})
 _INVALID_OPTION_RE = re.compile(r"[;\n\r]")
 
 # Regex for a valid MSF module path
-_VALID_MODULE_RE = re.compile(
-    r"^[a-z][a-z0-9_]+/[a-z][a-z0-9_/]*[a-z0-9_]$"
-)
+_VALID_MODULE_RE = re.compile(r"^[a-z][a-z0-9_]+/[a-z][a-z0-9_/]*[a-z0-9_]$")
 
 
 def _validate_option(value: str, field_name: str) -> str:
@@ -61,52 +58,72 @@ def _validate_option(value: str, field_name: str) -> str:
     return value
 
 
-def _build_resource_file(
-    run_dir: Path,
-    lines: list[str],
-) -> str:
-    """Generate a resource-file path and write validated commands.
-
-    Parameters
-    ----------
-    run_dir:
-        The designated run directory (must exist and be writable).
-    lines:
-        Validated msfconsole commands to write into the resource file.
-
-    Returns
-    -------
-    str
-        The absolute path of the generated resource file.
-
-    Raises
-    ------
-    AdapterError
-        If *run_dir* does not exist or the resolved path escapes it.
-    """
-    resolved_run_dir = run_dir.resolve()
-    if not resolved_run_dir.is_dir():
-        raise AdapterError(
-            f"Run directory {resolved_run_dir} is outside the designated "
-            f"run_dir or does not exist. Resource files must be inside "
-            f"the engagement run directory."
+def _validated_candidate(
+    inputs: dict[str, object],
+    context: AdapterContext,
+    *,
+    require_check: bool = False,
+) -> dict[str, object]:
+    candidate = inputs.get("validated_candidate")
+    if not isinstance(candidate, dict):
+        raise AdapterError("Metasploit verification/use requires a validated candidate")
+    candidate_map = cast(dict[str, object], candidate)
+    required = {
+        "candidate_id",
+        "cve_id",
+        "product",
+        "version",
+        "target",
+        "validation_status",
+        "compatible",
+        "applicability_evidence",
+        "module",
+        "evidence_id",
+        "provenance",
+    }
+    if (
+        not required.issubset(candidate_map)
+        or candidate_map.get("validation_status") != "validated"
+        or candidate_map.get("compatible") is not True
+        or candidate_map.get("target") != context.target.host
+    ):
+        raise AdapterError("Metasploit candidate is not validated, compatible, and target-bound")
+    applicability = candidate_map.get("applicability_evidence")
+    if (
+        not isinstance(applicability, (list, tuple))
+        or not applicability
+        or not all(isinstance(item, str) and item.strip() for item in applicability)
+    ):
+        raise AdapterError("Metasploit candidate has no version/CPE applicability evidence")
+    module = candidate_map.get("module")
+    if (
+        not isinstance(module, str)
+        or _VALID_MODULE_RE.fullmatch(module) is None
+        or inputs.get("module") != module
+    ):
+        raise AdapterError("Metasploit module must exactly match the validated candidate")
+    if not all(
+        isinstance(candidate_map.get(field), str) and str(candidate_map[field]).strip()
+        for field in (
+            "candidate_id",
+            "cve_id",
+            "product",
+            "version",
+            "target",
+            "evidence_id",
+            "provenance",
         )
-
-    resource_path = resolved_run_dir / f"msf-{uuid4().hex[:12]}.rc"
-
-    # Verify the resolved path stays inside run_dir (defence in depth)
-    try:
-        resolved_resource = resource_path.resolve()
-        resolved_resource.relative_to(resolved_run_dir)
-    except ValueError:
-            raise AdapterError(
-                f"Resource file path {resource_path} escapes the "
-                f"designated run directory {resolved_run_dir}"
-            ) from None
-
-    content = "\n".join(lines) + "\n"
-    resolved_resource.write_text(content)
-    return str(resolved_resource)
+    ):
+        raise AdapterError("Metasploit candidate provenance is incomplete")
+    if require_check and (
+        inputs.get("check_status") != "vulnerable"
+        or not isinstance(inputs.get("check_evidence_id"), str)
+        or not str(inputs["check_evidence_id"]).strip()
+    ):
+        raise AdapterError(
+            "Metasploit use requires a vulnerable check and persisted check evidence"
+        )
+    return candidate_map
 
 
 # ── Adapter ───────────────────────────────────────────────────────────────────
@@ -116,9 +133,9 @@ class MetasploitAdapter:
     """ToolAdapter for the Metasploit Framework via ``msfconsole``.
 
     Supports ``search``, ``info``, ``check``, and ``run_module``
-    operations.  Only ``search`` and ``info`` are safe to use without
-    a full action plan; ``check`` and ``run_module`` require a resource
-    file inside the run directory.
+    operations. ``search`` discovers modules; ``info``/``check`` require a
+    validated compatible research candidate; ``run_module`` additionally
+    requires persisted evidence that ``check`` reported vulnerable.
     """
 
     name: ClassVar[str] = "metasploit"
@@ -138,8 +155,7 @@ class MetasploitAdapter:
         op = action.operation
         if op not in _OPERATIONS:
             raise AdapterError(
-                f"Unknown Metasploit operation: {op!r}. "
-                f"Supported: {', '.join(sorted(_OPERATIONS))}"
+                f"Unknown Metasploit operation: {op!r}. Supported: {', '.join(sorted(_OPERATIONS))}"
             )
 
         inputs = action.inputs
@@ -178,9 +194,9 @@ class MetasploitAdapter:
         context: AdapterContext,
         argv: list[str],
     ) -> ProcessSpec:
+        _validated_candidate(inputs, context)
         module = inputs.get("module", "")
-        if not isinstance(module, str) or not module.strip():
-            raise AdapterError("Info operation requires a 'module' path")
+        assert isinstance(module, str)
         argv.extend(["-x", f"info {module}; exit"])
         return ProcessSpec(
             argv=tuple(argv),
@@ -194,19 +210,15 @@ class MetasploitAdapter:
         context: AdapterContext,
         argv: list[str],
     ) -> ProcessSpec:
+        _validated_candidate(inputs, context)
         module = inputs.get("module", "")
-        if not isinstance(module, str) or not module.strip():
-            raise AdapterError("Check operation requires a 'module' path")
-
-        run_dir_str = inputs.get("run_dir")
-        if not run_dir_str or not isinstance(run_dir_str, str):
-            raise AdapterError(
-                "Check operation requires a 'run_dir' path for the resource file"
-            )
-        run_dir = Path(run_dir_str)
+        assert isinstance(module, str)
 
         rhost = _validate_option(str(inputs.get("rhost", str(context.target.host))), "rhost")
+        if rhost != context.target.host:
+            raise AdapterError("Metasploit RHOSTS must equal the engagement target")
         rport = str(inputs.get("rport", ""))
+        _validate_option(rport, "rport")
 
         rc_lines = [f"use {module}"]
         rc_lines.append(f"set RHOSTS {rhost}")
@@ -215,8 +227,7 @@ class MetasploitAdapter:
         rc_lines.append("check")
         rc_lines.append("exit")
 
-        resource_path = _build_resource_file(run_dir, rc_lines)
-        argv.extend(["-r", resource_path])
+        argv.extend(["-x", "; ".join(rc_lines)])
         return ProcessSpec(
             argv=tuple(argv),
             timeout_seconds=300,
@@ -229,21 +240,16 @@ class MetasploitAdapter:
         context: AdapterContext,
         argv: list[str],
     ) -> ProcessSpec:
+        _validated_candidate(inputs, context, require_check=True)
         module = inputs.get("module", "")
-        if not isinstance(module, str) or not module.strip():
-            raise AdapterError("run_module requires a 'module' path")
-
-        run_dir_str = inputs.get("run_dir")
-        if not run_dir_str or not isinstance(run_dir_str, str):
-            raise AdapterError(
-                "run_module requires a 'run_dir' path for the resource file. "
-                "Provide the engagement run directory to host the resource file."
-            )
-        run_dir = Path(run_dir_str)
+        assert isinstance(module, str)
 
         # Validate all option values for injection
         rhost = _validate_option(str(inputs.get("rhost", str(context.target.host))), "rhost")
+        if rhost != context.target.host:
+            raise AdapterError("Metasploit RHOSTS must equal the engagement target")
         rport = str(inputs.get("rport", ""))
+        _validate_option(rport, "rport")
         payload = inputs.get("payload")
         lhost = str(inputs.get("lhost", "")) if inputs.get("lhost") else ""
 
@@ -261,8 +267,7 @@ class MetasploitAdapter:
         rc_lines.append("run")
         rc_lines.append("exit")
 
-        resource_path = _build_resource_file(run_dir, rc_lines)
-        argv.extend(["-r", resource_path])
+        argv.extend(["-x", "; ".join(rc_lines)])
         return ProcessSpec(
             argv=tuple(argv),
             timeout_seconds=600,
@@ -277,6 +282,90 @@ class MetasploitAdapter:
         runtime: Runtime,
     ) -> ProcessResult:
         return await runtime.run(spec)
+
+    def parse_for_spec(
+        self,
+        result: ProcessResult,
+        target: object,
+        spec: ProcessSpec,
+    ) -> tuple[Observation, ...]:
+        """Parse target-affecting commands without inventing success."""
+        from ariadne.core.engagement import TargetSpec
+
+        if not isinstance(target, TargetSpec):
+            raise AdapterError("Metasploit parsing requires an explicit target")
+        commands = (
+            {command.strip() for command in spec.argv[-1].split(";") if command.strip()}
+            if len(spec.argv) == 4 and spec.argv[2] == "-x"
+            else set()
+        )
+        module = next(
+            (
+                command.removeprefix("use ").strip()
+                for command in commands
+                if command.startswith("use ")
+            ),
+            "",
+        )
+        output = f"{result.stdout}\n{result.stderr}".casefold()
+        if "check" in commands:
+            if "not vulnerable" in output or "safe" in output:
+                check_status = "safe"
+            elif (
+                "target is vulnerable" in output
+                or "appears to be vulnerable" in output
+                or "vulnerable:" in output
+            ):
+                check_status = "vulnerable"
+            else:
+                check_status = "unknown"
+            source = (
+                "metasploit_check_vulnerable"
+                if check_status == "vulnerable"
+                else "metasploit_check"
+            )
+            return (
+                Observation(
+                    observation_id=uuid4(),
+                    target=target,
+                    source=source,
+                    data={
+                        "type": source,
+                        "module": module,
+                        "check_status": check_status,
+                        "summary": (f"Metasploit check result: {check_status}"),
+                    },
+                ),
+            )
+        if "run" in commands:
+            succeeded = bool(
+                re.search(
+                    r"(?:meterpreter|command shell|session \d+) session "
+                    r"(?:opened|created)",
+                    output,
+                )
+            )
+            source = "exploit_succeeded" if succeeded else "metasploit_run"
+            return (
+                Observation(
+                    observation_id=uuid4(),
+                    target=target,
+                    source=source,
+                    data={
+                        "type": source,
+                        "module": module,
+                        "session_opened": succeeded,
+                        "summary": (
+                            "Metasploit established a session"
+                            if succeeded
+                            else "Metasploit ran without proof of a session"
+                        ),
+                    },
+                ),
+            )
+        return tuple(
+            observation.model_copy(update={"target": target}) for observation in self.parse(result)
+        )
 
     # ── Parse ─────────────────────────────────────────────────────────────
 
@@ -300,19 +389,19 @@ class MetasploitAdapter:
 
         # Fallback: capture the raw output as a single observation
         if not observations and stdout.strip() and len(stdout.strip()) > 20:
-                from ariadne.core.engagement import TargetSpec
+            from ariadne.core.engagement import TargetSpec
 
-                observations.append(
-                    Observation(
-                        observation_id=uuid4(),
-                        target=TargetSpec(host="0.0.0.0"),
-                        source="metasploit",
-                        data={
-                            "raw_output": stdout[:500],
-                            "exit_code": result.exit_code,
-                        },
-                    )
+            observations.append(
+                Observation(
+                    observation_id=uuid4(),
+                    target=TargetSpec(host="0.0.0.0"),
+                    source="metasploit",
+                    data={
+                        "raw_output": stdout[:500],
+                        "exit_code": result.exit_code,
+                    },
                 )
+            )
 
         return tuple(observations)
 

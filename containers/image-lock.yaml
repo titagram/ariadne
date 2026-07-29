@@ -3,15 +3,27 @@
 # Update by pulling the upstream tag, recording its digest, and committing.
 images:
   - image: "alpine"
-    digest: "sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+    digest: "sha256:e7a1a92a5bfeee40966aea60f0796b0e7917cc35591542701834f03a68fa3d18"
     platform: "linux/arm64"
-    retrieved_at: "2026-07-28T09:57:00Z"
+    retrieved_at: "2026-07-29T00:00:00Z"
+    url: "https://hub.docker.com/_/alpine"
+
+  - image: "alpine"
+    digest: "sha256:79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f"
+    platform: "linux/amd64"
+    retrieved_at: "2026-07-29T00:00:00Z"
     url: "https://hub.docker.com/_/alpine"
 
   - image: "kalilinux/kali-rolling"
-    digest: "sha256:1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a"
+    digest: "sha256:2951c3e7760bf1d85e1475dafcc5ea8a637fc53e14e84dd9638dd5d1d6fe843b"
+    platform: "linux/arm64"
+    retrieved_at: "2026-07-29T00:00:00Z"
+    url: "https://hub.docker.com/r/kalilinux/kali-rolling"
+
+  - image: "kalilinux/kali-rolling"
+    digest: "sha256:9331112510bb408aac17e606c920ff1623897887d85946e27aca8e55223fdcc7"
     platform: "linux/amd64"
-    retrieved_at: "2026-07-27T00:00:00Z"
+    retrieved_at: "2026-07-29T00:00:00Z"
     url: "https://hub.docker.com/r/kalilinux/kali-rolling"
 
   - image: "softwaresecurityproject/zap-stable"

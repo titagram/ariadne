@@ -1,0 +1,14 @@
+schema_version: 1
+repository: https://github.com/projectdiscovery/nuclei-templates
+revision: 9979ce144c257f1c427a75604f8c0ffbc8293390
+sources:
+  cves_jsonl:
+    url: https://raw.githubusercontent.com/projectdiscovery/nuclei-templates/9979ce144c257f1c427a75604f8c0ffbc8293390/cves.json
+    sha256: 13293fac4772fea3df1788f7df6084830e61d43702fcbd4b895fb94a607611c8
+  github_tree:
+    url: https://api.github.com/repos/projectdiscovery/nuclei-templates/git/trees/9979ce144c257f1c427a75604f8c0ffbc8293390?recursive=1
+    sha256: cce193c889b4f423e3b0b4405f9318b435b82753007f659ffc0e9578a1c0e756
+index:
+  path: catalog.index.json
+  sha256: c8b69adb4b906eba5e9d9239f1d775d8175739a8bc263073243b0f0c129c74f9
+container_root: /opt/nuclei-templates

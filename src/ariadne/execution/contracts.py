@@ -11,6 +11,7 @@ from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NoReturn
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict
@@ -100,9 +101,7 @@ class ExecutionEnvelope(BaseModel):
 
     def verify_action(self, action: PlannedAction) -> None:
         if canonical_digest(action) != self.action_digest:
-            raise ProcessAuthorizationError(
-                AuthorizationReason.ACTION_DIGEST_MISMATCH
-            )
+            raise ProcessAuthorizationError(AuthorizationReason.ACTION_DIGEST_MISMATCH)
 
 
 class ExecutionContract(BaseModel):
@@ -168,13 +167,14 @@ class ExecutionContractRegistry:
             ExecutionContract(
                 adapter="research",
                 operation="investigate",
-                executable_ids=frozenset({"ping", "searchsploit"}),
+                executable_ids=frozenset({"ping", "searchsploit", "curl", "msfconsole"}),
                 implementation_id="ariadne.adapters.research.ResearchAdapter",
+                allowed_environment_keys=frozenset({"ARIADNE_RESEARCH_FINGERPRINT"}),
                 max_rate=1,
                 max_concurrency=1,
-                max_attempts=1,
-                max_duration_seconds=60,
-                max_output_bytes=1_048_576,
+                max_attempts=12,
+                max_duration_seconds=300,
+                max_output_bytes=10_485_760,
             ),
             *[
                 ExecutionContract(
@@ -197,7 +197,7 @@ class ExecutionContractRegistry:
             *bounded(
                 "httpx",
                 ("scan",),
-                frozenset({"httpx"}),
+                frozenset({"httpx-toolkit"}),
                 "ariadne.adapters.httpx.HttpxAdapter",
                 allow_stdin=True,
             ),
@@ -213,6 +213,12 @@ class ExecutionContractRegistry:
                 ("scan",),
                 frozenset({"nuclei"}),
                 "ariadne.adapters.nuclei.NucleiAdapter",
+            ),
+            *bounded(
+                "metasploit",
+                ("search", "info", "check", "run_module"),
+                frozenset({"msfconsole"}),
+                "ariadne.adapters.metasploit.MetasploitAdapter",
             ),
             *bounded(
                 "screenshot",
@@ -280,7 +286,7 @@ class ExecutionContractRegistry:
             *bounded(
                 "active_directory",
                 ("domain_discovery",),
-                frozenset({"nltest"}),
+                frozenset({"impacket-lookupsid"}),
                 "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
             ),
             *bounded(
@@ -297,8 +303,14 @@ class ExecutionContractRegistry:
             ),
             *bounded(
                 "active_directory",
-                ("kerberos_user_validation", "password_spray"),
-                frozenset({"kerbrute", "netexec"}),
+                ("kerberos_user_validation",),
+                frozenset({"impacket-GetNPUsers"}),
+                "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
+            ),
+            *bounded(
+                "active_directory",
+                ("password_spray",),
+                frozenset({"netexec"}),
                 "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
             ),
             *bounded(
@@ -310,7 +322,7 @@ class ExecutionContractRegistry:
             *bounded(
                 "active_directory",
                 ("certipy_find", "certipy_relay"),
-                frozenset({"certipy"}),
+                frozenset({"certipy-ad"}),
                 "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
             ),
             *bounded(
@@ -328,7 +340,7 @@ class ExecutionContractRegistry:
             *bounded(
                 "active_directory",
                 ("ntlm_relay",),
-                frozenset({"ntlmrelayx.py"}),
+                frozenset({"impacket-ntlmrelayx"}),
                 "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
             ),
             *bounded(
@@ -344,10 +356,7 @@ class ExecutionContractRegistry:
                 "ariadne.adapters.active_directory.ActiveDirectoryAdapter",
             ),
         ]
-        return cls({
-            (contract.adapter, contract.operation): contract
-            for contract in contracts
-        })
+        return cls({(contract.adapter, contract.operation): contract for contract in contracts})
 
     def get(
         self,
@@ -369,13 +378,9 @@ class ExecutionContractRegistry:
         contract: ExecutionContract,
         adapter: object,
     ) -> None:
-        implementation_id = (
-            f"{type(adapter).__module__}.{type(adapter).__qualname__}"
-        )
+        implementation_id = f"{type(adapter).__module__}.{type(adapter).__qualname__}"
         if implementation_id != contract.implementation_id:
-            raise ProcessAuthorizationError(
-                AuthorizationReason.IMPLEMENTATION_MISMATCH
-            )
+            raise ProcessAuthorizationError(AuthorizationReason.IMPLEMENTATION_MISMATCH)
 
 
 class ExecutionCoordinator:
@@ -416,9 +421,7 @@ class GuardedRuntime:
             envelope.adapter,
             envelope.operation,
         ):
-            raise ProcessAuthorizationError(
-                "Execution contract does not match the durable action"
-            )
+            raise ProcessAuthorizationError("Execution contract does not match the durable action")
         self._runtime = runtime
         self._envelope = envelope
         self._contract = contract
@@ -453,9 +456,7 @@ class GuardedRuntime:
         self._attempts = next_attempt
         async with self._coordinator.slot():
             result = await self._runtime.run(spec)
-        self._output_bytes += len(result.stdout.encode()) + len(
-            result.stderr.encode()
-        )
+        self._output_bytes += len(result.stdout.encode()) + len(result.stderr.encode())
         return result
 
     def _authorize(self, spec: ProcessSpec, *, next_attempt: int) -> None:
@@ -477,9 +478,7 @@ class GuardedRuntime:
             envelope.limits.max_output_bytes,
             contract.max_output_bytes,
         )
-        if elapsed >= duration_bound or spec.timeout_seconds > (
-            duration_bound - elapsed
-        ):
+        if elapsed >= duration_bound or spec.timeout_seconds > (duration_bound - elapsed):
             self._deny(AuthorizationReason.TIMEOUT_LIMIT, spec)
         if (
             self._output_bytes >= output_bound
@@ -505,8 +504,7 @@ class GuardedRuntime:
                 )
             if not rule.allowed_tools or executable not in rule.allowed_tools:
                 self._deny(
-                    f"Executable/tool {executable!r} is not explicitly allowed "
-                    f"for {capability!r}",
+                    f"Executable/tool {executable!r} is not explicitly allowed for {capability!r}",
                     spec,
                 )
 
@@ -564,8 +562,7 @@ class GuardedRuntime:
             ):
                 if maximum is not None and requested > maximum:
                     self._deny(
-                        f"Requested {label} {requested} exceeds policy "
-                        f"limit {maximum}",
+                        f"Requested {label} {requested} exceeds policy limit {maximum}",
                         spec,
                     )
 
@@ -579,6 +576,9 @@ class GuardedRuntime:
             return self._validate_httpx(spec)
         if self._contract.adapter == "nuclei":
             return self._validate_nuclei(spec), 1
+        if self._contract.adapter == "metasploit":
+            self._validate_metasploit(spec)
+            return 1, 1
         if self._contract.adapter == "zap":
             self._validate_zap(spec)
             return 1, 1
@@ -597,7 +597,12 @@ class GuardedRuntime:
 
     def _validate_httpx(self, spec: ProcessSpec) -> tuple[int, int]:
         argv = spec.argv
-        if len(argv) != 11 or argv[:4] != ("httpx", "-l", "-", "-p"):
+        if len(argv) != 11 or argv[:4] != (
+            "httpx-toolkit",
+            "-l",
+            "-",
+            "-p",
+        ):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         if argv[5:8] != ("-json", "-no-fallback", "-t") or argv[9] != "-timeout":
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
@@ -612,24 +617,31 @@ class GuardedRuntime:
             timeout = int(argv[10])
         except (IndexError, ValueError):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
-        if (
-            threads < 1
-            or timeout < 1
-        ):
+        if threads < 1 or timeout < 1:
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         return threads, 1
 
     def _validate_nuclei(self, spec: ProcessSpec) -> int:
         argv = spec.argv
         target = self._envelope.exact_target.host
-        if len(argv) < 10 or argv[:2] != ("nuclei", "-t"):
+        if len(argv) < 11 or argv[:2] != ("nuclei", "-t"):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         target_index = argv.index("-target") if "-target" in argv else -1
+        template_args = argv[1:target_index]
+        template_paths = template_args[1::2]
         if (
             target_index <= 2
             or argv.count("-target") != 1
-            or any(token.startswith("-") for token in argv[2:target_index])
-            or argv[target_index + 1:target_index + 3] != (target, "-json")
+            or len(template_args) % 2 != 0
+            or template_args[::2] != ("-t",) * len(template_paths)
+            or not 1 <= len(template_paths) <= 20
+            or any(
+                not path.startswith("/opt/nuclei-templates/")
+                or not path.endswith(".yaml")
+                or ".." in Path(path).parts
+                for path in template_paths
+            )
+            or argv[target_index + 1 : target_index + 3] != (target, "-json")
             or argv[target_index + 3] != "-rate-limit"
             or argv[target_index + 5] != "-timeout"
             or target_index + 7 != len(argv)
@@ -661,9 +673,7 @@ class GuardedRuntime:
         except (KeyError, TypeError, yaml.YAMLError, IndexError):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         target_url = f"https://{self._envelope.exact_target.host}"
-        include_path = (
-            f"https://{re.escape(self._envelope.exact_target.host)}/.*"
-        )
+        include_path = f"https://{re.escape(self._envelope.exact_target.host)}/.*"
         expected_context = {
             "name": "ariadne",
             "urls": [target_url],
@@ -699,20 +709,67 @@ class GuardedRuntime:
                     and _positive_int(parameters["maxDuration"], maximum=60)
                 )
             else:
-                valid = (
-                    set(parameters) == {"maxDuration"}
-                    and _positive_int(parameters["maxDuration"], maximum=120)
+                valid = set(parameters) == {"maxDuration"} and _positive_int(
+                    parameters["maxDuration"], maximum=120
                 )
             if not valid:
                 self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+
+    def _validate_metasploit(self, spec: ProcessSpec) -> None:
+        if len(spec.argv) != 4 or spec.argv[:3] != ("msfconsole", "-q", "-x"):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        commands = tuple(command.strip() for command in spec.argv[3].split(";") if command.strip())
+        operation = self._contract.operation
+        module_re = re.compile(r"^(?:exploit|auxiliary)/[a-z][a-z0-9_/]*[a-z0-9_]$")
+        if operation == "search":
+            valid = (
+                len(commands) == 2
+                and commands[0].startswith("search ")
+                and commands[1] == "exit"
+                and self._envelope.exact_target.host not in commands[0]
+            )
+        elif operation == "info":
+            valid = (
+                len(commands) == 2
+                and commands[0].startswith("info ")
+                and module_re.fullmatch(commands[0].removeprefix("info ")) is not None
+                and commands[1] == "exit"
+            )
+        else:
+            expected_terminal = "check" if operation == "check" else "run"
+            valid = (
+                len(commands) >= 4
+                and commands[0].startswith("use ")
+                and module_re.fullmatch(commands[0].removeprefix("use ")) is not None
+                and commands[1] == f"set RHOSTS {self._envelope.exact_target.host}"
+                and commands[-2:] == (expected_terminal, "exit")
+            )
+            for command in commands[2:-2]:
+                if command.startswith("set RPORT "):
+                    value = command.removeprefix("set RPORT ")
+                    valid = valid and value.isdigit() and 1 <= int(value) <= 65535
+                elif operation == "run_module" and command.startswith(
+                    ("set PAYLOAD ", "set LHOST ")
+                ):
+                    value = command.split(" ", 2)[-1]
+                    valid = (
+                        valid
+                        and bool(value)
+                        and not re.search(
+                            r"[;\r\n]",
+                            value,
+                        )
+                    )
+                else:
+                    valid = False
+        if not valid:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
 
     def _validate_screenshot(self, spec: ProcessSpec) -> None:
         target = self._envelope.exact_target.host
         output = next((item for item in spec.argv if item.startswith("--screenshot=")), "")
         profile = next((item for item in spec.argv if item.startswith("--user-data-dir=")), "")
-        allowed = (
-            self._envelope.run_root / "artifacts" / "screenshots"
-        ).resolve()
+        allowed = (self._envelope.run_root / "artifacts" / "screenshots").resolve()
         expected_prefix = (
             "chromium",
             "--headless",
@@ -750,12 +807,9 @@ class GuardedRuntime:
             "identity": "id",
             "sudo_rules": "sudo -l -n",
             "suid_files": (
-                "find / -type f \\( -perm -4000 -o -perm -2000 \\) "
-                "-exec ls -la {} \\; 2>/dev/null"
+                "find / -type f \\( -perm -4000 -o -perm -2000 \\) -exec ls -la {} \\; 2>/dev/null"
             ),
-            "file_capabilities": (
-                "getcap -r / 2>/dev/null || echo 'getcap not available'"
-            ),
+            "file_capabilities": ("getcap -r / 2>/dev/null || echo 'getcap not available'"),
             "scheduled_jobs": (
                 "cat /etc/crontab 2>/dev/null; "
                 "ls -la /etc/cron.d/ 2>/dev/null; "
@@ -765,12 +819,8 @@ class GuardedRuntime:
                 "systemctl list-units --type=service --all 2>/dev/null || "
                 "service --status-all 2>/dev/null || echo 'no service manager'"
             ),
-            "linpeas": (
-                "bash /opt/tools/linpeas.sh 2>/dev/null || echo 'linpeas not found'"
-            ),
-            "pspy_bounded": (
-                "timeout 60 /opt/tools/pspy64 2>/dev/null || echo 'pspy not found'"
-            ),
+            "linpeas": ("bash /opt/tools/linpeas.sh 2>/dev/null || echo 'linpeas not found'"),
+            "pspy_bounded": ("timeout 60 /opt/tools/pspy64 2>/dev/null || echo 'pspy not found'"),
         }
         if spec.argv[0] == "ssh":
             if spec.argv != ("ssh", target, linux_commands.get(operation, "")):
@@ -779,19 +829,21 @@ class GuardedRuntime:
         windows_commands = {
             "identity": ("impacket-wmiexec", target, "whoami"),
             "token_privileges": (
-                "impacket-wmiexec", "-whoami", "/priv", target,
+                "impacket-wmiexec",
+                "-whoami",
+                "/priv",
+                target,
             ),
             "services": ("impacket-wmiexec", target, "sc query"),
             "scheduled_tasks": (
-                "impacket-wmiexec", target, "schtasks /query /fo CSV /v",
+                "impacket-wmiexec",
+                target,
+                "schtasks /query /fo CSV /v",
             ),
             "registry": (
                 "impacket-wmiexec",
                 target,
-                (
-                    "reg query HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\"
-                    "Uninstall /s"
-                ),
+                ("reg query HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall /s"),
             ),
         }
         if operation in windows_commands:
@@ -808,15 +860,21 @@ class GuardedRuntime:
     ) -> None:
         expected = {
             "winpeas": (
-                "impacket-smbexec", "/opt/tools/winPEASx64.exe", ".exe",
+                "impacket-smbexec",
+                "/opt/tools/winPEASx64.exe",
+                ".exe",
                 ("&&", "cmd", "/c"),
             ),
             "privesccheck": (
-                "impacket-wmiexec", "/opt/tools/PrivescCheck.ps1", ".ps1",
+                "impacket-wmiexec",
+                "/opt/tools/PrivescCheck.ps1",
+                ".ps1",
                 ("&&", "powershell", "-ExecutionPolicy", "Bypass", "-File"),
             ),
             "seatbelt": (
-                "impacket-smbexec", "/opt/tools/Seatbelt.exe", ".exe",
+                "impacket-smbexec",
+                "/opt/tools/Seatbelt.exe",
+                ".exe",
                 ("&&",),
             ),
         }.get(operation)
@@ -836,11 +894,7 @@ class GuardedRuntime:
         expected_argv = (
             (executable, target, "copy", local_path, remote)
             + middle
-            + (
-                (remote, "-group=all")
-                if operation == "seatbelt"
-                else (remote,)
-            )
+            + ((remote, "-group=all") if operation == "seatbelt" else (remote,))
         )
         if spec.argv != expected_argv:
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
@@ -853,21 +907,30 @@ class GuardedRuntime:
         argv = spec.argv
         valid = False
         if operation == "domain_discovery":
-            valid = argv == ("nltest", "/DSGETDC", target)
+            valid = argv == ("impacket-lookupsid", "-no-pass", target, "500")
         elif operation == "ldap_rootdse":
             valid = argv == (
-                "ldapsearch", "-H", f"ldap://{target}", "-x", "-s", "base",
-                "-b", "", "objectClass=*",
+                "ldapsearch",
+                "-H",
+                f"ldap://{target}",
+                "-x",
+                "-s",
+                "base",
+                "-b",
+                "",
+                "objectClass=*",
             )
         elif operation == "smb_enumeration":
             valid = argv == ("smbclient", "-L", f"//{target}/", "-N")
         elif operation == "kerberos_user_validation":
             valid = (
                 len(argv) == 7
-                and argv[:3] == ("kerbrute", "userenum", "-d")
-                and argv[5:] == ("--dc", target)
-                and bool(argv[3])
-                and bool(argv[4])
+                and argv[:3] == ("impacket-GetNPUsers", "-no-pass", "-dc-ip")
+                and argv[3] == target
+                and argv[4] == "-usersfile"
+                and bool(argv[5])
+                and argv[6].endswith("/")
+                and len(argv[6]) > 1
             )
         elif operation == "bloodhound_collection":
             valid = (
@@ -880,7 +943,7 @@ class GuardedRuntime:
         elif operation == "certipy_find":
             valid = (
                 len(argv) == 10
-                and argv[:2] == ("certipy", "find")
+                and argv[:2] == ("certipy-ad", "find")
                 and argv[2] == "-u"
                 and argv[4] == "-p"
                 and argv[6:9] == ("-dc-ip", target, "-target")
@@ -900,7 +963,7 @@ class GuardedRuntime:
         elif operation == "credential_dump":
             valid = argv == ("impacket-secretsdump", target)
         elif operation == "ntlm_relay":
-            valid = argv == ("ntlmrelayx.py", "-t", f"smb://{target}")
+            valid = argv == ("impacket-ntlmrelayx", "-t", f"smb://{target}")
         elif operation == "ticket_manipulation":
             valid = (
                 len(argv) == 9
@@ -923,7 +986,7 @@ class GuardedRuntime:
         elif operation == "certipy_relay":
             valid = (
                 len(argv) == 12
-                and argv[:2] == ("certipy", "req")
+                and argv[:2] == ("certipy-ad", "req")
                 and argv[2] == "-u"
                 and argv[4] == "-p"
                 and argv[6] == "-ca"
@@ -979,41 +1042,34 @@ class GuardedRuntime:
         if rate < 1:
             self._deny("Nmap max-rate must be positive", spec)
         port_index = argv.index("-p")
-        if (
-            port_index + 1 >= len(argv)
-            or argv[port_index + 1] != self._envelope.normalized_ports
-        ):
+        if port_index + 1 >= len(argv) or argv[port_index + 1] != self._envelope.normalized_ports:
             self._deny(AuthorizationReason.PORTS_MISMATCH, spec)
 
         scan_flags = set(argv) & {"-sS", "-sT", "-sU"}
-        scan_flag_count = sum(
-            argv.count(flag) for flag in ("-sS", "-sT", "-sU")
-        )
+        scan_flag_count = sum(argv.count(flag) for flag in ("-sS", "-sT", "-sU"))
         operation = self._contract.operation
         if operation == "udp_targeted":
-            expected_scan = (
-                scan_flag_count == 1
-                and scan_flags == {"-sU"}
-                and "-sV" not in argv
-            )
+            expected_scan = scan_flag_count == 1 and scan_flags == {"-sU"} and "-sV" not in argv
         elif operation == "service_fingerprint":
-            expected_scan = (
-                scan_flag_count == 1
-                and scan_flags <= {"-sS", "-sT"}
-                and "-sV" in argv
-            )
+            expected_scan = scan_flag_count == 1 and scan_flags <= {"-sS", "-sT"} and "-sV" in argv
         else:
             expected_scan = (
-                scan_flag_count == 1
-                and scan_flags <= {"-sS", "-sT"}
-                and "-sV" not in argv
+                scan_flag_count == 1 and scan_flags <= {"-sS", "-sT"} and "-sV" not in argv
             )
         if not expected_scan:
             self._deny("Nmap scan flags do not match the operation", spec)
 
         allowed_flags = {
-            "-n", "-Pn", "-sS", "-sT", "-sU", "-sV",
-            "--max-rate", "-p", "-oX", "--",
+            "-n",
+            "-Pn",
+            "-sS",
+            "-sT",
+            "-sU",
+            "-sV",
+            "--max-rate",
+            "-p",
+            "-oX",
+            "--",
         }
         value_flags = {"--max-rate", "-p", "-oX"}
         index = 1
@@ -1039,9 +1095,13 @@ class GuardedRuntime:
                 )
             return
         if spec.argv[0] == "searchsploit":
-            if len(spec.argv) != 2 or not spec.argv[1].strip():
+            if (
+                len(spec.argv) not in {3, 4}
+                or spec.argv[1] != "--json"
+                or not all(part.strip() for part in spec.argv[2:])
+            ):
                 self._deny(
-                    "Searchsploit template requires one product query",
+                    "Searchsploit template requires a structured product query",
                     spec,
                 )
             if target in spec.argv:
@@ -1049,6 +1109,65 @@ class GuardedRuntime:
                     "Searchsploit query must not contain the engagement target",
                     spec,
                 )
+            return
+        if spec.argv[0] == "curl":
+            fixed = (
+                "curl",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "15",
+            )
+            if len(spec.argv) != 7 or spec.argv[:6] != fixed:
+                self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+            url = urlsplit(spec.argv[-1])
+            if (
+                url.scheme != "https"
+                or url.username is not None
+                or url.password is not None
+                or url.port not in {None, 443}
+                or url.hostname
+                not in {
+                    "httpd.apache.org",
+                    "nginx.org",
+                    "www.openssh.com",
+                    "services.nvd.nist.gov",
+                    "www.cisa.gov",
+                }
+                or target in spec.argv[-1]
+            ):
+                self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+            return
+        if spec.argv[0] == "msfconsole":
+            commands = (
+                tuple(command.strip() for command in spec.argv[3].split(";") if command.strip())
+                if len(spec.argv) == 4
+                else ()
+            )
+            if (
+                len(spec.argv) != 4
+                or spec.argv[:3] != ("msfconsole", "-q", "-x")
+                or target in spec.argv[3]
+                or len(commands) != 2
+                or commands[1] != "exit"
+            ):
+                self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+            if commands[0].startswith("search "):
+                if "type:exploit" not in commands[0]:
+                    self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+            elif commands[0].startswith("info "):
+                module = commands[0].removeprefix("info ")
+                if (
+                    re.fullmatch(
+                        r"(?:exploit|auxiliary)/[a-z][a-z0-9_/]*[a-z0-9_]",
+                        module,
+                    )
+                    is None
+                ):
+                    self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+            else:
+                self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
             return
         self._deny("Research executable is outside the contract", spec)
 
@@ -1079,18 +1198,18 @@ class GuardedRuntime:
 
 
 def _tight_bound(plan_bound: int | None, contract_bound: int) -> int:
-    return contract_bound if plan_bound is None else min(
-        plan_bound,
-        contract_bound,
+    return (
+        contract_bound
+        if plan_bound is None
+        else min(
+            plan_bound,
+            contract_bound,
+        )
     )
 
 
 def _positive_int(value: object, *, maximum: int) -> bool:
-    return (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and 1 <= value <= maximum
-    )
+    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= maximum
 
 
 def _is_within(candidate: Path, root: Path) -> bool:
@@ -1113,13 +1232,8 @@ def normalize_nmap_ports(
     if isinstance(ports, str):
         raw_port_str = ports
     elif isinstance(ports, (list, tuple)):
-        if any(
-            isinstance(port, bool) or not isinstance(port, (int, str))
-            for port in ports
-        ):
-            raise ProcessAuthorizationError(
-                AuthorizationReason.PORTS_MISMATCH
-            )
+        if any(isinstance(port, bool) or not isinstance(port, (int, str)) for port in ports):
+            raise ProcessAuthorizationError(AuthorizationReason.PORTS_MISMATCH)
         raw_port_str = ",".join(str(port) for port in ports)
     else:
         raise ProcessAuthorizationError(AuthorizationReason.PORTS_MISMATCH)
@@ -1127,33 +1241,21 @@ def normalize_nmap_ports(
     normalized: list[str] = []
     for token in raw_port_str.split(","):
         if not token or token != token.strip():
-            raise ProcessAuthorizationError(
-                AuthorizationReason.PORTS_MISMATCH
-            )
+            raise ProcessAuthorizationError(AuthorizationReason.PORTS_MISMATCH)
         bounds = token.split("-")
         if len(bounds) == 1:
             if not bounds[0].isdigit():
-                raise ProcessAuthorizationError(
-                    AuthorizationReason.PORTS_MISMATCH
-                )
+                raise ProcessAuthorizationError(AuthorizationReason.PORTS_MISMATCH)
             port = int(bounds[0])
             if not 1 <= port <= 65535:
-                raise ProcessAuthorizationError(
-                    AuthorizationReason.PORTS_MISMATCH
-                )
+                raise ProcessAuthorizationError(AuthorizationReason.PORTS_MISMATCH)
             normalized.append(str(port))
             continue
-        if len(bounds) != 2 or not all(
-            bound.isdigit() for bound in bounds
-        ):
-            raise ProcessAuthorizationError(
-                AuthorizationReason.PORTS_MISMATCH
-            )
+        if len(bounds) != 2 or not all(bound.isdigit() for bound in bounds):
+            raise ProcessAuthorizationError(AuthorizationReason.PORTS_MISMATCH)
         low, high = (int(bound) for bound in bounds)
         if not 1 <= low <= high <= 65535:
-            raise ProcessAuthorizationError(
-                AuthorizationReason.PORTS_MISMATCH
-            )
+            raise ProcessAuthorizationError(AuthorizationReason.PORTS_MISMATCH)
         capped_high = min(high, low + 199)
         normalized.append(f"{low}-{capped_high}")
     return ",".join(normalized)

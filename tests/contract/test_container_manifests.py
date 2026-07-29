@@ -11,6 +11,8 @@ from pathlib import Path
 
 import yaml
 
+from ariadne.execution.contracts import ExecutionContractRegistry
+
 _CONTAINERS = Path(__file__).resolve().parent.parent.parent / "containers"
 
 
@@ -46,6 +48,16 @@ def test_compose_has_required_services() -> None:
     compose = yaml.safe_load((_CONTAINERS / "compose.yaml").read_text())
     service_names = set(compose["services"])
     assert service_names >= {"kali", "zap", "netguard"}
+
+
+def test_kali_root_filesystem_is_read_only_with_persistent_home() -> None:
+    """Pinned tools/templates stay immutable while tool state uses workspace."""
+    compose = yaml.safe_load((_CONTAINERS / "compose.yaml").read_text())
+    kali = compose["services"]["kali"]
+
+    assert kali["read_only"] is True
+    assert any(str(value).startswith("/tmp:") for value in kali["tmpfs"])
+    assert "HOME=/workspace/home" in kali["environment"]
 
 
 # ── Image lock invariants ───────────────────────────────────────────────────────
@@ -88,6 +100,78 @@ def test_tool_manifest_exists_and_is_valid() -> None:
     assert len(pkgs) > 0, "At least one tool package must be declared"
 
 
+def test_tool_manifest_uses_kali_package_owners_for_curated_executables() -> None:
+    """APT package names must match the owners exposed by Kali rolling."""
+    manifest = yaml.safe_load((_CONTAINERS / "tool-manifest.yaml").read_text())
+    packages = set(manifest["packages"])
+    executables = set(manifest["executables"])
+
+    assert {"exploitdb", "certipy-ad"} <= packages
+    assert not {"searchsploit", "certipy"} & packages
+    assert {"searchsploit", "certipy-ad"} <= executables
+    assert "certipy" not in executables
+
+
+def test_tool_manifest_is_curated_for_ariadne_runtime() -> None:
+    """The image must install workflow tools without bulk or GUI metapackages."""
+    manifest = yaml.safe_load((_CONTAINERS / "tool-manifest.yaml").read_text())
+    packages = set(manifest["packages"])
+    executables = set(manifest["executables"])
+
+    assert not packages & {
+        "kali-linux-headless",
+        "kali-linux-default",
+        "kali-linux-everything",
+        "bloodhound",
+        "wireshark",
+        "hashcat",
+    }
+    assert {
+        "chromium",
+        "exploitdb",
+        "httpx-toolkit",
+        "metasploit-framework",
+        "nmap",
+        "nuclei",
+        "tshark",
+    } <= packages
+    assert {
+        "chromium",
+        "httpx-toolkit",
+        "msfconsole",
+        "nmap",
+        "nuclei",
+        "searchsploit",
+    } <= executables
+
+
+def test_kali_backed_execution_contracts_are_present_in_the_curated_image() -> None:
+    """A reachable specialist contract must not select an absent Kali tool."""
+    manifest = yaml.safe_load((_CONTAINERS / "tool-manifest.yaml").read_text())
+    executables = set(manifest["executables"])
+    kali_backed_adapters = {
+        "active_directory",
+        "httpx",
+        "metasploit",
+        "nmap",
+        "nuclei",
+        "pivot",
+        "postex",
+        "research",
+        "screenshot",
+    }
+    required = {
+        executable
+        for contract in ExecutionContractRegistry.curated().contracts.values()
+        if contract.adapter in kali_backed_adapters
+        for executable in contract.executable_ids
+    }
+
+    assert required <= executables, (
+        f"Curated Kali image is missing contract executables: {sorted(required - executables)}"
+    )
+
+
 # ── Kali Dockerfile ─────────────────────────────────────────────────────────────
 
 
@@ -105,13 +189,6 @@ def test_kali_dockerfile_uses_pinned_base_image() -> None:
         "Must create an unprivileged ariadne user"
     )
 
-    # The tool-manifest itself must list kali-linux-headless
-    manifest = yaml.safe_load((_CONTAINERS / "tool-manifest.yaml").read_text())
-    assert "kali-linux-headless" in manifest.get("packages", []), (
-        "kali-linux-headless must be in tool-manifest.yaml"
-    )
-
-
 def test_kali_dockerfile_clears_apt_lists() -> None:
     """Dockerfile must clear APT lists to keep the image lean."""
     dockerfile = (_CONTAINERS / "kali" / "Dockerfile").read_text()
@@ -119,6 +196,14 @@ def test_kali_dockerfile_clears_apt_lists() -> None:
         keyword in dockerfile
         for keyword in ("rm -rf /var/lib/apt/lists", "apt-get clean")
     ), "Must clear APT lists"
+
+
+def test_kali_dockerfile_redeclares_runtime_build_args_after_from() -> None:
+    """Build args used by RUN must be visible inside the image stage."""
+    dockerfile = (_CONTAINERS / "kali" / "Dockerfile").read_text()
+    stage = dockerfile.split("FROM ", maxsplit=1)[1]
+
+    assert "ARG NUCLEI_TEMPLATES_REF" in stage
 
 
 # ── Netguard entrypoint ─────────────────────────────────────────────────────────

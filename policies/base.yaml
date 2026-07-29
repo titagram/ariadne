@@ -77,7 +77,7 @@ capabilities:
     max_output_bytes: 50_000_000
     allowed_tools:
       - curl
-      - httpx
+      - httpx-toolkit
       - whatweb
       - nuclei
       - zap.sh
@@ -211,9 +211,16 @@ capabilities:
     allowed_tools:
       - nmap
   research.vulnerability:
-    <<: *workflow_low
+    allowed: true
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 12
+    max_duration_seconds: 300
+    max_output_bytes: 10_485_760
     allowed_tools:
       - searchsploit
+      - curl
+      - msfconsole
   exploit.validation:
     <<: *workflow_low
     allowed_tools:
@@ -268,7 +275,7 @@ capabilities:
   service.kerberos:
     <<: *service_specific
     allowed_tools:
-      - kerbrute
+      - impacket-GetNPUsers
   service.winrm:
     <<: *service_specific
   service.rdp:
@@ -289,11 +296,11 @@ capabilities:
     max_duration_seconds: 3600
     max_output_bytes: 50_000_000
     allowed_tools:
-      - httpx
+      - httpx-toolkit
   web.content_discovery:
     <<: *web_workflow
     allowed_tools:
-      - httpx
+      - httpx-toolkit
   web.nuclei_scan:
     <<: *web_workflow
     allowed_tools:
@@ -400,13 +407,13 @@ capabilities:
     max_duration_seconds: 3600
     max_output_bytes: 100_000_000
     allowed_tools:
-      - nltest
+      - impacket-lookupsid
   ad.enum:
     <<: *ad_read
     allowed_tools:
       - ldapsearch
       - smbclient
-      - kerbrute
+      - impacket-GetNPUsers
   ad.bloodhound:
     <<: *ad_read
     allowed_tools:
@@ -414,7 +421,7 @@ capabilities:
   ad.certipy_find:
     <<: *ad_read
     allowed_tools:
-      - certipy
+      - certipy-ad
 
   # ── High-impact AD and pivot operations are never delegated ────────
   ad.password_spray: &high_impact_manual
@@ -438,7 +445,7 @@ capabilities:
   ad.ntlm_relay:
     <<: *high_impact_manual
     allowed_tools:
-      - ntlmrelayx.py
+      - impacket-ntlmrelayx
   ad.ticket_manipulation:
     <<: *high_impact_manual
     allowed_tools:
@@ -450,7 +457,7 @@ capabilities:
   ad.adcs_abuse:
     <<: *high_impact_manual
     allowed_tools:
-      - certipy
+      - certipy-ad
   pivot.tunnel:
     <<: *high_impact_manual
     allowed_tools:

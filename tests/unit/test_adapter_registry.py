@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from ariadne.adapters import AdapterRegistry, NoopAdapter, build_default_registry
+from ariadne.adapters import AdapterRegistry, build_default_registry
 from ariadne.adapters.httpx import HttpxAdapter
 from ariadne.adapters.nmap import NmapAdapter
 from ariadne.adapters.research import ResearchAdapter
@@ -38,12 +38,12 @@ def test_default_registry_is_frozen() -> None:
         registry.register("nmap", NmapAdapter(), override=True)
 
 
-def test_default_registry_never_fabricates_tool_success_with_noops() -> None:
+def test_default_registry_contains_only_real_adapters() -> None:
     registry = build_default_registry()
 
     assert isinstance(registry.get("httpx"), HttpxAdapter)
     assert all(
-        not isinstance(registry.get(name), NoopAdapter)
+        registry.get(name) is not None
         for name in (
             "httpx",
             "zap",

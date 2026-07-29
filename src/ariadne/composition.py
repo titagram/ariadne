@@ -1,7 +1,10 @@
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ariadne.adapters import AdapterRegistry, build_default_registry
+from ariadne.adapters.base import Runtime
+from ariadne.core.engagement import EngagementSnapshot
 from ariadne.core.planner import Planner
 from ariadne.core.workflow import WorkflowCatalog
 from ariadne.execution.contracts import (
@@ -21,13 +24,19 @@ from ariadne.knowledge import (
     RuntimeVerificationStore,
     ToolCardVerifier,
 )
+from ariadne.runtime.docker import OnDemandKaliRuntime
 from ariadne.store.paths import ariadne_home
 from ariadne.store.run_store import RunStore
 
-_DEFAULT_WORKFLOW_DIR = (
-    Path(__file__).resolve().parent.parent.parent / "workflows"
-)
+_DEFAULT_WORKFLOW_DIR = Path(__file__).resolve().parent.parent.parent / "workflows"
 _DEFAULT_KNOWLEDGE_DIR = Path(__file__).resolve().parent.parent.parent / "knowledge"
+
+
+def _default_kali_runtime(
+    snapshot: EngagementSnapshot,
+    run_root: Path,
+) -> Runtime:
+    return OnDemandKaliRuntime(snapshot=snapshot, run_root=run_root)
 
 
 @dataclass(frozen=True)
@@ -37,9 +46,7 @@ class ServiceContainer:
     store: RunStore = field(default_factory=RunStore)
     catalog: WorkflowCatalog | None = None
     adapter_registry: AdapterRegistry = field(default_factory=build_default_registry)
-    consent_gateway: ConsentGateway = field(
-        default_factory=UnavailableConsentGateway
-    )
+    consent_gateway: ConsentGateway = field(default_factory=UnavailableConsentGateway)
     execution_contract_registry: ExecutionContractRegistry = field(
         default_factory=ExecutionContractRegistry.curated
     )
@@ -47,6 +54,10 @@ class ServiceContainer:
         default_factory=lambda: ExecutionCoordinator(max_concurrency=1)
     )
     tool_card_verifier: ToolCardVerifier | None = None
+    kali_runtime_factory: Callable[
+        [EngagementSnapshot, Path],
+        Runtime,
+    ] = _default_kali_runtime
     command: AriadneCommand = field(init=False)
     planner: Planner = field(init=False)
 
@@ -56,8 +67,9 @@ class ServiceContainer:
         if self.catalog is None:
             wf_dir = _DEFAULT_WORKFLOW_DIR
             object.__setattr__(
-                self, "catalog", WorkflowCatalog.load(wf_dir) if wf_dir.is_dir()
-                else WorkflowCatalog(playbooks={})
+                self,
+                "catalog",
+                WorkflowCatalog.load(wf_dir) if wf_dir.is_dir() else WorkflowCatalog(playbooks={}),
             )
         cat = self.catalog if self.catalog is not None else WorkflowCatalog(playbooks={})
         object.__setattr__(self, "planner", Planner(catalog=cat))

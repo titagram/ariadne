@@ -226,6 +226,44 @@ def test_builtin_workflow_actions_have_curated_contracts_and_explicit_tools() ->
                 )
 
 
+def test_certipy_contract_accepts_the_executable_shipped_by_kali(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(
+        adapter="active_directory",
+        operation="certipy_find",
+        capability="ad.enum",
+        inputs={"username": "operator", "password": "secret"},
+    )
+    guard = _guard(
+        tmp_path,
+        RecordingRuntime(),
+        plan=plan,
+        policy=_policy(
+            capability="ad.enum",
+            tools=frozenset({"certipy-ad"}),
+        ),
+    )
+    spec = ProcessSpec(
+        argv=(
+            "certipy-ad",
+            "find",
+            "-u",
+            "operator",
+            "-p",
+            "secret",
+            "-dc-ip",
+            "10.10.10.10",
+            "-target",
+            "contoso.local",
+        ),
+        timeout_seconds=30,
+        max_output_bytes=4096,
+    )
+
+    guard.authorize_initial(spec)
+
+
 def test_contract_registry_is_immutable_and_binds_exact_adapter_type() -> None:
     registry = ExecutionContractRegistry.curated()
     contract = registry.require("nmap", "tcp_discovery")
@@ -389,11 +427,14 @@ def test_generic_curated_contract_accepts_target_bound_httpx_and_denies_shell_to
         tmp_path,
         RecordingRuntime(),
         plan=plan,
-        policy=_policy(capability="web.fingerprint", tools=frozenset({"httpx"})),
+        policy=_policy(
+            capability="web.fingerprint",
+            tools=frozenset({"httpx-toolkit"}),
+        ),
     )
     spec = ProcessSpec(
         argv=(
-            "httpx", "-l", "-", "-p", "80", "-json", "-no-fallback",
+            "httpx-toolkit", "-l", "-", "-p", "80", "-json", "-no-fallback",
             "-t", "10", "-timeout", "10",
         ),
         stdin=b"https://10.10.10.10\nhttp://10.10.10.10\n",

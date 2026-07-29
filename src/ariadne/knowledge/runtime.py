@@ -89,9 +89,7 @@ class LocalToolProbe:
             self.max_output_bytes,
         )
         if not official_text:
-            raise ToolVerificationBlockedError(
-                f"{card.id}: official provider returned no guidance"
-            )
+            raise ToolVerificationBlockedError(f"{card.id}: official provider returned no guidance")
         return executable, version, official_text, "official_provider"
 
     @staticmethod
@@ -100,14 +98,10 @@ class LocalToolProbe:
         if candidate.is_absolute():
             if candidate.is_file() and os.access(candidate, os.X_OK):
                 return str(candidate)
-            raise ToolVerificationBlockedError(
-                f"tool executable is unavailable: {executable}"
-            )
+            raise ToolVerificationBlockedError(f"tool executable is unavailable: {executable}")
         resolved = shutil.which(executable)
         if resolved is None:
-            raise ToolVerificationBlockedError(
-                f"tool executable is unavailable: {executable}"
-            )
+            raise ToolVerificationBlockedError(f"tool executable is unavailable: {executable}")
         return resolved
 
     def _run(
@@ -164,11 +158,7 @@ class LocalToolProbe:
                     break
 
         if clipped:
-            return (
-                _bounded_text(bytes(output), self.max_output_bytes)
-                if accept_truncated
-                else None
-            )
+            return _bounded_text(bytes(output), self.max_output_bytes) if accept_truncated else None
         try:
             return_code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
@@ -239,6 +229,7 @@ class ToolCardVerifier:
         tool_id: str,
         *,
         allowed_policy: frozenset[str],
+        inspection: tuple[str, str, str, GuidanceSource] | None = None,
     ) -> RuntimeVerification:
         card = self.index.tool_card(tool_id)
         denied = sorted(card.policy - allowed_policy)
@@ -247,10 +238,18 @@ class ToolCardVerifier:
                 f"{tool_id}: policy requirements are not allowed: {', '.join(denied)}"
             )
 
-        executable, version, guidance, guidance_source = self.probe.inspect(
-            card,
-            self.official_provider,
-        )
+        if inspection is None:
+            executable, version, guidance, guidance_source = self.probe.inspect(
+                card,
+                self.official_provider,
+            )
+        else:
+            executable, version, guidance, guidance_source = inspection
+            executable = executable.strip()
+            version = _bounded_text(version, 4096)
+            guidance = _bounded_text(guidance, 4096)
+            if not executable or not version or not guidance:
+                raise ToolVerificationBlockedError(f"{tool_id}: runtime inspection was incomplete")
         record = RuntimeVerification(
             tool_id=card.id,
             card_digest=card.digest,
@@ -268,12 +267,14 @@ class ToolCardVerifier:
         discovery: ToolDiscovery,
         *,
         allowed_policy: frozenset[str],
+        inspection: tuple[str, str, str, GuidanceSource] | None = None,
     ) -> RuntimeVerification:
         """Create a missing concise card, then inspect its installed version."""
         self.index.discover_tool(discovery)
         return self.inspect(
             discovery.tool_id,
             allowed_policy=allowed_policy,
+            inspection=inspection,
         )
 
     def promote_after_success(
@@ -298,6 +299,4 @@ class ToolCardVerifier:
         allowed_policy: frozenset[str],
     ) -> RuntimeVerification:
         """Compatibility helper for callers that already proved tool success."""
-        return self.promote_after_success(
-            self.inspect(tool_id, allowed_policy=allowed_policy)
-        )
+        return self.promote_after_success(self.inspect(tool_id, allowed_policy=allowed_policy))

@@ -11,8 +11,7 @@ services:
       context: .
       dockerfile: netguard/Dockerfile
       args:
-        NETGUARD_BASE_REF: ${NETGUARD_BASE_REF:-sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc}
-    container_name: ariadne-netguard
+        NETGUARD_BASE_REF: ${NETGUARD_BASE_REF:-sha256:e7a1a92a5bfeee40966aea60f0796b0e7917cc35591542701834f03a68fa3d18}
     cap_add:
       - NET_ADMIN
     entrypoint: ["/entrypoint.sh"]
@@ -27,33 +26,35 @@ services:
       context: .
       dockerfile: kali/Dockerfile
       args:
-        KALI_BASE_REF: ${KALI_BASE_REF:-sha256:1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a}
-    container_name: ariadne-kali
+        KALI_BASE_REF: ${KALI_BASE_REF:-sha256:2951c3e7760bf1d85e1475dafcc5ea8a637fc53e14e84dd9638dd5d1d6fe843b}
+        NUCLEI_TEMPLATES_REF: ${NUCLEI_TEMPLATES_REF:-9979ce144c257f1c427a75604f8c0ffbc8293390}
     network_mode: "service:netguard"
+    read_only: true
     depends_on:
       - netguard
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     volumes:
-      - ariadne-evidence:/evidence
-      - ariadne-engagement:/engagement:ro
+      - ${ARIADNE_RUN_DIR:?ARIADNE_RUN_DIR is required}:/engagement:ro
+      - ${ARIADNE_RUN_DIR:?ARIADNE_RUN_DIR is required}/workspace:/workspace
+      - ${ARIADNE_RUN_DIR:?ARIADNE_RUN_DIR is required}/artifacts:/evidence
+      - ../src/ariadne/catalog/nuclei:/opt/ariadne-catalog/nuclei:ro
     environment:
       - ENGAGEMENT_DIR=/engagement
       - EVIDENCE_DIR=/evidence
+      - HOME=/workspace/home
     restart: "no"
 
   zap:
     image: softwaresecurityproject/zap-stable@${ZAP_IMAGE_REF:-sha256:b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c}
-    container_name: ariadne-zap
     network_mode: "service:netguard"
     depends_on:
       - netguard
     volumes:
-      - ariadne-evidence:/evidence
-      - ariadne-engagement:/engagement:ro
+      - ${ARIADNE_RUN_DIR:?ARIADNE_RUN_DIR is required}:/engagement:ro
+      - ${ARIADNE_RUN_DIR:?ARIADNE_RUN_DIR is required}/workspace:/workspace
+      - ${ARIADNE_RUN_DIR:?ARIADNE_RUN_DIR is required}/artifacts:/evidence
     environment:
       - ENGAGEMENT_DIR=/engagement
       - EVIDENCE_DIR=/evidence
     restart: "no"
-
-volumes:
-  ariadne-evidence:
-  ariadne-engagement:

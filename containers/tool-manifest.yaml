@@ -1,44 +1,100 @@
 # Ariadne Kali container tool manifest.
-# Every package listed here is installed in the Kali image.
-# The host's lock file is the authoritative package reference.
+# The image starts from official minimal kali-rolling and installs only these
+# curated packages. Bulk Kali metapackages and GUI frontends do not belong
+# here. The host's lock file is the authoritative base-image reference.
 packages:
-  - kali-linux-headless
-  - nmap
+  # Runtime and bounded process support
+  - ca-certificates
   - curl
-  - wget
-  - netcat-openbsd
-  - dnsutils
-  - openssh-client
-  - python3
-  - python3-pip
   - git
+  - iproute2
+  - iputils-ping
   - jq
+  - dnsutils
+  - netcat-openbsd
+  - openssh-client
+  - procps
+  - python3
+
+  # Discovery and service enumeration
+  - nmap
+  - httpx-toolkit
+  - ffuf
+  - gobuster
+  - nikto
   - sqlmap
   - hydra
   - john
-  - hashcat
-  - wordlists
-  - dirb
-  - gobuster
-  - nikto
-  - enum4linux-ng
-  - smbclient
-  - impacket-scripts
-  - bloodhound
-  - bloodhound.py
-  - certipy
-  - ldapscripts
-  - rpcbind
-  - nfs-common
-  - metasploit-framework
+
+  # Research, validation, and controlled exploitation
   - exploitdb
-  - searchsploit
-  - wireshark
+  - nuclei
+  - metasploit-framework
+
+  # Active Directory and Windows-facing collection
+  - smbclient
+  - ldap-utils
+  - nfs-common
+  - impacket-scripts
+  - bloodhound.py
+  - certipy-ad
+  - netexec
+  - responder
+  - bloodyad
+
+  # Pivoting and packet-level evidence
+  - chisel
+  - ligolo-ng
   - tcpdump
-  - net-tools
-  - iproute2
-  - iptables
-  - nftables
+  - tshark
+
+  # Headless evidence capture for the reporting workflow
+  - chromium
+
+executables:
+  - bloodhound-python
+  - bloodyad
+  - certipy-ad
+  - chisel
+  - chromium
+  - curl
+  - ffuf
+  - git
+  - gobuster
+  - httpx-toolkit
+  - hydra
+  - impacket-GetNPUsers
+  - impacket-lookupsid
+  - impacket-ntlmrelayx
+  - impacket-secretsdump
+  - impacket-smbexec
+  - impacket-ticketer
+  - impacket-wmiexec
+  - ip
+  - john
+  - jq
+  - ldapsearch
+  - ligolo-proxy
+  - msfconsole
+  - netexec
+  - nikto
+  - nmap
+  - nuclei
+  - ping
+  - pkill
+  - responder
+  - searchsploit
+  - smbclient
+  - sqlmap
+  - ssh
+  - tcpdump
+  - tshark
+
+nuclei_templates:
+  repository: "https://github.com/projectdiscovery/nuclei-templates"
+  revision: "9979ce144c257f1c427a75604f8c0ffbc8293390"
+  index_sha256: "c8b69adb4b906eba5e9d9239f1d775d8175739a8bc263073243b0f0c129c74f9"
+  container_path: "/opt/nuclei-templates"
 
 # Post-exploitation tools (PEASS-ng, pspy, PrivescCheck, Seatbelt)
 postex_binaries:

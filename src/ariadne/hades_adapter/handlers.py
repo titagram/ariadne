@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import ipaddress
 import re
+import shutil
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,7 +24,7 @@ from pydantic import ValidationError
 
 from ariadne.adapters import AdapterRegistry
 from ariadne.adapters.base import AdapterContext, Runtime
-from ariadne.adapters.nuclei import is_official_nuclei_template_provenance
+from ariadne.catalog.nuclei import NucleiCatalogError, NucleiTemplateCatalog
 from ariadne.core.canonical import canonical_digest
 from ariadne.core.engagement import (
     EngagementSnapshot,
@@ -64,19 +65,33 @@ from ariadne.knowledge import (
     ToolDiscovery,
     ToolVerificationBlockedError,
 )
+from ariadne.knowledge.runtime import GuidanceSource
 from ariadne.reporting.models import RenderedReport
 from ariadne.reporting.professional import ProfessionalRenderer
 from ariadne.reporting.validation import ReportOptions, ReportValidator
 from ariadne.reporting.walkthrough import WalkthroughRenderer
+from ariadne.runtime.docker import (
+    KaliRuntimeUnavailableError,
+    LocalFirstRuntime,
+    OnDemandKaliRuntime,
+)
+from ariadne.runtime.process import ProcessRunner
+from ariadne.runtime.selection import (
+    RuntimeChoice,
+    choose_runtime,
+    curated_kali_executables,
+)
 from ariadne.store.run_store import ArtifactInput, Event, RunHandle, RunStore
 
-_DOS_ALIASES = frozenset({
-    "dos",
-    "denial of service",
-    "denial service",
-    "resource exhaustion",
-    "resource stress",
-})
+_DOS_ALIASES = frozenset(
+    {
+        "dos",
+        "denial of service",
+        "denial service",
+        "resource exhaustion",
+        "resource stress",
+    }
+)
 _EXCLUSION_CAPABILITY_ALIASES = {
     "port scan": frozenset({"scan.tcp", "scan.udp"}),
     "port scanning": frozenset({"scan.tcp", "scan.udp"}),
@@ -87,8 +102,6 @@ _EXCLUSION_CAPABILITY_ALIASES = {
     "web fuzzing": frozenset({"web.fuzz"}),
     "metasploit": frozenset({"exploit.metasploit"}),
 }
-_TRUSTED_FINDING_ISSUER = "ariadne.evidence.findings.FindingService"
-_TRUSTED_FINDING_VALIDATION_SOURCE = "FindingService.validate"
 
 
 def _tool_id_for_executable(executable: str) -> str:
@@ -112,6 +125,7 @@ def _inspect_planned_tool(
     action_inputs: dict[str, Any],
     allowed_policy: frozenset[str],
     required_policy: tuple[str, ...],
+    inspection: tuple[str, str, str, GuidanceSource] | None = None,
 ) -> RuntimeVerification | None:
     """Inspect a canonical card or discover one declared by the playbook.
 
@@ -121,12 +135,14 @@ def _inspect_planned_tool(
     """
     tool_id = _tool_id_for_executable(process_argv[0])
     if not set(required_policy).issubset(allowed_policy):
-        raise ToolVerificationBlockedError(
-            f"{tool_id}: playbook tool policy is not allowed"
-        )
+        raise ToolVerificationBlockedError(f"{tool_id}: playbook tool policy is not allowed")
     declaration = action_inputs.get("tool_card")
     if tool_id in verifier.index.nodes:
-        return verifier.inspect(tool_id, allowed_policy=allowed_policy)
+        return verifier.inspect(
+            tool_id,
+            allowed_policy=allowed_policy,
+            inspection=inspection,
+        )
     if declaration is None:
         raise ToolVerificationBlockedError(
             f"{tool_id}: no canonical card or curated playbook tool_card metadata"
@@ -177,8 +193,7 @@ def _inspect_planned_tool(
         or tuple(help_args) != ("--help",)
     ):
         raise ToolVerificationBlockedError(
-            f"{tool_id}: unknown-tool probes are documentation-only "
-            "and fixed to --version/--help"
+            f"{tool_id}: unknown-tool probes are documentation-only and fixed to --version/--help"
         )
 
     slug = tool_id.removeprefix("tool.")
@@ -202,6 +217,7 @@ def _inspect_planned_tool(
     return verifier.inspect_or_discover(
         discovery,
         allowed_policy=allowed_policy,
+        inspection=inspection,
     )
 
 
@@ -260,11 +276,7 @@ def _exclusion_conflict(
     }
     for raw_exclusion in exclusions:
         normalized = (
-            raw_exclusion.casefold()
-            .replace("_", " ")
-            .replace("-", " ")
-            .replace(".", " ")
-            .strip()
+            raw_exclusion.casefold().replace("_", " ").replace("-", " ").replace(".", " ").strip()
         )
         if normalized in _DOS_ALIASES and capabilities & {
             "resource.stress",
@@ -279,11 +291,7 @@ def _exclusion_conflict(
         candidates = capabilities | action_names
         if any(
             normalized
-            == candidate.casefold()
-            .replace("_", " ")
-            .replace("-", " ")
-            .replace(".", " ")
-            .strip()
+            == candidate.casefold().replace("_", " ").replace("-", " ").replace(".", " ").strip()
             for candidate in candidates
         ):
             return raw_exclusion
@@ -299,9 +307,7 @@ def _get_command(context: dict[str, Any]) -> AriadneCommand:
             "The composition root must pass it as a keyword argument."
         )
     if not isinstance(cmd, AriadneCommand):
-        raise TypeError(
-            f"Expected AriadneCommand, got {type(cmd).__name__}"
-        )
+        raise TypeError(f"Expected AriadneCommand, got {type(cmd).__name__}")
     return cmd
 
 
@@ -314,9 +320,7 @@ def _get_planner(context: dict[str, Any]) -> Planner:
             "The composition root must pass it as a keyword argument."
         )
     if not isinstance(planner, Planner):
-        raise TypeError(
-            f"Expected Planner, got {type(planner).__name__}"
-        )
+        raise TypeError(f"Expected Planner, got {type(planner).__name__}")
     return planner
 
 
@@ -324,13 +328,9 @@ def _get_catalog(context: dict[str, Any]) -> WorkflowCatalog:
     """Extract the WorkflowCatalog from the handler context."""
     catalog = context.get("catalog")
     if catalog is None:
-        raise ValueError(
-            "No catalog available in handler context."
-        )
+        raise ValueError("No catalog available in handler context.")
     if not isinstance(catalog, WorkflowCatalog):
-        raise TypeError(
-            f"Expected WorkflowCatalog, got {type(catalog).__name__}"
-        )
+        raise TypeError(f"Expected WorkflowCatalog, got {type(catalog).__name__}")
     return catalog
 
 
@@ -338,13 +338,9 @@ def _get_adapter_registry(context: dict[str, Any]) -> AdapterRegistry:
     """Extract the AdapterRegistry from the handler context."""
     registry = context.get("adapter_registry")
     if registry is None:
-        raise ValueError(
-            "No adapter_registry available in handler context."
-        )
+        raise ValueError("No adapter_registry available in handler context.")
     if not isinstance(registry, AdapterRegistry):
-        raise TypeError(
-            f"Expected AdapterRegistry, got {type(registry).__name__}"
-        )
+        raise TypeError(f"Expected AdapterRegistry, got {type(registry).__name__}")
     return registry
 
 
@@ -352,9 +348,7 @@ def _get_runtime(context: dict[str, Any]) -> Runtime:
     """Extract the Runtime from the handler context."""
     runtime = context.get("runtime")
     if runtime is None:
-        raise ValueError(
-            "No runtime available in handler context."
-        )
+        raise ValueError("No runtime available in handler context.")
     return runtime
 
 
@@ -371,9 +365,7 @@ def _get_execution_contract_registry(
 ) -> ExecutionContractRegistry:
     registry = context.get("execution_contract_registry")
     if not isinstance(registry, ExecutionContractRegistry):
-        raise TypeError(
-            "No trusted composition execution contract registry is available."
-        )
+        raise TypeError("No trusted composition execution contract registry is available.")
     return registry
 
 
@@ -382,10 +374,20 @@ def _get_execution_coordinator(
 ) -> ExecutionCoordinator:
     coordinator = context.get("execution_coordinator")
     if not isinstance(coordinator, ExecutionCoordinator):
-        raise TypeError(
-            "No trusted composition execution coordinator is available."
-        )
+        raise TypeError("No trusted composition execution coordinator is available.")
     return coordinator
+
+
+def _is_simulated_evidence(
+    source: str,
+    data: dict[str, Any],
+) -> bool:
+    summary = data.get("summary")
+    return (
+        source.casefold() in {"noop", "simulation", "simulated"}
+        or data.get("simulated") is True
+        or (isinstance(summary, str) and summary.casefold().startswith("simulated"))
+    )
 
 
 def _determine_engagement_state(
@@ -424,9 +426,14 @@ def _determine_engagement_state(
         if event_type == "evidence_collected":
             evidence_type = payload.get("evidence_type", "")
             classification = payload.get("execution_classification")
+            observation_data = payload.get("observation_data", {})
+            if isinstance(observation_data, dict) and _is_simulated_evidence(
+                str(evidence_type),
+                observation_data,
+            ):
+                continue
             if evidence_type and classification in (None, "success"):
                 evidence_types.add(evidence_type)
-            observation_data = payload.get("observation_data", {})
             if (
                 classification == "success"
                 and isinstance(observation_data, dict)
@@ -450,11 +457,7 @@ def _determine_engagement_state(
                         "event_type": event_type,
                         "finding": payload.get("finding", ""),
                         "artifact": payload.get("artifact", ""),
-                        **(
-                            observation_data
-                            if isinstance(observation_data, dict)
-                            else {}
-                        ),
+                        **(observation_data if isinstance(observation_data, dict) else {}),
                     },
                 )
                 observations.append(obs)
@@ -533,8 +536,7 @@ def _typed_progression_observations(
 
     def add(kind: str, observation: Observation) -> None:
         if any(
-            existing.source == kind
-            and existing.target == observation.target
+            existing.source == kind and existing.target == observation.target
             for existing in (*observations, *additions)
         ):
             return
@@ -565,13 +567,27 @@ def _typed_progression_observations(
                 add("protocol_routed", observation)
 
     if adapter == "nuclei" and operation == "scan":
-        validated_templates = {
-            candidate.get("template_id")
-            for candidate in action_inputs.get("validated_candidates", ())
+        raw_candidates = action_inputs.get("validated_candidates", ())
+        validated_candidates = tuple(
+            candidate
+            for candidate in raw_candidates
             if isinstance(candidate, dict)
             and candidate.get("target") == target.host
             and candidate.get("validation_status") == "validated"
-        }
+            and candidate.get("compatible") is True
+        )
+        try:
+            selected_templates = NucleiTemplateCatalog.load().select(
+                cve_ids=tuple(
+                    str(candidate.get("cve_id", "")) for candidate in validated_candidates
+                ),
+                technologies=tuple(
+                    str(candidate.get("product", "")) for candidate in validated_candidates
+                ),
+            )
+            validated_templates = {template.template_id for template in selected_templates}
+        except (NucleiCatalogError, OSError, ValueError):
+            validated_templates = set()
         for observation in observations:
             if (
                 observation.target == target
@@ -619,108 +635,246 @@ def _typed_progression_observations(
     return (*observations, *additions)
 
 
-def _validated_nuclei_candidates(
+def _persisted_research_candidates(
     events: list[dict[str, Any]],
     run_handle: RunHandle,
     target: str,
-) -> tuple[dict[str, str], ...]:
-    """Resolve persisted, target-bound Nuclei candidates fail-closed.
-
-    A candidate is usable only when its validation event follows a real
-    evidence artifact in the same run, references that evidence by id, binds
-    to the current target, and cites the curated ProjectDiscovery template
-    repository.
-    """
+) -> tuple[dict[str, Any], ...]:
+    """Recover validated candidates only from integrity-checked research."""
     artifact_root = (run_handle.path / "artifacts").resolve()
-    evidence_by_id: set[str] = set()
-    candidates: list[dict[str, str]] = []
+    candidates: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
 
     for event in events:
         payload = event.get("payload")
-        if not isinstance(payload, dict):
+        if event.get("event_type") != "evidence_collected" or not isinstance(payload, dict):
             continue
-
-        if event.get("event_type") == "evidence_collected":
-            evidence_id = payload.get("evidence_id")
-            artifact = payload.get("artifact")
-            asset = payload.get("asset")
-            classification = payload.get("execution_classification")
-            expected_digest = payload.get("sha256")
-            if (
-                not isinstance(evidence_id, str)
-                or not evidence_id.strip()
-                or not isinstance(artifact, str)
-                or not artifact.strip()
-                or asset != target
-                or classification != "success"
-                or payload.get("adapter") != "research"
-                or payload.get("source") != "research:investigate"
-                or payload.get("evidence_type") != "research_complete"
-                or not isinstance(expected_digest, str)
-            ):
-                continue
-            artifact_path = (artifact_root / artifact).resolve()
-            try:
-                artifact_path.relative_to(artifact_root)
-            except ValueError:
-                continue
-            if not artifact_path.is_file():
-                continue
-            with artifact_path.open("rb") as artifact_stream:
-                actual_digest = hashlib.file_digest(
-                    artifact_stream,
-                    "sha256",
-                ).hexdigest()
-            if hmac.compare_digest(actual_digest, expected_digest):
-                evidence_by_id.add(evidence_id)
-            continue
-
-        if event.get("event_type") != "finding_validated":
-            continue
-        finding_id = payload.get("finding_id")
-        template_id = payload.get("template_id")
-        candidate_target = payload.get("target")
         evidence_id = payload.get("evidence_id")
-        provenance = payload.get("provenance")
-        issuer = payload.get("issuer")
-        validation_source = payload.get("validation_source")
-        values = (
-            finding_id,
-            template_id,
-            candidate_target,
-            evidence_id,
-            provenance,
-        )
-        if not all(isinstance(value, str) and value.strip() for value in values):
-            continue
-        assert isinstance(finding_id, str)
-        assert isinstance(template_id, str)
-        assert isinstance(candidate_target, str)
-        assert isinstance(evidence_id, str)
-        assert isinstance(provenance, str)
+        artifact = payload.get("artifact")
+        expected_digest = payload.get("sha256")
+        observation_data = payload.get("observation_data")
         if (
-            candidate_target != target
-            or evidence_id not in evidence_by_id
-            or issuer != _TRUSTED_FINDING_ISSUER
-            or validation_source != _TRUSTED_FINDING_VALIDATION_SOURCE
-            or not is_official_nuclei_template_provenance(provenance)
+            not isinstance(evidence_id, str)
+            or not evidence_id.strip()
+            or not isinstance(artifact, str)
+            or not artifact.strip()
+            or payload.get("asset") != target
+            or payload.get("execution_classification") != "success"
+            or payload.get("adapter") != "research"
+            or payload.get("source") != "research:investigate"
+            or payload.get("evidence_type") != "research_complete"
+            or not isinstance(expected_digest, str)
+            or not isinstance(observation_data, dict)
         ):
             continue
-        candidate_key = (finding_id, template_id)
-        if candidate_key in seen:
+        artifact_path = (artifact_root / artifact).resolve()
+        try:
+            artifact_path.relative_to(artifact_root)
+        except ValueError:
             continue
-        seen.add(candidate_key)
-        candidates.append({
-            "candidate_id": finding_id,
-            "template_id": template_id,
-            "target": candidate_target,
-            "validation_status": "validated",
-            "evidence_id": evidence_id,
-            "provenance": provenance,
-        })
+        if not artifact_path.is_file():
+            continue
+        with artifact_path.open("rb") as artifact_stream:
+            actual_digest = hashlib.file_digest(
+                artifact_stream,
+                "sha256",
+            ).hexdigest()
+        if not hmac.compare_digest(actual_digest, expected_digest):
+            continue
+        raw_candidates = observation_data.get("candidates")
+        fingerprint = observation_data.get("fingerprint")
+        fingerprint_port = fingerprint.get("port") if isinstance(fingerprint, dict) else None
+        if not isinstance(raw_candidates, list):
+            continue
+        for candidate in raw_candidates:
+            if not isinstance(candidate, dict):
+                continue
+            required_strings = (
+                "candidate_id",
+                "cve_id",
+                "product",
+                "version",
+            )
+            sources = candidate.get("sources")
+            source_urls = candidate.get("source_urls")
+            evidence = candidate.get("evidence")
+            applicability = candidate.get("applicability_evidence")
+            if (
+                candidate.get("validation_status") != "validated"
+                or candidate.get("compatible") is not True
+                or not all(
+                    isinstance(candidate.get(field), str) and bool(str(candidate[field]).strip())
+                    for field in required_strings
+                )
+                or not isinstance(sources, list)
+                or not {
+                    "vendor",
+                    "nvd",
+                    "cisa-kev",
+                }.intersection(sources)
+                or not {
+                    "local-searchsploit",
+                    "metasploit",
+                }.intersection(sources)
+                or not isinstance(source_urls, list)
+                or not isinstance(evidence, list)
+                or not evidence
+                or not isinstance(applicability, list)
+                or not all(isinstance(item, str) and item.strip() for item in applicability)
+                or not applicability
+                or not all(
+                    isinstance(item, dict)
+                    and isinstance(item.get("sha256"), str)
+                    and bool(item["sha256"])
+                    and isinstance(item.get("source"), str)
+                    for item in evidence
+                )
+            ):
+                continue
+            provenance = next(
+                (value for value in source_urls if isinstance(value, str) and value.strip()),
+                "",
+            )
+            if not provenance:
+                continue
+            key = (
+                str(candidate["candidate_id"]),
+                str(candidate["cve_id"]),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(
+                {
+                    **candidate,
+                    "target": target,
+                    "evidence_id": evidence_id,
+                    "provenance": provenance,
+                    **(
+                        {"port": fingerprint_port}
+                        if isinstance(fingerprint_port, int)
+                        and not isinstance(fingerprint_port, bool)
+                        else {}
+                    ),
+                }
+            )
 
     return tuple(candidates)
+
+
+def _validated_nuclei_candidates(
+    events: list[dict[str, Any]],
+    run_handle: RunHandle,
+    target: str,
+) -> tuple[dict[str, Any], ...]:
+    return _persisted_research_candidates(events, run_handle, target)
+
+
+def _validated_metasploit_candidates(
+    events: list[dict[str, Any]],
+    run_handle: RunHandle,
+    target: str,
+) -> tuple[dict[str, Any], ...]:
+    """Expand exact compatible MSF modules from persisted research."""
+    candidates: list[dict[str, Any]] = []
+    for candidate in _persisted_research_candidates(
+        events,
+        run_handle,
+        target,
+    ):
+        modules = candidate.get("metasploit_modules")
+        if candidate.get("check_supported") is not True or not isinstance(
+            modules,
+            list,
+        ):
+            continue
+        for module in sorted(
+            value for value in modules if isinstance(value, str) and value.strip()
+        ):
+            candidates.append(
+                {
+                    **candidate,
+                    "module": module,
+                }
+            )
+    return tuple(candidates)
+
+
+def _metasploit_check_evidence(
+    events: list[dict[str, Any]],
+    run_handle: RunHandle,
+    *,
+    target: str,
+    module: str,
+) -> str | None:
+    """Return a persisted positive check for one exact module and target."""
+    artifact_root = (run_handle.path / "artifacts").resolve()
+    for event in reversed(events):
+        payload = event.get("payload")
+        if (
+            event.get("event_type") != "evidence_collected"
+            or not isinstance(payload, dict)
+            or payload.get("asset") != target
+            or payload.get("adapter") != "metasploit"
+            or payload.get("source") != "metasploit:check"
+            or payload.get("evidence_type") != "metasploit_check_vulnerable"
+            or payload.get("execution_classification") != "success"
+        ):
+            continue
+        observation = payload.get("observation_data")
+        artifact = payload.get("artifact")
+        expected_digest = payload.get("sha256")
+        evidence_id = payload.get("evidence_id")
+        if (
+            not isinstance(observation, dict)
+            or observation.get("module") != module
+            or observation.get("check_status") != "vulnerable"
+            or not isinstance(artifact, str)
+            or not isinstance(expected_digest, str)
+            or not isinstance(evidence_id, str)
+            or not evidence_id.strip()
+        ):
+            continue
+        artifact_path = (artifact_root / artifact).resolve()
+        try:
+            artifact_path.relative_to(artifact_root)
+        except ValueError:
+            continue
+        if not artifact_path.is_file():
+            continue
+        with artifact_path.open("rb") as artifact_stream:
+            actual = hashlib.file_digest(artifact_stream, "sha256").hexdigest()
+        if hmac.compare_digest(actual, expected_digest):
+            return evidence_id
+    return None
+
+
+def _latest_service_fingerprint(
+    observations: tuple[Observation, ...],
+    target: TargetSpec,
+) -> dict[str, Any] | None:
+    """Return the newest real service fingerprint for the exact target."""
+    for observation in reversed(observations):
+        if observation.target != target or observation.source not in {
+            "service_fingerprinted",
+            "protocol_routed",
+        }:
+            continue
+        product = observation.data.get("product")
+        if not isinstance(product, str) or not product.strip():
+            product = observation.data.get("service")
+        if not isinstance(product, str) or not product.strip() or product.casefold() == "unknown":
+            continue
+        fingerprint: dict[str, Any] = {"product": product.strip()}
+        for field in ("version", "protocol", "cpe"):
+            value = observation.data.get(field)
+            if isinstance(value, str) and value.strip():
+                fingerprint[field] = value.strip()
+        port = observation.data.get("port")
+        if isinstance(port, int) and not isinstance(port, bool) and port > 0:
+            fingerprint["port"] = port
+        return fingerprint
+    return None
 
 
 def _get_binding(cmd: AriadneCommand, session_id: str) -> dict[str, Any] | None:
@@ -740,9 +894,7 @@ def _get_binding(cmd: AriadneCommand, session_id: str) -> dict[str, Any] | None:
     }
 
 
-async def handle_prepare_engagement(
-    args: dict[str, Any], **context: Any
-) -> dict[str, Any]:
+async def handle_prepare_engagement(args: dict[str, Any], **context: Any) -> dict[str, Any]:
     """Validate the completed Q/A, then atomically lock and bind it."""
     cmd = _get_command(context)
     if "session_id" in args:
@@ -776,9 +928,7 @@ async def handle_prepare_engagement(
         }
 
     answers = validated.model_dump()
-    default_rate, default_concurrency = intensity_default_limits(
-        answers["intensity"]
-    )
+    default_rate, default_concurrency = intensity_default_limits(answers["intensity"])
     answers["max_requests_per_second"] = default_rate
     answers["max_concurrent_checks"] = default_concurrency
     contract_summary = {
@@ -923,11 +1073,7 @@ async def handle_amend_engagement(
                     event_type="scope_candidate_blocked",
                     payload={
                         "candidate_id": candidate_id,
-                        "target": (
-                            changes["add_targets"][0]
-                            if changes["add_targets"]
-                            else ""
-                        ),
+                        "target": (changes["add_targets"][0] if changes["add_targets"] else ""),
                         "reason": changes["reason"],
                         "decision": (
                             decision.value
@@ -946,9 +1092,7 @@ async def handle_amend_engagement(
                 "Continue with alternative in-scope branches."
             ),
         }
-    digest = canonical_digest(
-        {"trusted_session_id": session_id, "amendment": summary}
-    )
+    digest = canonical_digest({"trusted_session_id": session_id, "amendment": summary})
     try:
         result = cmd.amend(
             changes,
@@ -1141,8 +1285,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
     excluded = tuple(
         (playbook, conflict)
         for playbook in eligible
-        if (conflict := _exclusion_conflict(playbook, snapshot.exclusions))
-        is not None
+        if (conflict := _exclusion_conflict(playbook, snapshot.exclusions)) is not None
     )
     eligible = tuple(
         playbook
@@ -1181,7 +1324,8 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
     terminal_plan_ids = {
         event.get("payload", {}).get("plan_id")
         for event in events
-        if event.get("event_type") in {
+        if event.get("event_type")
+        in {
             "plan_executed",
             "plan_rejected",
         }
@@ -1213,28 +1357,142 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             "plan_id": "",
         }
 
+    if any(
+        action.adapter == "research"
+        and action.operation == "investigate"
+        and action.inputs.get("full_chain")
+        for action in plan.actions
+    ):
+        fingerprint = _latest_service_fingerprint(
+            observations,
+            plan.target,
+        )
+        if fingerprint is None:
+            return {
+                "status": "blocked",
+                "boundary": "missing_evidence",
+                "message": (
+                    "Full vulnerability research requires a real service "
+                    "fingerprint with a product name."
+                ),
+                "plan_id": "",
+            }
+        plan = plan.model_copy(
+            update={
+                "actions": tuple(
+                    action.model_copy(
+                        update={
+                            "inputs": {
+                                **action.inputs,
+                                **fingerprint,
+                            },
+                        }
+                    )
+                    if action.adapter == "research" and action.operation == "investigate"
+                    else action
+                    for action in plan.actions
+                ),
+            }
+        )
+
     validated_candidates = _validated_nuclei_candidates(
         events,
         run_handle,
         plan.target.host,
     )
     if validated_candidates:
-        plan = plan.model_copy(update={
-            "actions": tuple(
-                action.model_copy(update={
-                    "inputs": {
-                        **action.inputs,
-                        "validated_candidates": [
-                            dict(candidate)
-                            for candidate in validated_candidates
-                        ],
-                    },
-                })
-                if action.adapter == "nuclei" and action.operation == "scan"
-                else action
+        plan = plan.model_copy(
+            update={
+                "actions": tuple(
+                    action.model_copy(
+                        update={
+                            "inputs": {
+                                **action.inputs,
+                                "validated_candidates": [
+                                    dict(candidate) for candidate in validated_candidates
+                                ],
+                            },
+                        }
+                    )
+                    if action.adapter == "nuclei" and action.operation == "scan"
+                    else action
+                    for action in plan.actions
+                ),
+            }
+        )
+
+    if any(action.adapter == "metasploit" for action in plan.actions):
+        metasploit_candidates = _validated_metasploit_candidates(
+            events,
+            run_handle,
+            plan.target.host,
+        )
+        if not metasploit_candidates:
+            return {
+                "status": "blocked",
+                "boundary": "validated_metasploit_candidate",
+                "message": (
+                    "Metasploit requires a compatible module from persisted validated research."
+                ),
+                "plan_id": "",
+            }
+        selected_candidate = metasploit_candidates[0]
+        selected_module = str(selected_candidate["module"])
+        check_evidence_id = _metasploit_check_evidence(
+            events,
+            run_handle,
+            target=plan.target.host,
+            module=selected_module,
+        )
+        if (
+            any(
+                action.adapter == "metasploit" and action.operation == "run_module"
                 for action in plan.actions
-            ),
-        })
+            )
+            and check_evidence_id is None
+        ):
+            return {
+                "status": "blocked",
+                "boundary": "metasploit_check",
+                "message": (
+                    "Metasploit use requires persisted proof that the exact "
+                    "module check reported the target vulnerable."
+                ),
+                "plan_id": "",
+            }
+        plan = plan.model_copy(
+            update={
+                "actions": tuple(
+                    action.model_copy(
+                        update={
+                            "inputs": {
+                                **action.inputs,
+                                "module": selected_module,
+                                "rhost": plan.target.host,
+                                **(
+                                    {"rport": selected_candidate["port"]}
+                                    if isinstance(selected_candidate.get("port"), int)
+                                    else {}
+                                ),
+                                "validated_candidate": dict(selected_candidate),
+                                **(
+                                    {
+                                        "check_status": "vulnerable",
+                                        "check_evidence_id": check_evidence_id,
+                                    }
+                                    if action.operation == "run_module"
+                                    and check_evidence_id is not None
+                                    else {}
+                                ),
+                            },
+                        }
+                    )
+                    if action.adapter == "metasploit"
+                    else action
+                    for action in plan.actions
+                ),
+            }
+        )
 
     # 6. Persist the proposal before exposing it through the in-memory ledger.
     from ariadne.store.run_store import Event
@@ -1283,10 +1541,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         approval_correlation_id=approval_correlation_id,
     )
 
-    should_auto_approve = (
-        not plan.requires_manual_approval
-        and not plan.manual_capabilities
-    )
+    should_auto_approve = not plan.requires_manual_approval and not plan.manual_capabilities
     if should_auto_approve:
         approved_at = datetime.now(UTC)
         try:
@@ -1314,16 +1569,13 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             return {
                 "status": "error",
                 "message": (
-                    "Could not persist automatic approval; "
-                    f"the plan remains unapproved: {exc}"
+                    f"Could not persist automatic approval; the plan remains unapproved: {exc}"
                 ),
                 "plan_id": plan.plan_id,
             }
         cmd.auto_approve_plan(plan.plan_id)
 
-    approval_status = (
-        "auto_approved" if should_auto_approve else "awaiting_user_approval"
-    )
+    approval_status = "auto_approved" if should_auto_approve else "awaiting_user_approval"
     message = (
         f"Plan {plan.plan_id[:8]} auto-approved for continuous execution. "
         "Call ariadne_execute_plan now; do not request /ariadne approve."
@@ -1492,9 +1744,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
     # independent of model autonomy/--yolo and persists the decision first.
     if not record.approved:
         try:
-            decision = await _get_consent_gateway(context).request_plan(
-                record.plan
-            )
+            decision = await _get_consent_gateway(context).request_plan(record.plan)
         except Exception:
             decision = ConsentDecision.UNAVAILABLE
         if decision == ConsentDecision.ACCEPT:
@@ -1504,16 +1754,11 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 decision_channel="hades_elicitation",
             )
             record = cmd.get_plan_record(plan_id)
-            if (
-                record is None
-                or not record.approved
-                or record.rejected
-            ):
+            if record is None or not record.approved or record.rejected:
                 return {
                     "status": "blocked",
                     "message": (
-                        "User consent was accepted but durable approval failed: "
-                        f"{response}"
+                        f"User consent was accepted but durable approval failed: {response}"
                     ),
                     "plan_id": plan_id,
                 }
@@ -1521,11 +1766,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             ConsentDecision.DECLINE,
             ConsentDecision.CANCEL,
         }:
-            reason = (
-                "declined"
-                if decision == ConsentDecision.DECLINE
-                else "cancelled"
-            )
+            reason = "declined" if decision == ConsentDecision.DECLINE else "cancelled"
             response = cmd.reject_plan(
                 plan_id,
                 trusted_session_id=input_session_id,
@@ -1536,9 +1777,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             if record is None or not record.rejected:
                 return {
                     "status": "blocked",
-                    "message": (
-                        f"Consent was {reason}; durable rejection failed: {response}"
-                    ),
+                    "message": (f"Consent was {reason}; durable rejection failed: {response}"),
                     "plan_id": plan_id,
                 }
             return {
@@ -1568,10 +1807,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
     if not claim.claimed or claim.record is None:
         return {
             "status": "blocked",
-            "message": (
-                f"Plan {plan_id[:8]} could not be execution-claimed: "
-                f"{claim.message}"
-            ),
+            "message": (f"Plan {plan_id[:8]} could not be execution-claimed: {claim.message}"),
             "plan_id": plan_id,
         }
     record = claim.record
@@ -1627,9 +1863,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                         "adapter": action.adapter,
                         "operation": action.operation,
                         "target": record.plan.target.host,
-                        "policy_source_digests": list(
-                            execution_policy.source_digests
-                        ),
+                        "policy_source_digests": list(execution_policy.source_digests),
                         "reason_code": AuthorizationReason.CONTRACT_MISSING,
                     },
                     timestamp=datetime.now(UTC),
@@ -1673,12 +1907,8 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                         "adapter": action.adapter,
                         "operation": action.operation,
                         "target": record.plan.target.host,
-                        "policy_source_digests": list(
-                            execution_policy.source_digests
-                        ),
-                        "reason_code": (
-                            AuthorizationReason.IMPLEMENTATION_MISMATCH
-                        ),
+                        "policy_source_digests": list(execution_policy.source_digests),
+                        "reason_code": (AuthorizationReason.IMPLEMENTATION_MISMATCH),
                     },
                     timestamp=datetime.now(UTC),
                 ),
@@ -1710,6 +1940,39 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             # Generate ProcessSpec via adapter.plan() — argv at execution time
             process_spec = adapter.plan(planned_action, adapter_ctx)
             envelope.verify_action(action)
+            action_runtime = runtime
+            if isinstance(runtime, ProcessRunner):
+                executable = process_spec.argv[0]
+                runtime_choice = choose_runtime(
+                    record.plan.capabilities,
+                    local_tool_available=shutil.which(executable) is not None,
+                    kali_tool_available=(executable in curated_kali_executables()),
+                    requires_compatibility=action.adapter == "nuclei",
+                )
+                if runtime_choice is RuntimeChoice.BLOCKED:
+                    raise KaliRuntimeUnavailableError(
+                        f"{executable} is unavailable locally and is not "
+                        "declared in the curated Kali manifest."
+                    )
+                factory = context.get("kali_runtime_factory")
+                if action.adapter == "research" and callable(factory):
+                    action_runtime = LocalFirstRuntime(
+                        local_runtime=runtime,
+                        kali_runtime=factory(
+                            run_handle.snapshot,
+                            run_handle.path,
+                        ),
+                        kali_executables=curated_kali_executables(),
+                    )
+                elif runtime_choice is RuntimeChoice.KALI:
+                    if not callable(factory):
+                        raise KaliRuntimeUnavailableError(
+                            "The on-demand Kali runtime is not configured."
+                        )
+                    action_runtime = factory(
+                        run_handle.snapshot,
+                        run_handle.path,
+                    )
 
             def audit_block(
                 reason: AuthorizationReason,
@@ -1732,15 +1995,11 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                             "adapter": _adapter,
                             "operation": _operation,
                             "target": record.plan.target.host,
-                            "policy_source_digests": list(
-                                execution_policy.source_digests
-                            ),
+                            "policy_source_digests": list(execution_policy.source_digests),
                             "reason_code": reason,
                             "attempts_consumed": attempts,
                             "process_spec_digest": (
-                                canonical_digest(blocked_spec)
-                                if blocked_spec is not None
-                                else None
+                                canonical_digest(blocked_spec) if blocked_spec is not None else None
                             ),
                         },
                         timestamp=datetime.now(UTC),
@@ -1748,7 +2007,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 )
 
             guarded_runtime = GuardedRuntime(
-                runtime=runtime,
+                runtime=action_runtime,
                 envelope=envelope,
                 contract=contract,
                 policy=execution_policy,
@@ -1764,12 +2023,28 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                     if rule.allowed
                 )
                 try:
+                    runtime_inspection = None
+                    if isinstance(
+                        action_runtime,
+                        (OnDemandKaliRuntime, LocalFirstRuntime),
+                    ):
+                        inspect_tool = getattr(
+                            action_runtime,
+                            "inspect_tool",
+                            None,
+                        )
+                        if not callable(inspect_tool):
+                            raise ToolVerificationBlockedError(
+                                "Kali runtime cannot inspect the planned tool"
+                            )
+                        runtime_inspection = await inspect_tool(process_spec.argv[0])
                     pending_tool_verification = _inspect_planned_tool(
                         verifier=tool_card_verifier,
                         process_argv=process_spec.argv,
                         action_inputs=action.inputs,
                         allowed_policy=allowed_policy,
                         required_policy=record.plan.capabilities,
+                        inspection=runtime_inspection,
                     )
                 except ToolVerificationBlockedError as exc:
                     actions_failed += 1
@@ -1779,9 +2054,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                             event_type="tool_documentation_blocked",
                             payload={
                                 "plan_id": plan_id,
-                                "tool_card_id": _tool_id_for_executable(
-                                    process_spec.argv[0]
-                                ),
+                                "tool_card_id": _tool_id_for_executable(process_spec.argv[0]),
                                 "adapter": action.adapter,
                                 "reason": str(exc),
                                 "next_boundary": "kali_or_tool_availability",
@@ -1793,9 +2066,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                         "status": "blocked",
                         "boundary": "tool_documentation",
                         "plan_id": plan_id,
-                        "tool_card_id": _tool_id_for_executable(
-                            process_spec.argv[0]
-                        ),
+                        "tool_card_id": _tool_id_for_executable(process_spec.argv[0]),
                         "message": str(exc),
                         "actions_executed": actions_executed,
                         "actions_failed": actions_failed,
@@ -1834,6 +2105,14 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 )
             else:
                 observations = adapter.parse(process_result)
+            if any(
+                _is_simulated_evidence(
+                    observation.source,
+                    dict(observation.data),
+                )
+                for observation in observations
+            ):
+                raise AdapterPolicyError("Simulated observations are forbidden in operational runs")
             candidate_observations = [
                 observation
                 for observation in observations
@@ -1889,9 +2168,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                                 "source_target": candidate.source_target.host,
                                 "reason": candidate.reason,
                                 "relation": candidate.relation,
-                                "evidence_artifact": (
-                                    candidate_artifact.path.name
-                                ),
+                                "evidence_artifact": (candidate_artifact.path.name),
                                 "status": candidate.status.value,
                             },
                             timestamp=datetime.now(UTC),
@@ -1963,9 +2240,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                                             "",
                                         )
                                     ),
-                                    "proof": str(
-                                        observation.data.get("path", "")
-                                    ),
+                                    "proof": str(observation.data.get("path", "")),
                                 },
                             },
                         },
@@ -1987,19 +2262,13 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                     evidence_collector,
                 )
             else:
-                evidence_results = await adapter.collect(
-                    process_result, evidence_collector
-                )
+                evidence_results = await adapter.collect(process_result, evidence_collector)
             transcript = process_result.stdout.encode("utf-8", errors="replace")
             if process_result.stderr:
-                transcript += (
-                    b"\n--- stderr ---\n"
-                    + process_result.stderr.encode("utf-8", errors="replace")
+                transcript += b"\n--- stderr ---\n" + process_result.stderr.encode(
+                    "utf-8", errors="replace"
                 )
-            maximum_bytes = (
-                record.plan.limits.max_output_bytes
-                or max(len(transcript), 1)
-            )
+            maximum_bytes = record.plan.limits.max_output_bytes or max(len(transcript), 1)
             stored_transcript = cmd.store.add_bytes(
                 run_handle,
                 transcript,
@@ -2026,9 +2295,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 and pending_tool_verification is not None
                 and isinstance(tool_card_verifier, ToolCardVerifier)
             ):
-                verified_tool = tool_card_verifier.promote_after_success(
-                    pending_tool_verification
-                )
+                verified_tool = tool_card_verifier.promote_after_success(pending_tool_verification)
                 cmd.store.append_event(
                     run_handle,
                     Event(
@@ -2128,18 +2395,17 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                             timestamp=now,
                         ),
                     )
-                evidence_artifacts.append({
-                    "artifact": evidence_artifact,
-                    "observation_id": str(obs.observation_id),
-                })
+                evidence_artifacts.append(
+                    {
+                        "artifact": evidence_artifact,
+                        "observation_id": str(obs.observation_id),
+                    }
+                )
 
             # If the adapter produced its own evidence artifacts, record those too
-            for ev_result in (evidence_results or ()):
+            for ev_result in evidence_results or ():
                 artifact_path = run_handle.path / "artifacts" / str(ev_result)
-                if (
-                    ev_result not in ("evidence_collected",)
-                    and artifact_path.is_file()
-                ):
+                if ev_result not in ("evidence_collected",) and artifact_path.is_file():
                     cmd.store.append_event(
                         run_handle,
                         Event(
@@ -2147,8 +2413,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                             payload={
                                 "artifact": ev_result,
                                 "finding": (
-                                    f"{action.adapter}:{action.operation} "
-                                    f"produced {ev_result}"
+                                    f"{action.adapter}:{action.operation} produced {ev_result}"
                                 ),
                                 "evidence_type": action.adapter,
                                 "asset": record.plan.target.host,
@@ -2156,9 +2421,11 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                             timestamp=now,
                         ),
                     )
-                    evidence_artifacts.append({
-                        "artifact": ev_result,
-                    })
+                    evidence_artifacts.append(
+                        {
+                            "artifact": ev_result,
+                        }
+                    )
 
             if classification.kind == "success":
                 playbook = _get_catalog(context).playbooks.get(record.plan.playbook_id)
@@ -2200,6 +2467,33 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             return {
                 "status": "blocked",
                 "boundary": "scope_amendment",
+                "plan_id": plan_id,
+                "message": str(exc),
+                "actions_executed": actions_executed,
+                "actions_failed": actions_failed,
+                "evidence_artifacts": evidence_artifacts,
+            }
+        except KaliRuntimeUnavailableError as exc:
+            actions_failed += 1
+            cmd.store.append_event(
+                run_handle,
+                Event(
+                    event_type="execution_boundary",
+                    payload={
+                        "plan_id": plan_id,
+                        "playbook_id": record.plan.playbook_id,
+                        "adapter": action.adapter,
+                        "operation": action.operation,
+                        "target": record.plan.target.host,
+                        "boundary": "kali_runtime",
+                        "reason": str(exc),
+                    },
+                    timestamp=now,
+                ),
+            )
+            return {
+                "status": "blocked",
+                "boundary": "kali_runtime",
                 "plan_id": plan_id,
                 "message": str(exc),
                 "actions_executed": actions_executed,
@@ -2314,9 +2608,9 @@ def _record_explicit_objective_proof(
         return
     objective = next(
         (
-            item for item in run_handle.snapshot.objectives
-            if item.kind == kind
-            and (item.kind != "custom" or item.description == description)
+            item
+            for item in run_handle.snapshot.objectives
+            if item.kind == kind and (item.kind != "custom" or item.description == description)
         ),
         None,
     )
@@ -2463,9 +2757,7 @@ async def handle_render_report(args: dict[str, Any], **context: Any) -> dict[str
     if not validation.valid:
         return {
             "status": "error",
-            "message": (
-                f"Report validation failed: {'; '.join(validation.errors)}"
-            ),
+            "message": (f"Report validation failed: {'; '.join(validation.errors)}"),
             "path": "",
         }
 
@@ -2589,8 +2881,7 @@ async def handle_run_engagement(
                     event.get("payload", {})
                     for event in reversed(events)
                     if event.get("event_type") == "scope_candidate_discovered"
-                    and event.get("payload", {}).get("candidate_id")
-                    not in blocked_candidate_ids
+                    and event.get("payload", {}).get("candidate_id") not in blocked_candidate_ids
                 ),
                 None,
             )

@@ -190,9 +190,9 @@
   limits:
     max_rate: 5
     max_concurrency: 1
-    max_attempts: 1
-    max_duration_seconds: 120
-    max_output_bytes: 5242880
+    max_attempts: 12
+    max_duration_seconds: 300
+    max_output_bytes: 10485760
   stop_conditions:
     - "all_sources_exhausted"
     - "critical_finding_identified"
@@ -202,13 +202,95 @@
     - "cve_reference"
     - "exploit_candidate"
   next_playbooks:
+    - validation.metasploit-check.v1
     - validation.bounded-check.v1
   report_sections:
     - "enumeration"
     - "hypotheses"
 
 # ---------------------------------------------------------------------------
-# 6. Validation — bounded check or exploitation
+# 6. Validation — exact Metasploit check, never module execution
+# ---------------------------------------------------------------------------
+- id: validation.metasploit-check.v1
+  version: 1
+  stage: validation
+  triggers:
+    - kind: observation_type
+      types: ["metasploit_candidate"]
+  required_evidence_types:
+    - "research_complete"
+    - "metasploit_candidate"
+  capabilities:
+    - exploit.metasploit
+  actions:
+    - adapter: metasploit
+      operation: check
+      inputs:
+        tool_card:
+          title: "Metasploit Framework"
+          official_source_url: "https://docs.metasploit.com/"
+          source_date: "2026-07-29"
+          summary: "Exact module check selected from validated research evidence."
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 5242880
+  stop_conditions:
+    - "metasploit_check_complete"
+    - "target_not_vulnerable"
+  success_emits:
+    - "metasploit_check"
+    - "metasploit_check_vulnerable"
+  next_playbooks:
+    - exploitation.metasploit-use.v1
+    - validation.bounded-check.v1
+  report_sections:
+    - "validation"
+
+# ---------------------------------------------------------------------------
+# 7. Exploitation — only after a persisted positive check
+# ---------------------------------------------------------------------------
+- id: exploitation.metasploit-use.v1
+  version: 1
+  stage: validation
+  triggers:
+    - kind: observation_type
+      types: ["metasploit_check_vulnerable"]
+  required_evidence_types:
+    - "metasploit_check_vulnerable"
+  capabilities:
+    - exploit.metasploit
+  actions:
+    - adapter: metasploit
+      operation: run_module
+      inputs:
+        tool_card:
+          title: "Metasploit Framework"
+          official_source_url: "https://docs.metasploit.com/"
+          source_date: "2026-07-29"
+          summary: "Exact checked module use; session output is required as proof."
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 600
+    max_output_bytes: 10485760
+  stop_conditions:
+    - "session_opened"
+    - "module_failed"
+  success_emits:
+    - "exploit_succeeded"
+  next_playbooks:
+    - foothold.confirmation.v1
+    - validation.bounded-check.v1
+  report_sections:
+    - "validation"
+    - "exploitation"
+
+# ---------------------------------------------------------------------------
+# 8. Validation — selected official Nuclei templates
 # ---------------------------------------------------------------------------
 - id: validation.bounded-check.v1
   version: 1

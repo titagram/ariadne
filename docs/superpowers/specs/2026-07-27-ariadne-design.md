@@ -428,10 +428,12 @@ guardrails and blocks bypasses within its Hades engagement boundary.
 
 ## 8. Networking and Containers
 
-The execution environment uses the official multi-architecture
-`kalilinux/kali-rolling` image and installs `kali-linux-headless` plus
-manifested extras. Docker selects the matching architecture; Ariadne verifies
-platform availability and records the resolved image digest.
+The execution environment derives `ariadne-kali` from the official
+multi-architecture `kalilinux/kali-rolling` minimal image. It installs only
+the reviewed packages in `containers/tool-manifest.yaml`; bulk Kali
+metapackages, desktop frontends, and unrelated tool families are excluded.
+Docker selects the matching architecture; Ariadne verifies platform
+availability and records the resolved image digest.
 
 OWASP ZAP runs in its separate official container using the Automation
 Framework. The ZAP API is available only on the internal Docker network.
@@ -821,7 +823,8 @@ Implementation planning should preserve this dependency order:
 - Hades local plugin implementation
   (`~/.hermes/hermes-agent/hermes_cli/plugins.py`, inspected 2026-07-27)
 - [Official Kali Linux Docker images](https://www.kali.org/docs/containers/official-kalilinux-docker-images/)
-- [Kali `kali-linux-headless` metapackage](https://www.kali.org/tools/kali-meta/)
+- [Official Kali Linux Docker images](https://www.kali.org/docs/containers/official-kalilinux-docker-images/)
+- [Kali package and metapackage catalog](https://www.kali.org/tools/kali-meta/)
 - [Docker host network driver](https://docs.docker.com/engine/network/drivers/host/)
 - [OWASP ZAP Docker images](https://www.zaproxy.org/docs/docker/about/)
 - [OWASP ZAP Automation Framework](https://www.zaproxy.org/docs/automate/automation-framework/)

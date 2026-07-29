@@ -161,10 +161,24 @@ non-public URLs, or unsafe probe arguments produce a typed
 | `process.py`     | Bounded subprocess runner (timeout, output cap, SIGTERM tree) |
 | `selection.py`   | Deterministic local/Kali/blocked runtime decision         |
 
-Runtime selection is local-first. Kali is selected only for a specialist
-toolchain, isolation, VPN/routing, or compatibility. Missing ordinary local
-utilities do not silently start a container; the workflow reports a typed
-boundary. Docker installation always remains a specific user decision.
+Runtime selection is local-first and is applied to each research subprocess.
+Available ordinary utilities remain on the host; curated missing tools,
+specialist compatibility, isolation, and VPN/routing select the lazy Kali
+runtime. Docker is never installed implicitly. The container root and
+engagement ledger are read-only; the tool home lives under the persistent
+writable workspace, artifacts have a separate writable mount, and `/tmp` is
+ephemeral.
+
+`ariadne-kali` is derived from the pinned, minimal official
+`kalilinux/kali-rolling` base. Its flat tool manifest installs only packages
+used by supported workflows; bulk Kali metapackages, GUI BloodHound/Wireshark,
+and GPU cracking packages are excluded. OWASP ZAP remains in its separate
+official image.
+
+Nuclei selection uses a local index of the official template repository pinned
+to one commit. The Kali image checks out that commit. Before every execution,
+runtime attestation compares the checkout, mounted index revision/digest, and
+the selected file's clean Git state before target traffic is sent.
 
 ## Tool Adapters (src/ariadne/adapters/)
 
@@ -176,9 +190,9 @@ Each adapter follows the `ToolAdapter` protocol (see
 | `nmap.py`           | Nmap scanner                  |
 | `httpx.py`          | httpx HTTP probing            |
 | `zap.py`            | OWASP ZAP Automation Framework |
-| `nuclei.py`         | Nuclei workflow execution     |
-| `research.py`       | Local/vendor/CVE/Exploit-DB research |
-| `metasploit.py`     | Metasploit search/info/check  |
+| `nuclei.py`         | Pinned, evidence-selected Nuclei execution |
+| `research.py`       | SearchSploit/vendor/NVD/CISA/MSF research |
+| `metasploit.py`     | Separated search/info/check/use stages |
 | `postex.py`         | PEASS, pspy, PrivescCheck     |
 | `active_directory.py` | NetExec, Impacket, BloodHound |
 | `pivot.py`          | Ligolo-ng/Chisel lifecycle    |
