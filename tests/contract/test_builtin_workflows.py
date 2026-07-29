@@ -154,6 +154,21 @@ class TestAdapterOperations:
                     f"Supported: {sorted(supported)}"
                 )
 
+    def test_httpx_actions_supply_curated_tool_discovery_metadata(
+        self,
+        catalog: WorkflowCatalog,
+    ) -> None:
+        for playbook in catalog.playbooks.values():
+            for action in playbook.actions:
+                if action.adapter != "httpx":
+                    continue
+                card = action.inputs.get("tool_card")
+                assert isinstance(card, dict), playbook.id
+                assert card.get("title") == "ProjectDiscovery httpx"
+                assert card.get("official_source_url") == (
+                    "https://docs.projectdiscovery.io/opensource/httpx/overview"
+                )
+
 
 # ---------------------------------------------------------------------------
 # Graph completeness

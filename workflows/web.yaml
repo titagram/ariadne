@@ -22,6 +22,11 @@
       inputs:
         follow_redirects: true
         max_redirects: 5
+        tool_card:
+          title: "ProjectDiscovery httpx"
+          official_source_url: "https://docs.projectdiscovery.io/opensource/httpx/overview"
+          source_date: "2026-07-30"
+          summary: "Official HTTP probing toolkit used for bounded web fingerprinting."
   limits:
     max_rate: 50
     max_concurrency: 2
@@ -59,6 +64,11 @@
       inputs:
         path_discovery: true
         max_paths: 200
+        tool_card:
+          title: "ProjectDiscovery httpx"
+          official_source_url: "https://docs.projectdiscovery.io/opensource/httpx/overview"
+          source_date: "2026-07-30"
+          summary: "Official HTTP probing toolkit used for bounded web discovery."
   limits:
     max_rate: 30
     max_concurrency: 2
