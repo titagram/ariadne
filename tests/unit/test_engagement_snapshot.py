@@ -13,6 +13,7 @@ from ariadne.core.engagement import (
     Objective,
     TargetSpec,
     amend_scope,
+    calculate_snapshot_hash,
     lock_engagement,
 )
 from ariadne.core.enums import AutonomyMode, EnvironmentProfile
@@ -53,6 +54,25 @@ def test_snapshot_is_frozen(confirmed_draft: EngagementDraft, confirmation: Conf
     snap = lock_engagement(confirmed_draft, confirmation)
     with pytest.raises(ValidationError):
         snap.authorization_attested = False  # type: ignore[misc]
+
+
+def test_public_snapshot_hash_recalculation_matches_locked_snapshot(
+    confirmed_draft: EngagementDraft,
+    confirmation: Confirmation,
+) -> None:
+    snapshot = lock_engagement(confirmed_draft, confirmation)
+    assert calculate_snapshot_hash(snapshot) == snapshot.snapshot_hash
+
+
+def test_public_snapshot_hash_recalculation_detects_tampered_content(
+    confirmed_draft: EngagementDraft,
+    confirmation: Confirmation,
+) -> None:
+    snapshot = lock_engagement(confirmed_draft, confirmation)
+    tampered = snapshot.model_copy(
+        update={"targets": (TargetSpec(host="10.10.10.99"),)}
+    )
+    assert calculate_snapshot_hash(tampered) != tampered.snapshot_hash
 
 
 # ── Confirmation validation ─────────────────────────────────────────────────

@@ -5,6 +5,13 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from ariadne.core.engagement import (
+    EngagementDraft,
+    Objective,
+    TargetSpec,
+    lock_attested_engagement,
+)
+from ariadne.core.enums import AutonomyMode, EnvironmentProfile
 from ariadne.hades_adapter.commands import CURRENT_DISCLAIMER_VERSION, AriadneCommand
 from ariadne.hades_adapter.handlers import (
     handle_prepare_engagement,
@@ -19,7 +26,7 @@ from ariadne.hades_adapter.schemas import (
     StatusInput,
 )
 from ariadne.hades_adapter.session import ChallengeLedger
-from ariadne.store.run_store import RunStore
+from ariadne.store.run_store import Event, RunStore
 
 
 @pytest.fixture
@@ -161,3 +168,135 @@ async def test_binding_survives_service_recreation(
     )
     assert status["status"] == "active"
     assert recreated.get_session_binding("restart-safe-session") is not None
+
+
+class FailSecondEventStore(RunStore):
+    """Fault-injection store that fails before persisting session_bound."""
+
+    def __init__(self, base_path) -> None:
+        super().__init__(base_path=base_path)
+        self.append_count = 0
+
+    def append_event(self, handle, event) -> None:
+        self.append_count += 1
+        if self.append_count == 2:
+            raise OSError("injected session_bound write failure")
+        super().append_event(handle, event)
+
+
+def test_partial_prepare_never_binds_in_memory_or_after_restart(
+    tmp_path,
+    valid_answers: dict,
+) -> None:
+    store = FailSecondEventStore(tmp_path)
+    command = AriadneCommand(ledger=ChallengeLedger(), store=store)
+
+    with pytest.raises(OSError, match="injected"):
+        command.prepare(valid_answers, session_id="partial-session")
+
+    assert command.ledger.get_session_binding("partial-session") is None
+    recreated = AriadneCommand(
+        ledger=ChallengeLedger(),
+        store=RunStore(base_path=tmp_path),
+    )
+    assert recreated.get_session_binding("partial-session") is None
+
+
+@pytest.mark.asyncio
+async def test_recovery_rejects_isolated_session_bound_event(
+    tmp_path,
+    valid_answers: dict,
+) -> None:
+    del valid_answers
+    store = RunStore(base_path=tmp_path)
+    snapshot = lock_attested_engagement(
+        EngagementDraft(
+            authorization_attested=True,
+            disclaimer_version=CURRENT_DISCLAIMER_VERSION,
+            profile=EnvironmentProfile.PRIVATE_LAB,
+            autonomy=AutonomyMode.FULL,
+            target=TargetSpec(host="192.168.2.148"),
+            objectives=[Objective(kind="proof")],
+        ),
+        max_duration_minutes=30,
+    )
+    handle = store.create(snapshot)
+    from datetime import UTC, datetime
+
+    store.append_event(
+        handle,
+        Event(
+            event_type="session_bound",
+            payload={
+                "session_id": "complete-session",
+                "snapshot_hash": snapshot.snapshot_hash,
+            },
+            timestamp=datetime.now(UTC),
+        ),
+    )
+
+    recreated = AriadneCommand(
+        ledger=ChallengeLedger(),
+        store=store,
+    )
+    assert recreated.get_session_binding("complete-session") is None
+
+
+@pytest.mark.asyncio
+async def test_recovery_rejects_tampered_lock_even_with_updated_manifest(
+    tmp_path,
+    valid_answers: dict,
+) -> None:
+    command = AriadneCommand(
+        ledger=ChallengeLedger(),
+        store=RunStore(base_path=tmp_path),
+    )
+    created = command.prepare(valid_answers, session_id="tampered-session")
+    handle = command.store.open(created.engagement_id)
+    assert handle is not None
+    lock_path = handle.path / "engagement.lock.yaml"
+    lock_text = lock_path.read_text(encoding="utf-8").replace(
+        "192.168.2.148",
+        "192.168.2.149",
+    )
+    lock_path.write_text(lock_text, encoding="utf-8")
+    command.store._update_manifest(
+        handle.path,
+        "engagement.lock.yaml",
+        __import__("hashlib").sha256(lock_path.read_bytes()).hexdigest(),
+    )
+
+    recreated = AriadneCommand(
+        ledger=ChallengeLedger(),
+        store=RunStore(base_path=tmp_path),
+    )
+    assert recreated.get_session_binding("tampered-session") is None
+
+
+@pytest.mark.parametrize("tamper", ["manifest", "events"])
+def test_recovery_fails_closed_on_manifest_or_event_tampering(
+    tmp_path,
+    valid_answers: dict,
+    tamper: str,
+) -> None:
+    command = AriadneCommand(
+        ledger=ChallengeLedger(),
+        store=RunStore(base_path=tmp_path),
+    )
+    created = command.prepare(valid_answers, session_id=f"{tamper}-session")
+    handle = command.store.open(created.engagement_id)
+    assert handle is not None
+    if tamper == "manifest":
+        (handle.path / "integrity.manifest").write_text("{}", encoding="utf-8")
+    else:
+        events_path = handle.path / "events.jsonl"
+        events_path.write_text(
+            events_path.read_text(encoding="utf-8") + "tampered\n",
+            encoding="utf-8",
+        )
+
+    recreated = AriadneCommand(
+        ledger=ChallengeLedger(),
+        store=RunStore(base_path=tmp_path),
+    )
+    assert recreated.get_session_binding(f"{tamper}-session") is None

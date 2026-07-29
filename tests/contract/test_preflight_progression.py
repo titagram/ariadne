@@ -17,8 +17,6 @@ import pytest
 
 from ariadne.adapters import AdapterRegistry, build_default_registry
 from ariadne.adapters.base import ProcessResult, ProcessSpec
-from ariadne.core.engagement import EngagementSnapshot, Objective, TargetSpec
-from ariadne.core.enums import AutonomyMode, EnvironmentProfile
 from ariadne.core.planner import Planner
 from ariadne.core.policy import CapabilityRule, EffectivePolicy
 from ariadne.core.workflow import WorkflowCatalog
@@ -397,21 +395,8 @@ class TestProgressionToDiscovery:
         assert binding is not None
         assert binding.engagement_id is not None
 
-        run_handle = command.store.create(
-            EngagementSnapshot(
-                engagement_id=binding.engagement_id,
-                revision=1,
-                previous_snapshot_hash=None,
-                snapshot_hash=snapshot_hash,
-                confirmed_at=datetime.now(UTC),
-                authorization_attested=True,
-                disclaimer_version="2026-07-27",
-                profile=EnvironmentProfile.PRIVATE_LAB,
-                autonomy=AutonomyMode.CONTROLLED,
-                targets=(TargetSpec(host="10.10.10.10"),),
-                objectives=(Objective(kind="proof", description="test"),),
-            )
-        )
+        run_handle = command.store.open(binding.engagement_id)
+        assert run_handle is not None
 
         from ariadne.store.run_store import Event
 

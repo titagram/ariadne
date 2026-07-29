@@ -247,7 +247,7 @@ async def handle_prepare_engagement(
             validated.model_dump(),
             session_id=session_id,
         )
-    except (ValueError, TypeError) as exc:
+    except (OSError, ValueError, TypeError) as exc:
         return {
             "status": "error",
             "message": f"Engagement was not locked: {exc}",
@@ -505,7 +505,48 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             "plan_id": plan_id,
         }
 
-    # 3. Check plan is approved
+    # 3. Bind the plan to its trusted session and current immutable snapshot.
+    if record.session_id != input_session_id:
+        return {
+            "status": "error",
+            "message": "Plan belongs to a different trusted Hades session.",
+            "plan_id": plan_id,
+        }
+
+    engagement_id = binding_info["engagement_id"]
+    if not engagement_id:
+        return {
+            "status": "error",
+            "message": "No engagement id in binding.",
+            "plan_id": plan_id,
+        }
+    run_handle = _get_run_handle(cmd.store, engagement_id)
+    if run_handle is None:
+        return {
+            "status": "error",
+            "message": "Engagement snapshot not found in store.",
+            "plan_id": plan_id,
+        }
+
+    from ariadne.core.engagement import calculate_snapshot_hash
+    from ariadne.store.integrity import verify_run
+
+    active_hash = binding_info["snapshot_hash"]
+    persisted_hash = run_handle.snapshot.snapshot_hash
+    if (
+        record.snapshot_hash != active_hash
+        or record.plan.snapshot_hash != active_hash
+        or persisted_hash != active_hash
+        or calculate_snapshot_hash(run_handle.snapshot) != persisted_hash
+        or not verify_run(run_handle.path).valid
+    ):
+        return {
+            "status": "error",
+            "message": "Plan snapshot is stale or the active run failed integrity checks.",
+            "plan_id": plan_id,
+        }
+
+    # 4. Check plan is approved
     if not record.approved:
         return {
             "status": "error",
@@ -516,28 +557,11 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             "plan_id": plan_id,
         }
 
-    # 4. Check plan has not expired
+    # 5. Check plan has not expired
     if cmd.is_plan_expired(plan_id):
         return {
             "status": "error",
             "message": f"Plan {plan_id[:8]} has expired. Propose a new plan.",
-            "plan_id": plan_id,
-        }
-
-    # 5. Check engagement exists in store
-    engagement_id = binding_info["engagement_id"]
-    if not engagement_id:
-        return {
-            "status": "error",
-            "message": "No engagement id in binding.",
-            "plan_id": plan_id,
-        }
-
-    run_handle = _get_run_handle(cmd.store, engagement_id)
-    if run_handle is None:
-        return {
-            "status": "error",
-            "message": "Engagement snapshot not found in store.",
             "plan_id": plan_id,
         }
 

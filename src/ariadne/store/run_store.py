@@ -104,7 +104,13 @@ def verify_events_integrity(path: Path) -> IntegrityResult:
 
     Checks sequence contiguity and the cryptographic hash chain.
     """
-    valid, errors = verify_chain(path)
+    try:
+        valid, errors = verify_chain(path)
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        return IntegrityResult(
+            valid=False,
+            errors=[f"events.jsonl is corrupt: {exc}"],
+        )
     return IntegrityResult(valid=valid, errors=errors)
 
 
@@ -384,7 +390,10 @@ class RunStore:
         return None
 
     def find_session_binding(self, session_id: str) -> dict[str, str] | None:
-        """Recover the latest durable session binding from append-only events."""
+        """Recover a complete, integrity-verified atomic session binding."""
+        from ariadne.core.engagement import calculate_snapshot_hash
+        from ariadne.store.integrity import verify_run
+
         if not session_id:
             return None
         latest: dict[str, str] | None = None
@@ -393,13 +402,28 @@ class RunStore:
             handle = self.open(snapshot.engagement_id)
             if handle is None:
                 continue
-            if not verify_events_integrity(handle.path / "events.jsonl").valid:
+            if not verify_run(handle.path).valid:
                 continue
+            if calculate_snapshot_hash(snapshot) != snapshot.snapshot_hash:
+                continue
+            lock_seen = False
             for event in self.read_events(handle):
                 payload = event.get("payload", {})
+                if event.get("event_type") == "engagement_locked":
+                    lock_seen = (
+                        payload.get("snapshot_hash") == snapshot.snapshot_hash
+                        and payload.get("authorization_attested")
+                        is snapshot.authorization_attested
+                        and snapshot.authorization_attested
+                        and payload.get("disclaimer_version")
+                        == snapshot.disclaimer_version
+                    )
+                    continue
                 if (
-                    event.get("event_type") == "session_bound"
+                    lock_seen
+                    and event.get("event_type") == "session_bound"
                     and payload.get("session_id") == session_id
+                    and payload.get("snapshot_hash") == snapshot.snapshot_hash
                     and event.get("timestamp", "") >= latest_timestamp
                 ):
                     latest_timestamp = event.get("timestamp", "")

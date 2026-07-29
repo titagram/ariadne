@@ -131,8 +131,8 @@ class ProposePlanInput(BaseModel):
 PROPOSE_PLAN_SCHEMA = _build_schema(
     ProposePlanInput,
     "Propose a bounded action plan for the current engagement. Requires the "
-    "snapshot hash from ariadne_prepare_engagement. Controlled mode returns a "
-    "plan requiring /ariadne approve; full mode auto-approves curated, in-policy plans.",
+    "snapshot hash from ariadne_prepare_engagement. The current runtime requires "
+    "/ariadne approve in both controlled and full modes.",
 )
 
 # ── ariadne_execute_plan ────────────────────────────────────────────────

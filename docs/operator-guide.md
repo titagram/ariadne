@@ -74,15 +74,22 @@ Every bounded action plan requires explicit approval:
 
 ### Full autonomy
 
-Plans that satisfy all policy and playbook conditions run without routine
-approval. The following always require a direct user decision regardless of
-autonomy mode:
+The current implementation still requires `/ariadne approve` for each bounded
+plan in `full` mode. Continuous execution of curated, in-policy plans is the
+next implementation milestone; it is not active yet.
 
-- Initial Q/A authorization and disclaimer acceptance
-- Scope amendment
-- Host container-runtime installation
-- Acquisition or execution of uncurated PoC code
-- SysReptor network push
+That continuous mode will pause only for:
+
+- scope changes or newly discovered targets;
+- policy or guardrail conflicts;
+- host container-runtime installation;
+- acquisition or execution of uncurated code;
+- missing credentials or decisions;
+- high-impact actions not already authorized by the contract;
+- SysReptor network push.
+
+The offline local report will be generated automatically at completion in that
+mode. The current runtime still requires `/ariadne report`.
 
 > Hades's `--yolo` flag has **no effect** on Ariadne guardrails.
 

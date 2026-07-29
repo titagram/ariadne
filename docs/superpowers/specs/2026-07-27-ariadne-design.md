@@ -39,8 +39,9 @@ typed adapters.
    completes the Q/A, attests authorization, and accepts the current disclaimer.
 2. **Fail closed.** Unknown state, ambiguous policy, stale approval, malformed
    output, or unexpected scope stops execution.
-3. **Guardrails are not an autonomy setting.** Full autonomy may remove routine
-   approval prompts, but it never bypasses hard invariants.
+3. **Guardrails are not an autonomy setting.** The current runtime retains plan
+   approval in both modes. The next continuous-mode boundary will remove only
+   routine curated/in-policy prompts and will never bypass hard invariants.
 4. **The model proposes; the engine permits.** The LLM ranks hypotheses and
    selects eligible playbooks. The deterministic core authorizes transitions.
 5. **Evidence before claims.** Scanner alerts are candidates. Findings become
@@ -248,9 +249,16 @@ or:
 autonomy: full
 ```
 
-Controlled autonomy requires direct approval of bounded action plans. Full
-autonomy permits plans that satisfy all policy and playbook conditions to run
-without routine approval.
+Controlled autonomy requires direct approval of bounded action plans. The
+current implementation also requires plan approval in `full`; it does not yet
+auto-execute. The immediately following milestone is continuous mode: after the
+brief Q/A it autonomously executes curated, in-policy plans through completion
+and generates the offline local report.
+
+Continuous mode pauses for scope/new-target decisions, policy or guardrail
+conflicts, host installation, uncurated code, missing credentials or choices,
+high-impact actions not already authorized in the contract, and SysReptor
+network push.
 
 The following always require a direct user decision:
 

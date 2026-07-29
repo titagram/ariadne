@@ -38,6 +38,12 @@
 - Reporting is offline-first; SysReptor network push is explicit and previewed.
 - The ordinary CI suite may only address loopback and its isolated Docker test network.
 - Use TDD, keep tasks independently reviewable, and commit after each task.
+- Current interim behavior requires `/ariadne approve` for every plan in both
+  autonomy modes. The immediate next milestone is continuous/full execution of
+  curated, in-policy plans through automatic offline reporting, pausing only
+  for scope/new-target decisions, policy/guardrail conflicts, host installs,
+  uncurated code, missing credentials/decisions, contract-unapproved
+  high-impact actions, and SysReptor network push.
 
 ---
 

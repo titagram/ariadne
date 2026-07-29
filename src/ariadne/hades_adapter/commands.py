@@ -218,13 +218,6 @@ class AriadneCommand:
                 timestamp=now,
             ),
         )
-        binding_key = f"atomic:{snapshot.engagement_id}"
-        self.ledger.bind_session(
-            challenge_id=binding_key,
-            session_id=session_id,
-            engagement_id=snapshot.engagement_id,
-            snapshot_hash=snapshot.snapshot_hash,
-        )
         self.store.append_event(
             handle,
             Event(
@@ -235,6 +228,13 @@ class AriadneCommand:
                 },
                 timestamp=now,
             ),
+        )
+        binding_key = f"atomic:{snapshot.engagement_id}"
+        self.ledger.bind_session(
+            challenge_id=binding_key,
+            session_id=session_id,
+            engagement_id=snapshot.engagement_id,
+            snapshot_hash=snapshot.snapshot_hash,
         )
 
         return PrepareResult(
@@ -374,14 +374,22 @@ class AriadneCommand:
         return self.get_session_binding(session_id) is not None
 
     def get_session_binding(self, session_id: str):
-        """Return a binding, rehydrating it from durable events if necessary."""
+        """Return only a binding backed by a complete, verified durable run."""
         binding = self.ledger.get_session_binding(session_id)
-        if binding is not None:
-            return binding
         durable = self.store.find_session_binding(session_id)
         if durable is None:
+            if binding is not None:
+                self.ledger.unbind_session(session_id)
             return None
         engagement_id = UUID(durable["engagement_id"])
+        if (
+            binding is not None
+            and binding.engagement_id == engagement_id
+            and binding.snapshot_hash == durable["snapshot_hash"]
+        ):
+            return binding
+        if binding is not None:
+            self.ledger.unbind_session(session_id)
         self.ledger.bind_session(
             challenge_id=f"atomic:{engagement_id}",
             session_id=session_id,

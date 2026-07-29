@@ -22,8 +22,6 @@ import pytest
 
 from ariadne.adapters import AdapterRegistry, build_default_registry
 from ariadne.adapters.base import ProcessResult, ProcessSpec
-from ariadne.core.engagement import EngagementSnapshot, Objective, TargetSpec
-from ariadne.core.enums import AutonomyMode, EnvironmentProfile
 from ariadne.core.planner import Planner
 from ariadne.core.policy import CapabilityRule, EffectivePolicy
 from ariadne.core.workflow import WorkflowCatalog
@@ -47,8 +45,10 @@ class FakeRuntime:
     def __init__(self, exit_code: int = 0, stdout: str = "") -> None:
         self._exit_code = exit_code
         self._stdout = stdout
+        self.calls = 0
 
     async def run(self, spec: ProcessSpec) -> ProcessResult:
+        self.calls += 1
         return ProcessResult(
             exit_code=self._exit_code,
             stdout=self._stdout,
@@ -335,6 +335,103 @@ class TestExecutePlanHandler:
         )
         assert result["status"] == "error"
 
+    async def test_rejects_plan_created_by_different_trusted_session(
+        self,
+        command: AriadneCommand,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+    ) -> None:
+        session_a = "plan-owner-session"
+        session_b = "different-session"
+        snapshot_hash = await _bind_engagement(command, session_a)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "owner plan"},
+            session_id=session_a,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        command.handle(f"approve {proposed['plan_id']}")
+        await _bind_engagement(command, session_b)
+
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_b,
+            ariadne_command=command,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+        )
+
+        assert result["status"] == "error"
+        assert "session" in result["message"].lower()
+        assert fake_runtime.calls == 0
+        assert all(
+            event["event_type"] != "plan_executed"
+            for snapshot in command.store.iter_snapshots()
+            for handle in (command.store.open(snapshot.engagement_id),)
+            if handle is not None
+            for event in command.store.read_events(handle)
+        )
+
+    async def test_rejects_plan_after_active_snapshot_changes(
+        self,
+        command: AriadneCommand,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+    ) -> None:
+        session_id = "stale-plan-session"
+        replacement_session = "replacement-session"
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "stale plan"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        command.handle(f"approve {proposed['plan_id']}")
+        await _bind_engagement(command, replacement_session)
+        replacement = command.get_session_binding(replacement_session)
+        assert replacement is not None
+        assert replacement.engagement_id is not None
+        replacement_handle = command.store.open(replacement.engagement_id)
+        assert replacement_handle is not None
+        command.store.append_event(
+            replacement_handle,
+            Event(
+                event_type="session_bound",
+                payload={
+                    "session_id": session_id,
+                    "snapshot_hash": replacement.snapshot_hash,
+                },
+                timestamp=datetime.now(UTC),
+            ),
+        )
+        command.ledger.unbind_session(session_id)
+
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=command,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+        )
+
+        assert result["status"] == "error"
+        assert "snapshot" in result["message"].lower()
+        assert fake_runtime.calls == 0
+        assert all(
+            event["event_type"] != "plan_executed"
+            for snapshot in command.store.iter_snapshots()
+            for handle in (command.store.open(snapshot.engagement_id),)
+            if handle is not None
+            for event in command.store.read_events(handle)
+        )
+
     async def test_executes_approved_plan(
         self,
         command: AriadneCommand,
@@ -398,27 +495,14 @@ class TestRenderReportHandler:
         session_id: str,
     ) -> None:
         """Handler renders a walkthrough report for an active engagement."""
-        snapshot_hash = await _bind_engagement(command, session_id)
+        await _bind_engagement(command, session_id)
 
         # The store should have the run handle — we need events to pass validation
         binding = command.ledger.get_session_binding(session_id)
         assert binding is not None, "No session binding found"
         assert binding.engagement_id is not None
-        handle = command.store.create(
-            EngagementSnapshot(
-                engagement_id=binding.engagement_id,
-                revision=1,
-                previous_snapshot_hash=None,
-                snapshot_hash=snapshot_hash,
-                confirmed_at=datetime.now(UTC),
-                authorization_attested=True,
-                disclaimer_version="2026-07-27",
-                profile=EnvironmentProfile.PRIVATE_LAB,
-                autonomy=AutonomyMode.CONTROLLED,
-                targets=(TargetSpec(host="10.10.10.10"),),
-                objectives=(Objective(kind="proof", description="test"),),
-            )
-        )
+        handle = command.store.open(binding.engagement_id)
+        assert handle is not None
         _populate_test_events(command.store, handle)
 
         result = await handle_render_report(
@@ -436,27 +520,14 @@ class TestRenderReportHandler:
         session_id: str,
     ) -> None:
         """Handler renders a professional HTML report."""
-        snapshot_hash = await _bind_engagement(command, session_id)
+        await _bind_engagement(command, session_id)
 
         # Populate events
         binding = command.ledger.get_session_binding(session_id)
         assert binding is not None
         assert binding.engagement_id is not None
-        handle = command.store.create(
-            EngagementSnapshot(
-                engagement_id=binding.engagement_id,
-                revision=1,
-                previous_snapshot_hash=None,
-                snapshot_hash=snapshot_hash,
-                confirmed_at=datetime.now(UTC),
-                authorization_attested=True,
-                disclaimer_version="2026-07-27",
-                profile=EnvironmentProfile.PRIVATE_LAB,
-                autonomy=AutonomyMode.CONTROLLED,
-                targets=(TargetSpec(host="10.10.10.10"),),
-                objectives=(Objective(kind="proof", description="test"),),
-            )
-        )
+        handle = command.store.open(binding.engagement_id)
+        assert handle is not None
         _populate_test_events(command.store, handle)
 
         result = await handle_render_report(

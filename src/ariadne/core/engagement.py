@@ -176,6 +176,26 @@ def _make_content_hash(data: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def calculate_snapshot_hash(snapshot: EngagementSnapshot) -> str:
+    """Recalculate a snapshot's self-hash from every other persisted field."""
+    data = {
+        "engagement_id": str(snapshot.engagement_id),
+        "revision": snapshot.revision,
+        "previous_snapshot_hash": snapshot.previous_snapshot_hash,
+        "confirmed_at": snapshot.confirmed_at.isoformat(),
+        "authorization_attested": snapshot.authorization_attested,
+        "disclaimer_version": snapshot.disclaimer_version,
+        "profile": snapshot.profile.value,
+        "autonomy": snapshot.autonomy.value,
+        "targets": [target.model_dump(mode="json") for target in snapshot.targets],
+        "objectives": [
+            objective.model_dump(mode="json") for objective in snapshot.objectives
+        ],
+        "constraints": snapshot.constraints.model_dump(mode="json"),
+    }
+    return _make_content_hash(data)
+
+
 def lock_engagement(
     draft: EngagementDraft,
     confirmation: Confirmation,

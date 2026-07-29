@@ -107,6 +107,12 @@ session. The typical lifecycle:
    report
 8. **`/ariadne abort`** — Stop the current engagement
 
+The current runtime requires plan approval in both autonomy modes. Continuous
+execution for curated, in-policy plans and automatic offline reporting are the
+next milestone, with blocking pauses retained for scope, policy, installation,
+uncurated code, missing decisions, unauthorized high-impact actions, and
+SysReptor network push.
+
 See the [Operator Guide](docs/operator-guide.md) for detailed walkthroughs.
 
 ## Report locations
