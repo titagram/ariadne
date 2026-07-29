@@ -79,8 +79,13 @@ class NucleiRuntime(DryRunRuntime):
 
 
 class BuiltinProgressionRuntime(DryRunRuntime):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.argv_calls: list[tuple[str, ...]] = []
+
     async def run(self, spec) -> ProcessResult:
         self.calls += 1
+        self.argv_calls.append(tuple(spec.argv))
         if spec.argv[0] == "ping":
             return ProcessResult(
                 exit_code=0,
@@ -96,6 +101,9 @@ class BuiltinProgressionRuntime(DryRunRuntime):
                     '<ports><port protocol="tcp" portid="80">'
                     '<state state="open"/><service name="http" '
                     'product="Apache httpd" version="2.4.58"/>'
+                    '</port><port protocol="tcp" portid="22">'
+                    '<state state="open"/><service name="ssh" '
+                    'product="OpenSSH" version="9.6"/>'
                     "</port></ports></host></nmaprun>"
                 ),
                 stderr="",
@@ -716,7 +724,7 @@ async def test_persisted_validated_research_injects_target_bound_nuclei_candidat
 
 
 @pytest.mark.asyncio
-async def test_builtin_catalog_reaches_structured_research_boundary(
+async def test_builtin_catalog_researches_each_service_without_blind_validation(
     tmp_path,
 ) -> None:
     catalog = WorkflowCatalog.load(Path(__file__).parents[2] / "workflows")
@@ -753,7 +761,7 @@ async def test_builtin_catalog_reaches_structured_research_boundary(
 
     result = json.loads(
         await run(
-            {"max_steps": 10},
+            {"max_steps": 6},
             session_id="builtin-progression-session",
         )
     )
@@ -765,7 +773,7 @@ async def test_builtin_catalog_reaches_structured_research_boundary(
 
     assert created["status"] == "active"
     assert result["status"] == "blocked"
-    assert result["boundary"] == "missing_validated_candidate", (
+    assert result["boundary"] == "safety_step_limit", (
         result,
         [
             event.get("payload", {}).get("error")
@@ -773,7 +781,16 @@ async def test_builtin_catalog_reaches_structured_research_boundary(
             if event.get("payload", {}).get("error")
         ],
     )
-    assert runtime.calls == 9
+    research_queries = [
+        call
+        for call in runtime.argv_calls
+        if call and call[0] == "searchsploit"
+    ]
+    assert {call[-2:] for call in research_queries} == {
+        ("Apache httpd", "2.4.58"),
+        ("OpenSSH", "9.6"),
+    }
+    assert not any(call and call[0] == "nuclei" for call in runtime.argv_calls)
     assert [
         event["payload"]["playbook_id"]
         for event in events
@@ -784,10 +801,21 @@ async def test_builtin_catalog_reaches_structured_research_boundary(
         "network.service-fingerprint.v1",
         "service.protocol-routing.v1",
         "research.service-vulnerability.v1",
+        "research.service-vulnerability.v1",
     ]
+    routed_ports = {
+        event["payload"]["observation_data"]["port"]
+        for event in events
+        if (
+            event["event_type"] == "evidence_collected"
+            and event["payload"]["evidence_type"] == "protocol_routed"
+            and event["payload"]["execution_classification"] == "success"
+        )
+    }
+    assert routed_ports == {22, 80}
     assert any(
         event["event_type"] == "evidence_collected"
-        and event["payload"]["evidence_type"] == "protocol_routed"
+        and event["payload"]["evidence_type"] == "research_complete"
         and event["payload"]["execution_classification"] == "success"
         for event in events
     )

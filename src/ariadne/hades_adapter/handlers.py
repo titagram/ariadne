@@ -497,8 +497,17 @@ def _determine_engagement_state(
         return EngagementState.POST_EXPLOITATION, tuple(observations)
     if "vulnerability_validated" in evidence_types or "exploit_succeeded" in evidence_types:
         return EngagementState.FOOTHOLD, tuple(observations)
-    if "research_complete" in evidence_types or "cve_reference" in evidence_types:
+    target = (
+        run_handle.snapshot.targets[0]
+        if run_handle.snapshot.targets
+        else TargetSpec(host="unknown")
+    )
+    if _persisted_research_candidates(events, run_handle, target.host):
         return EngagementState.VALIDATION, tuple(observations)
+    if "research_complete" in evidence_types:
+        if _latest_service_fingerprint(tuple(observations), target) is not None:
+            return EngagementState.HYPOTHESIS, tuple(observations)
+        return EngagementState.ENUMERATION, tuple(observations)
     if "protocol_routed" in evidence_types:
         return EngagementState.HYPOTHESIS, tuple(observations)
     if "service_fingerprinted" in evidence_types:
@@ -537,6 +546,14 @@ def _typed_progression_observations(
     def add(kind: str, observation: Observation) -> None:
         if any(
             existing.source == kind and existing.target == observation.target
+            and (
+                kind != "protocol_routed"
+                or (
+                    existing.data.get("port") == observation.data.get("port")
+                    and existing.data.get("protocol") == observation.data.get("protocol")
+                    and existing.data.get("service") == observation.data.get("service")
+                )
+            )
             for existing in (*observations, *additions)
         ):
             return
@@ -853,13 +870,31 @@ def _latest_service_fingerprint(
     observations: tuple[Observation, ...],
     target: TargetSpec,
 ) -> dict[str, Any] | None:
-    """Return the newest real service fingerprint for the exact target."""
+    """Return the newest real fingerprint not already covered by research."""
+    researched = {
+        identity
+        for observation in observations
+        if observation.target == target
+        and observation.source == "research_complete"
+        and isinstance(observation.data.get("fingerprint"), dict)
+        and (
+            identity := _service_fingerprint_identity(
+                observation.data["fingerprint"],
+            )
+        )
+        is not None
+    }
+    seen: set[tuple[str, str, str, int | None, str]] = set()
     for observation in reversed(observations):
         if observation.target != target or observation.source not in {
             "service_fingerprinted",
             "protocol_routed",
         }:
             continue
+        identity = _service_fingerprint_identity(observation.data)
+        if identity is None or identity in seen or identity in researched:
+            continue
+        seen.add(identity)
         product = observation.data.get("product")
         if not isinstance(product, str) or not product.strip():
             product = observation.data.get("service")
@@ -875,6 +910,27 @@ def _latest_service_fingerprint(
             fingerprint["port"] = port
         return fingerprint
     return None
+
+
+def _service_fingerprint_identity(
+    data: dict[str, Any],
+) -> tuple[str, str, str, int | None, str] | None:
+    product = data.get("product")
+    if not isinstance(product, str) or not product.strip():
+        product = data.get("service")
+    if not isinstance(product, str) or not product.strip():
+        return None
+    version = data.get("version")
+    protocol = data.get("protocol")
+    port = data.get("port")
+    cpe = data.get("cpe")
+    return (
+        product.strip().casefold(),
+        version.strip().casefold() if isinstance(version, str) else "",
+        protocol.strip().casefold() if isinstance(protocol, str) else "",
+        port if isinstance(port, int) and not isinstance(port, bool) and port > 0 else None,
+        cpe.strip().casefold() if isinstance(cpe, str) else "",
+    )
 
 
 def _get_binding(cmd: AriadneCommand, session_id: str) -> dict[str, Any] | None:
@@ -1268,6 +1324,19 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
 
     # 5. Find eligible playbooks and build the first plan
     eligible = catalog.eligible(planning_context)
+    unresearched_fingerprint = _latest_service_fingerprint(
+        observations,
+        first_target,
+    )
+    eligible = tuple(
+        playbook
+        for playbook in eligible
+        if playbook.id not in executed_playbooks
+        or (
+            playbook.id == "research.service-vulnerability.v1"
+            and unresearched_fingerprint is not None
+        )
+    )
     last_completed_playbook = next(
         (
             event.get("payload", {}).get("playbook_id")
@@ -1279,9 +1348,11 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
     )
     if last_completed_playbook in catalog.playbooks:
         allowed_next = catalog.playbooks[last_completed_playbook].next_playbooks
-        eligible = tuple(playbook for playbook in eligible if playbook.id in allowed_next)
-    # Filter out playbooks already executed in this engagement
-    eligible = tuple(p for p in eligible if p.id not in executed_playbooks)
+        preferred = tuple(
+            playbook for playbook in eligible if playbook.id in allowed_next
+        )
+        if preferred:
+            eligible = preferred
     excluded = tuple(
         (playbook, conflict)
         for playbook in eligible
