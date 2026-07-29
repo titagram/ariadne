@@ -452,11 +452,17 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
     from ariadne.store.run_store import Event
 
     capabilities = sorted(playbook.capabilities)
+    approval_correlation_id = uuid4().hex
     proposal_payload = {
         "plan_id": plan.plan_id,
         "playbook_id": plan.playbook_id,
         "snapshot_hash": snapshot_hash,
         "session_id": input_session_id,
+        "trusted_session_id": input_session_id,
+        "plan": plan.model_dump(mode="json"),
+        "expires_at": plan.expires_at.isoformat(),
+        "approval_state": "pending",
+        "approval_correlation_id": approval_correlation_id,
         "autonomy": snapshot.autonomy.value,
         "capabilities": capabilities,
         "requires_manual_approval": plan.requires_manual_approval,
@@ -482,23 +488,36 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         }
 
     # 7. Record the plan in the command's plan ledger, initially unapproved.
-    cmd.add_plan(plan, snapshot_hash, input_session_id)
+    cmd.add_plan(
+        plan,
+        snapshot_hash,
+        input_session_id,
+        approval_correlation_id=approval_correlation_id,
+    )
 
     should_auto_approve = (
         snapshot.autonomy == AutonomyMode.FULL
         and not plan.requires_manual_approval
     )
     if should_auto_approve:
+        approved_at = datetime.now(UTC)
         try:
             cmd.store.append_event(
                 run_handle,
                 Event(
                     event_type="plan_auto_approved",
                     payload={
-                        **proposal_payload,
+                        "plan_id": plan.plan_id,
+                        "snapshot_hash": snapshot_hash,
+                        "trusted_session_id": input_session_id,
+                        "approval_correlation_id": approval_correlation_id,
+                        "approval_state": "approved",
+                        "approval_source": "full_autonomy_policy",
+                        "approved_at": approved_at.isoformat(),
+                        "capabilities": capabilities,
                         "reason": "full_autonomy_curated_in_policy",
                     },
-                    timestamp=datetime.now(UTC),
+                    timestamp=approved_at,
                 ),
             )
         except Exception as exc:
@@ -586,6 +605,11 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
 
     # 2. Check plan exists
     record = cmd.get_plan_record(plan_id)
+    if record is None:
+        record = cmd.get_plan_record(
+            plan_id,
+            trusted_session_id=input_session_id,
+        )
     if record is None:
         return {
             "status": "error",

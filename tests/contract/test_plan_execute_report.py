@@ -431,7 +431,10 @@ class TestProposePlanHandler:
         plan_id = result["plan_id"]
 
         # Approve via the /ariadne command
-        response = command.handle(f"approve {plan_id}")
+        response = command.handle(
+            f"approve {plan_id}",
+            trusted_session_id=session_id,
+        )
         assert "approved" in response.lower(), f"Expected approval, got: {response}"
 
 
@@ -515,7 +518,10 @@ class TestExecutePlanHandler:
             planner=planner,
             catalog=catalog,
         )
-        command.handle(f"approve {proposed['plan_id']}")
+        command.handle(
+            f"approve {proposed['plan_id']}",
+            trusted_session_id=session_a,
+        )
         await _bind_engagement(command, session_b)
 
         result = await handle_execute_plan(
@@ -555,7 +561,10 @@ class TestExecutePlanHandler:
             planner=planner,
             catalog=catalog,
         )
-        command.handle(f"approve {proposed['plan_id']}")
+        command.handle(
+            f"approve {proposed['plan_id']}",
+            trusted_session_id=session_id,
+        )
         await _bind_engagement(command, replacement_session)
         replacement = command.get_session_binding(replacement_session)
         assert replacement is not None
@@ -633,7 +642,10 @@ class TestExecutePlanHandler:
         plan_id = propose_result["plan_id"]
 
         # Approve plan
-        approve_resp = command.handle(f"approve {plan_id}")
+        approve_resp = command.handle(
+            f"approve {plan_id}",
+            trusted_session_id=session_id,
+        )
         assert "approved" in approve_resp.lower()
 
         # Execute with adapter registry and fake runtime
@@ -705,7 +717,10 @@ class TestExecutePlanHandler:
             planner=planner,
             catalog=catalog,
         )
-        command.handle(f"approve {proposed['plan_id']}")
+        command.handle(
+            f"approve {proposed['plan_id']}",
+            trusted_session_id=session_id,
+        )
 
         def reject_drift(snapshot):
             raise PolicyConfigurationError("policy source digests changed")
@@ -722,6 +737,191 @@ class TestExecutePlanHandler:
         assert result["status"] == "error"
         assert "new snapshot" in result["message"].lower()
         assert fake_runtime.calls == 0
+
+    async def test_restart_recovers_and_executes_durable_auto_approval(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+    ) -> None:
+        snapshot_hash = await _bind_engagement(
+            command,
+            session_id,
+            autonomy="full",
+        )
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "restart-safe"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+
+        restarted = AriadneCommand(
+            ledger=ChallengeLedger(),
+            store=command.store,
+        )
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=restarted,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+        )
+
+        assert proposed["status"] == "plan_auto_approved"
+        assert result["status"] in ("executed", "partial")
+        recovered = restarted.get_plan_record(
+            proposed["plan_id"],
+            trusted_session_id=session_id,
+        )
+        assert recovered is not None
+        assert recovered.approved is True
+        assert recovered.approval_source == "full_autonomy_policy"
+
+    async def test_restart_manual_approval_is_durable_and_session_bound(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+    ) -> None:
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "manual restart"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+
+        restarted = AriadneCommand(
+            ledger=ChallengeLedger(),
+            store=command.store,
+        )
+        missing = restarted.handle(f"approve {proposed['plan_id']}")
+        cross_session = restarted.handle(
+            f"approve {proposed['plan_id']}",
+            trusted_session_id="another-session",
+        )
+        approved = restarted.handle(
+            f"approve {proposed['plan_id']}",
+            trusted_session_id=session_id,
+        )
+
+        assert "trusted hades session" in missing.lower()
+        assert "different" in cross_session.lower() or "unknown" in cross_session.lower()
+        assert "approved" in approved.lower()
+
+        after_second_restart = AriadneCommand(
+            ledger=ChallengeLedger(),
+            store=command.store,
+        )
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=after_second_restart,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+        )
+        assert result["status"] in ("executed", "partial")
+        recovered = after_second_restart.get_plan_record(
+            proposed["plan_id"],
+            trusted_session_id=session_id,
+        )
+        assert recovered is not None
+        assert recovered.approval_source == "user"
+
+    async def test_tampered_durable_plan_fails_closed_after_restart(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+    ) -> None:
+        snapshot_hash = await _bind_engagement(
+            command,
+            session_id,
+            autonomy="full",
+        )
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "immutable"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        binding = command.get_session_binding(session_id)
+        assert binding is not None and binding.engagement_id is not None
+        handle = command.store.open(binding.engagement_id)
+        assert handle is not None
+        events_path = handle.path / "events.jsonl"
+        events_path.write_text(
+            events_path.read_text().replace("immutable", "tampered"),
+            encoding="utf-8",
+        )
+
+        restarted = AriadneCommand(
+            ledger=ChallengeLedger(),
+            store=command.store,
+        )
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=restarted,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+        )
+
+        assert result["status"] == "error"
+        assert fake_runtime.calls == 0
+
+    async def test_plan_proposal_event_contains_complete_recoverable_record(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+    ) -> None:
+        snapshot_hash = await _bind_engagement(
+            command,
+            session_id,
+            autonomy="full",
+        )
+        proposed = await handle_propose_plan(
+            {"snapshot_hash": snapshot_hash, "hypothesis": "durable record"},
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        binding = command.get_session_binding(session_id)
+        assert binding is not None and binding.engagement_id is not None
+        handle = command.store.open(binding.engagement_id)
+        assert handle is not None
+        payload = next(
+            event["payload"]
+            for event in command.store.read_events(handle)
+            if event["event_type"] == "plan_proposed"
+            and event["payload"]["plan_id"] == proposed["plan_id"]
+        )
+
+        assert payload["plan"]["plan_id"] == proposed["plan_id"]
+        assert payload["trusted_session_id"] == session_id
+        assert payload["snapshot_hash"] == snapshot_hash
+        assert payload["expires_at"] == proposed["expires_at"]
+        assert payload["approval_state"] == "pending"
+        assert payload["approval_correlation_id"]
 
 
 class TestRenderReportHandler:

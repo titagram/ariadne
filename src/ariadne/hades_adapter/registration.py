@@ -66,7 +66,14 @@ def _register_command(ctx: Any, services: ServiceContainer) -> None:
 
     async def command_handler(args: str, **context: object) -> dict[str, object]:
         del context
-        response = services.command.handle(args)
+        try:
+            trusted_session_id = _trusted_session_id_from_hades()
+        except RuntimeError as exc:
+            return {"output": f"Error: {exc}"}
+        response = services.command.handle(
+            args,
+            trusted_session_id=trusted_session_id,
+        )
         return {"output": response}
 
     ctx.register_command(
@@ -78,6 +85,42 @@ def _register_command(ctx: Any, services: ServiceContainer) -> None:
             "reject <plan-id>|evidence|report|abort|doctor]"
         ),
     )
+
+
+def _trusted_session_id_from_hades() -> str:
+    """Resolve the current command session from Hades-owned ContextVars.
+
+    The slash command never accepts a session identifier in its arguments.
+    If both supported Hades APIs are available they must agree; otherwise
+    approval commands fail closed through an empty identity.
+    """
+    from importlib import import_module
+
+    identities: list[str] = []
+    try:
+        get_current_session_key = import_module(
+            "tools.approval"
+        ).get_current_session_key
+        primary = get_current_session_key(default="")
+        if isinstance(primary, str) and primary.strip():
+            identities.append(primary.strip())
+    except (ImportError, LookupError, RuntimeError, TypeError):
+        pass
+
+    try:
+        get_session_env = import_module(
+            "gateway.session_context"
+        ).get_session_env
+        secondary = get_session_env("HERMES_SESSION_ID", "")
+        if isinstance(secondary, str) and secondary.strip():
+            identities.append(secondary.strip())
+    except (ImportError, LookupError, RuntimeError, TypeError):
+        pass
+
+    unique = set(identities)
+    if len(unique) > 1:
+        raise RuntimeError("Ambiguous trusted Hades session identity.")
+    return identities[0] if identities else ""
 
 
 def _register_hook(ctx: Any, services: ServiceContainer) -> None:

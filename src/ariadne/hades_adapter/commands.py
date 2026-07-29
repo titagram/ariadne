@@ -29,10 +29,6 @@ from ariadne.store.run_store import RunStore
 
 CURRENT_DISCLAIMER_VERSION = "2026-07-28"
 
-# Shared plan ledger — keyed by plan_id, stored alongside the ChallengeLedger
-# so both tool handlers and /ariadne commands see the same plans.
-_PLAN_LEDGER: dict[str, PlanRecord] = {}
-
 # ── Recognised commands and their argument counts ──────────────────────────
 
 
@@ -82,6 +78,7 @@ class PlanRecord:
         plan: The bounded Plan object.
         snapshot_hash: Hash of the engagement snapshot at proposal time.
         session_id: Hades session that proposed this plan.
+        approval_correlation_id: Durable proposal/approval correlation key.
         approved: Whether the plan has been manually or automatically approved.
         approved_at: When the plan was approved (None if not yet approved).
         approval_source: Provenance for the approval decision.
@@ -91,6 +88,7 @@ class PlanRecord:
     plan: Plan
     snapshot_hash: str
     session_id: str
+    approval_correlation_id: str
     approved: bool = False
     approved_at: float | None = None
     approval_source: str | None = None
@@ -111,6 +109,7 @@ class AriadneCommand:
     def __init__(self, ledger: ChallengeLedger, store: RunStore) -> None:
         self.ledger = ledger
         self.store = store
+        self._plan_ledger: dict[str, PlanRecord] = {}
 
     # ── Parsing ─────────────────────────────────────────────────────────
 
@@ -263,7 +262,12 @@ class AriadneCommand:
 
     # ── Handle: process parsed /ariadne commands ────────────────────────
 
-    def handle(self, raw_args: str) -> str:
+    def handle(
+        self,
+        raw_args: str,
+        *,
+        trusted_session_id: str = "",
+    ) -> str:
         """Parse and execute a raw /ariadne command string.
 
         This is the main entry point for the ``/ariadne`` command handler.
@@ -289,7 +293,10 @@ class AriadneCommand:
             return self._handle_status()
 
         if result.command == "approve":
-            return self._handle_approve(result.args[0])
+            return self._handle_approve(
+                result.args[0],
+                trusted_session_id=trusted_session_id,
+            )
 
         if result.command == "reject":
             return self._handle_reject(result.args[0])
@@ -317,15 +324,69 @@ class AriadneCommand:
         """Return the current engagement status."""
         return "Use ariadne_status to inspect the current session engagement."
 
-    def _handle_approve(self, plan_id: str) -> str:
-        """Approve a plan by id."""
-        record = _PLAN_LEDGER.get(plan_id)
+    def _handle_approve(
+        self,
+        plan_id: str,
+        *,
+        trusted_session_id: str,
+    ) -> str:
+        """Durably approve a plan using only trusted Hades session identity."""
+        if not trusted_session_id:
+            return "Error: A trusted Hades session identity is required for approval."
+        record = self.get_plan_record(
+            plan_id,
+            trusted_session_id=trusted_session_id,
+        )
         if record is None:
             return f"Error: Unknown plan: {plan_id!r}"
+        if record.session_id != trusted_session_id:
+            return "Error: Plan belongs to a different trusted Hades session."
+        if record.rejected:
+            return f"Error: Plan {plan_id!r} was rejected."
         if record.approved:
             return f"Plan {plan_id!r} was already approved."
+        if time.time() > record.plan.expires_at.timestamp():
+            return f"Error: Plan {plan_id!r} has expired."
+
+        binding = self.get_session_binding(trusted_session_id)
+        if (
+            binding is None
+            or binding.engagement_id is None
+            or binding.snapshot_hash != record.snapshot_hash
+        ):
+            return "Error: Plan is not bound to the active trusted Hades session."
+        handle = self.store.open(binding.engagement_id)
+        if handle is None:
+            return "Error: Engagement run is unavailable."
+
+        from ariadne.store.integrity import verify_run
+        from ariadne.store.run_store import Event
+
+        if not verify_run(handle.path).valid:
+            return "Error: Engagement event chain failed integrity verification."
+
+        approved_at = datetime.now(UTC)
+        try:
+            self.store.append_event(
+                handle,
+                Event(
+                    event_type="plan_manually_approved",
+                    payload={
+                        "plan_id": plan_id,
+                        "snapshot_hash": record.snapshot_hash,
+                        "trusted_session_id": trusted_session_id,
+                        "approval_correlation_id": record.approval_correlation_id,
+                        "approval_state": "approved",
+                        "approval_source": "user",
+                        "approved_at": approved_at.isoformat(),
+                    },
+                    timestamp=approved_at,
+                ),
+            )
+        except Exception as exc:
+            return f"Error: Could not persist plan approval: {exc}"
         record.approved = True
-        record.approved_at = time.time()
+        record.approved_at = approved_at.timestamp()
         record.approval_source = "user"
         return (
             f"Plan {plan_id!r} approved. "
@@ -334,7 +395,7 @@ class AriadneCommand:
 
     def _handle_reject(self, plan_id: str) -> str:
         """Reject a plan by id."""
-        record = _PLAN_LEDGER.get(plan_id)
+        record = self._plan_ledger.get(plan_id)
         if record is None:
             return f"Error: Unknown plan: {plan_id!r}"
         if record.rejected:
@@ -348,7 +409,14 @@ class AriadneCommand:
 
     # ── Plan ledger ─────────────────────────────────────────────────────
 
-    def add_plan(self, plan: Plan, snapshot_hash: str, session_id: str) -> str:
+    def add_plan(
+        self,
+        plan: Plan,
+        snapshot_hash: str,
+        session_id: str,
+        *,
+        approval_correlation_id: str,
+    ) -> str:
         """Register a proposed plan in the plan ledger.
 
         Args:
@@ -363,17 +431,133 @@ class AriadneCommand:
             plan=plan,
             snapshot_hash=snapshot_hash,
             session_id=session_id,
+            approval_correlation_id=approval_correlation_id,
         )
-        _PLAN_LEDGER[plan.plan_id] = record
+        self._plan_ledger[plan.plan_id] = record
         return plan.plan_id
 
-    def get_plan_record(self, plan_id: str) -> PlanRecord | None:
-        """Retrieve a plan record by id from the ledger."""
-        return _PLAN_LEDGER.get(plan_id)
+    def get_plan_record(
+        self,
+        plan_id: str,
+        *,
+        trusted_session_id: str = "",
+    ) -> PlanRecord | None:
+        """Retrieve or integrity-recover a plan record from durable events."""
+        record = self._plan_ledger.get(plan_id)
+        if record is not None:
+            if trusted_session_id and record.session_id != trusted_session_id:
+                return None
+            return record
+        if not trusted_session_id:
+            return None
+        record = self._recover_plan_record(plan_id, trusted_session_id)
+        if record is not None:
+            self._plan_ledger[plan_id] = record
+        return record
+
+    def _recover_plan_record(
+        self,
+        plan_id: str,
+        trusted_session_id: str,
+    ) -> PlanRecord | None:
+        """Rebuild one plan only from a verified, session-bound event chain."""
+        binding = self.get_session_binding(trusted_session_id)
+        if binding is None or binding.engagement_id is None:
+            return None
+        handle = self.store.open(binding.engagement_id)
+        if handle is None:
+            return None
+
+        from ariadne.store.integrity import verify_run
+
+        if not verify_run(handle.path).valid:
+            return None
+
+        proposal: dict[str, Any] | None = None
+        approvals: list[tuple[str, dict[str, Any]]] = []
+        for event in self.store.read_events(handle):
+            payload = event.get("payload", {})
+            if payload.get("plan_id") != plan_id:
+                continue
+            event_type = event.get("event_type")
+            if event_type == "plan_proposed":
+                if proposal is not None:
+                    return None
+                proposal = payload
+            elif event_type in {
+                "plan_auto_approved",
+                "plan_manually_approved",
+                "plan_rejected",
+            }:
+                if proposal is None:
+                    return None
+                approvals.append((str(event_type), payload))
+
+        if proposal is None:
+            return None
+        try:
+            plan = Plan.model_validate(proposal["plan"])
+            correlation_id = proposal["approval_correlation_id"]
+            valid_proposal = (
+                isinstance(correlation_id, str)
+                and bool(correlation_id)
+                and proposal.get("approval_state") == "pending"
+                and proposal.get("trusted_session_id") == trusted_session_id
+                and proposal.get("session_id") == trusted_session_id
+                and proposal.get("snapshot_hash") == binding.snapshot_hash
+                and proposal.get("snapshot_hash") == plan.snapshot_hash
+                and proposal.get("plan_id") == plan.plan_id == plan_id
+                and proposal.get("expires_at") == plan.expires_at.isoformat()
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not valid_proposal:
+            return None
+
+        record = PlanRecord(
+            plan=plan,
+            snapshot_hash=plan.snapshot_hash,
+            session_id=trusted_session_id,
+            approval_correlation_id=correlation_id,
+        )
+        for event_type, payload in approvals:
+            if (
+                payload.get("approval_correlation_id") != correlation_id
+                or payload.get("snapshot_hash") != plan.snapshot_hash
+                or payload.get("trusted_session_id") != trusted_session_id
+                or payload.get("approval_state")
+                not in {"approved", "rejected"}
+            ):
+                return None
+            if event_type == "plan_rejected":
+                if record.approved:
+                    return None
+                record.rejected = True
+                continue
+            if record.rejected or record.approved:
+                return None
+            source = payload.get("approval_source")
+            if event_type == "plan_auto_approved":
+                if (
+                    source != "full_autonomy_policy"
+                    or plan.requires_manual_approval
+                    or handle.snapshot.autonomy != AutonomyMode.FULL
+                ):
+                    return None
+            elif source != "user":
+                return None
+            try:
+                approved_at = datetime.fromisoformat(payload["approved_at"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            record.approved = True
+            record.approved_at = approved_at.timestamp()
+            record.approval_source = str(source)
+        return record
 
     def auto_approve_plan(self, plan_id: str) -> None:
         """Mark a durably auto-approved full-autonomy plan as approved."""
-        record = _PLAN_LEDGER.get(plan_id)
+        record = self._plan_ledger.get(plan_id)
         if record is None:
             raise ValueError(f"Unknown plan: {plan_id!r}")
         if record.plan.requires_manual_approval:
@@ -384,14 +568,14 @@ class AriadneCommand:
 
     def is_plan_approved(self, plan_id: str) -> bool:
         """Check whether a plan has manual or automatic approval."""
-        record = _PLAN_LEDGER.get(plan_id)
+        record = self._plan_ledger.get(plan_id)
         if record is None:
             return False
         return record.approved
 
     def is_plan_expired(self, plan_id: str) -> bool:
         """Check whether a plan has expired (15 min TTL)."""
-        record = _PLAN_LEDGER.get(plan_id)
+        record = self._plan_ledger.get(plan_id)
         if record is None:
             return True
         return time.time() > record.plan.expires_at.timestamp()

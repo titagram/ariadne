@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pytest
+
 from ariadne.composition import register
 
 
@@ -21,6 +23,7 @@ class RecordingPluginContext:
     skills: list[tuple[str, Path]] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)
     commands: list[str] = field(default_factory=list)
+    command_handlers: dict[str, object] = field(default_factory=dict)
     hooks: list[str] = field(default_factory=list)
 
     def register_skill(self, name: str, path: Path, description: str) -> None:
@@ -49,6 +52,7 @@ class RecordingPluginContext:
         **kwargs: object,
     ) -> None:
         self.commands.append(name)
+        self.command_handlers[name] = handler
 
     def register_hook(self, hook_name: str, callback: object, **kwargs: object) -> None:
         self.hooks.append(hook_name)
@@ -70,3 +74,23 @@ def test_register_exposes_namespaced_skill_tools_command_and_hook() -> None:
     }
     assert "ariadne" in ctx.commands
     assert "pre_tool_call" in ctx.hooks
+
+
+@pytest.mark.asyncio
+async def test_slash_approval_fails_closed_without_hades_contextvar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user/model argument can never substitute for Hades-owned identity."""
+    from ariadne.hades_adapter import registration
+
+    ctx = RecordingPluginContext(profile_name="test")
+    register(ctx)
+    monkeypatch.setattr(
+        registration,
+        "_trusted_session_id_from_hades",
+        lambda: "",
+    )
+    handler = ctx.command_handlers["ariadne"]
+    response = await handler("approve arbitrary-plan")  # type: ignore[operator]
+
+    assert "trusted hades session" in str(response["output"]).lower()

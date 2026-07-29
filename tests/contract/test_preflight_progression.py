@@ -278,7 +278,10 @@ class TestAdapterExecution:
         plan_id = propose_result["plan_id"]
 
         # Approve via /ariadne
-        approve_resp = command.handle(f"approve {plan_id}")
+        approve_resp = command.handle(
+            f"approve {plan_id}",
+            trusted_session_id=session_id,
+        )
         assert "approved" in approve_resp.lower()
 
         # Execute — this test was RED because handle_execute_plan used simulated events.
