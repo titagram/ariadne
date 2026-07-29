@@ -151,6 +151,9 @@ def _handler_for(tool_name: str, services: ServiceContainer) -> object:
         context["adapter_registry"] = services.adapter_registry
         context["runtime"] = services.adapter_registry.default_runtime
         context["consent_gateway"] = services.consent_gateway
+        context["execution_contract_registry"] = (
+            services.execution_contract_registry
+        )
         result = await raw(args, **context)
         return json.dumps(result)
 

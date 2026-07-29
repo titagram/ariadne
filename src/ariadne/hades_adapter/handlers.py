@@ -9,6 +9,7 @@ operations. Session identity always comes from trusted Hades context.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
@@ -24,6 +25,11 @@ from ariadne.core.planner import Planner
 from ariadne.core.policy import EffectivePolicy
 from ariadne.core.workflow import PlanningContext, WorkflowCatalog
 from ariadne.evidence.collector import EvidenceCollector
+from ariadne.execution.contracts import (
+    ExecutionContractRegistry,
+    ExecutionEnvelope,
+    GuardedRuntime,
+)
 from ariadne.hades_adapter.commands import AriadneCommand
 from ariadne.hades_adapter.consent import ConsentDecision, ConsentGateway
 from ariadne.hades_adapter.schemas import PrepareEngagementInput
@@ -108,6 +114,23 @@ def _get_consent_gateway(context: dict[str, Any]) -> ConsentGateway:
     if not isinstance(gateway, ConsentGateway):
         raise TypeError("No trusted composition consent gateway is available.")
     return gateway
+
+
+_DEFAULT_EXECUTION_CONTRACT_REGISTRY = ExecutionContractRegistry.curated()
+
+
+def _get_execution_contract_registry(
+    context: dict[str, Any],
+) -> ExecutionContractRegistry:
+    registry = context.get(
+        "execution_contract_registry",
+        _DEFAULT_EXECUTION_CONTRACT_REGISTRY,
+    )
+    if not isinstance(registry, ExecutionContractRegistry):
+        raise TypeError(
+            "No trusted composition execution contract registry is available."
+        )
+    return registry
 
 
 def _determine_engagement_state(
@@ -811,7 +834,42 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
     actions_failed = 0
     evidence_artifacts: list[dict[str, Any]] = []
 
-    for action in record.plan.actions:
+    execution_contracts = _get_execution_contract_registry(context)
+    for action_index, action in enumerate(record.plan.actions):
+        envelope = ExecutionEnvelope.from_plan(
+            record.plan,
+            action_index=action_index,
+            run_root=run_handle.path,
+            policy_digests=execution_policy.source_digests,
+        )
+        envelope.verify_action(action)
+        contract = execution_contracts.get(
+            action.adapter,
+            action.operation,
+        )
+        if contract is None:
+            actions_failed += 1
+            cmd.store.append_event(
+                run_handle,
+                Event(
+                    event_type="process_authorization_blocked",
+                    payload={
+                        "plan_id": plan_id,
+                        "action_index": action_index,
+                        "action_digest": envelope.action_digest,
+                        "adapter": action.adapter,
+                        "operation": action.operation,
+                        "target": record.plan.target.host,
+                        "policy_source_digests": list(
+                            execution_policy.source_digests
+                        ),
+                        "reason": "no_curated_execution_contract",
+                    },
+                    timestamp=datetime.now(UTC),
+                ),
+            )
+            continue
+
         adapter = registry.get(action.adapter)
         if adapter is None:
             actions_failed += 1
@@ -840,19 +898,73 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
             snapshot_hash=record.snapshot_hash,
             engagement_id=engagement_id,
             adapter_name=action.adapter,
+            run_root=run_handle.path,
+            cwd=run_handle.path,
+            limits=record.plan.limits,
+            capabilities=record.plan.capabilities,
+            action_digest=envelope.action_digest,
         )
 
         planned_action = AdapterPlannedAction(
             operation=action.operation,
-            inputs=dict(action.inputs),
+            inputs=deepcopy(action.inputs),
         )
 
         try:
             # Generate ProcessSpec via adapter.plan() — argv at execution time
             process_spec = adapter.plan(planned_action, adapter_ctx)
+            envelope.verify_action(action)
+
+            def audit_block(
+                reason: str,
+                blocked_spec: Any,
+                attempts: int,
+                *,
+                _action_index: int = action_index,
+                _action_digest: str = envelope.action_digest,
+                _adapter: str = action.adapter,
+                _operation: str = action.operation,
+            ) -> None:
+                cmd.store.append_event(
+                    run_handle,
+                    Event(
+                        event_type="process_authorization_blocked",
+                        payload={
+                            "plan_id": plan_id,
+                            "action_index": _action_index,
+                            "action_digest": _action_digest,
+                            "adapter": _adapter,
+                            "operation": _operation,
+                            "target": record.plan.target.host,
+                            "policy_source_digests": list(
+                                execution_policy.source_digests
+                            ),
+                            "reason": reason,
+                            "attempts_consumed": attempts,
+                            "argv": (
+                                list(blocked_spec.argv)
+                                if blocked_spec is not None
+                                else []
+                            ),
+                        },
+                        timestamp=datetime.now(UTC),
+                    ),
+                )
+
+            guarded_runtime = GuardedRuntime(
+                runtime=runtime,
+                envelope=envelope,
+                contract=contract,
+                policy=execution_policy,
+                on_block=audit_block,
+            )
+            guarded_runtime.authorize_initial(process_spec)
 
             # Execute via runtime
-            process_result = await adapter.execute(process_spec, runtime)
+            process_result = await adapter.execute(
+                process_spec,
+                guarded_runtime,
+            )
 
             # Parse observations from output
             observations = adapter.parse(process_result)

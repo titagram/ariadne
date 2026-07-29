@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ariadne.core.engagement import TargetSpec
 from ariadne.core.errors import AdapterError  # noqa: F401 — re-exported for adapter SDK users
 from ariadne.core.observations import Observation
+from ariadne.core.workflow import PlaybookLimits
 from ariadne.runtime.process import ProcessResult, ProcessSpec
 
 
@@ -74,8 +75,12 @@ class AdapterContext(BaseModel):
     snapshot_hash: str
     engagement_id: UUID
     adapter_name: str
+    run_root: Path | None = None
     cwd: Path | None = None
     environment: dict[str, str] = Field(default_factory=dict)
+    limits: PlaybookLimits = Field(default_factory=PlaybookLimits)
+    capabilities: tuple[str, ...] = ()
+    action_digest: str = ""
 
 
 class ExecutionClassification(BaseModel):

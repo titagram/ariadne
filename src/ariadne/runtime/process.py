@@ -66,8 +66,12 @@ class ProcessSpec(BaseModel):
         return "\x00" in value
 
     def _is_shell_invocation(self, argv: tuple[str, ...]) -> bool:
+        normalized = (Path(argv[0]).name, *argv[1:])
         for prefix in self._SHELL_INVOCATIONS:
-            if len(argv) >= len(prefix) and argv[: len(prefix)] == prefix:
+            if (
+                len(normalized) >= len(prefix)
+                and normalized[: len(prefix)] == prefix
+            ):
                 return True
         return False
 

@@ -4,6 +4,7 @@ from pathlib import Path
 from ariadne.adapters import AdapterRegistry, build_default_registry
 from ariadne.core.planner import Planner
 from ariadne.core.workflow import WorkflowCatalog
+from ariadne.execution.contracts import ExecutionContractRegistry
 from ariadne.hades_adapter.commands import AriadneCommand
 from ariadne.hades_adapter.consent import (
     ConsentGateway,
@@ -27,6 +28,9 @@ class ServiceContainer:
     adapter_registry: AdapterRegistry = field(default_factory=build_default_registry)
     consent_gateway: ConsentGateway = field(
         default_factory=UnavailableConsentGateway
+    )
+    execution_contract_registry: ExecutionContractRegistry = field(
+        default_factory=ExecutionContractRegistry.curated
     )
     command: AriadneCommand = field(init=False)
     planner: Planner = field(init=False)

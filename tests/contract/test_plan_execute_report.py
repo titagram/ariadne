@@ -1117,6 +1117,58 @@ class TestExecutePlanHandler:
         assert result["status"] in ("executed", "partial"), f"Expected executed, got {result}"
         assert "plan_id" in result
 
+    async def test_unknown_contract_is_audited_before_adapter_plan(
+        self,
+        command: AriadneCommand,
+        session_id: str,
+        planner: Planner,
+        catalog: WorkflowCatalog,
+        registry: AdapterRegistry,
+        fake_runtime: FakeRuntime,
+    ) -> None:
+        snapshot_hash = await _bind_engagement(command, session_id)
+        proposed = await handle_propose_plan(
+            {
+                "snapshot_hash": snapshot_hash,
+                "hypothesis": "unknown operation cannot reach adapter planning",
+            },
+            session_id=session_id,
+            ariadne_command=command,
+            planner=planner,
+            catalog=catalog,
+        )
+        command.handle(
+            f"approve {proposed['plan_id']}",
+            trusted_session_id=session_id,
+        )
+        counting = BlockingNmapAdapter()
+        counting.release_execute.set()
+        registry.register("nmap", counting)
+
+        result = await handle_execute_plan(
+            {"plan_id": proposed["plan_id"]},
+            session_id=session_id,
+            ariadne_command=command,
+            adapter_registry=registry,
+            runtime=fake_runtime,
+            catalog=catalog,
+        )
+
+        binding = command.get_session_binding(session_id)
+        assert binding is not None and binding.engagement_id is not None
+        handle = command.store.open(binding.engagement_id)
+        assert handle is not None
+        blocked = [
+            event
+            for event in command.store.read_events(handle)
+            if event["event_type"] == "process_authorization_blocked"
+        ]
+        assert result["status"] == "partial"
+        assert counting.plan_calls == 0
+        assert fake_runtime.calls == 0
+        assert blocked[-1]["payload"]["adapter"] == "nmap"
+        assert blocked[-1]["payload"]["operation"] == "tcp_scan"
+
     async def test_full_mode_executes_auto_approved_plan_without_slash_approve(
         self,
         command: AriadneCommand,
