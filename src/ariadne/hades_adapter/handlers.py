@@ -4,14 +4,13 @@ Each handler is an async function registered with Hades via
 ``PluginContext.register_tool(…, handler=<this>, is_async=True)``.
 
 These handlers delegate to ``AriadneCommand`` for engagement lifecycle
-operations, enforcing the rule that the model cannot self-confirm.
+operations. Session identity always comes from trusted Hades context.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
 
 from pydantic import ValidationError
 
@@ -201,9 +200,9 @@ def _get_binding(cmd: AriadneCommand, session_id: str) -> dict[str, Any] | None:
 
     Returns None if the session has no active binding.
     """
-    if not cmd.ledger.is_session_bound(session_id):
+    if not session_id:
         return None
-    binding = cmd.ledger.get_session_binding(session_id)
+    binding = cmd.get_session_binding(session_id)
     if binding is None:
         return None
     return {
@@ -216,90 +215,49 @@ def _get_binding(cmd: AriadneCommand, session_id: str) -> dict[str, Any] | None:
 async def handle_prepare_engagement(
     args: dict[str, Any], **context: Any
 ) -> dict[str, Any]:
-    """Collect answers and return a challenge for user confirmation.
-
-    Delegates to ``AriadneCommand.prepare()`` which creates an
-    ``EngagementDraft`` and stores a one-time challenge without
-    locking a snapshot.
-
-    The model receives the challenge id but cannot confirm it — the
-    challenge must be confirmed via the ``/ariadne confirm`` command
-    by the user.
-    """
+    """Validate the completed Q/A, then atomically lock and bind it."""
     cmd = _get_command(context)
+    if "session_id" in args:
+        return {
+            "status": "error",
+            "message": "session_id must come from trusted Hades context.",
+            "engagement_id": "",
+            "snapshot_hash": "",
+        }
+    session_id = context.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return {
+            "status": "error",
+            "message": "A trusted Hades session_id is required.",
+            "engagement_id": "",
+            "snapshot_hash": "",
+        }
     try:
         validated = PrepareEngagementInput.model_validate(args)
     except ValidationError as exc:
         return {
             "status": "error",
             "message": f"Invalid engagement answers: {exc}",
-            "challenge_id": "",
             "engagement_id": "",
+            "snapshot_hash": "",
         }
 
-    result = cmd.prepare(validated.model_dump())
+    try:
+        result = cmd.prepare(
+            validated.model_dump(),
+            session_id=session_id,
+        )
+    except (ValueError, TypeError) as exc:
+        return {
+            "status": "error",
+            "message": f"Engagement was not locked: {exc}",
+            "engagement_id": "",
+            "snapshot_hash": "",
+        }
     return {
         "status": result.status,
         "message": result.message,
-        "challenge_id": result.challenge_id or "",
         "engagement_id": str(result.engagement_id) if result.engagement_id else "",
-    }
-
-
-async def handle_bind_engagement(
-    args: dict[str, Any], **context: Any
-) -> dict[str, Any]:
-    """Lock an engagement after user confirmation.
-
-    Delegates to ``AriadneCommand.lock_and_bind()`` which consumes
-    the confirmed challenge, builds the ``EngagementSnapshot``, and
-    binds the Hades session.
-
-    The handler returns the snapshot hash on success.  If the user
-    has not confirmed via ``/ariadne confirm``, the handler returns
-    an error.
-    """
-    cmd = _get_command(context)
-    challenge_id = args.get("challenge_id", "")
-    session_id = args.get("session_id", context.get("session_id", ""))
-
-    # Unbind any stale session binding so a new engagement can replace it
-    if session_id:
-        cmd.ledger.unbind_session(session_id)
-
-    # Try to find the original answers from the ledger — we need them
-    # to rebuild the engagement.  In a production setup these would be
-    # stored alongside the challenge record.  For now we use the
-    # challenge ledger's payload_digest to verify the binding.
-    existing_binding = cmd.ledger.get_binding(challenge_id)
-    if existing_binding is not None:
-        # Already bound — update session_id if it was a placeholder
-        if not existing_binding.session_id:
-            cmd.ledger.bind_session(
-                challenge_id=challenge_id,
-                session_id=session_id,
-                engagement_id=existing_binding.engagement_id or UUID(int=0),
-                snapshot_hash=existing_binding.snapshot_hash,
-            )
-        return {
-            "status": "confirmed",
-            "message": "Engagement was already bound to this session.",
-            "snapshot_hash": existing_binding.snapshot_hash,
-        }
-
-    # The challenge must have been confirmed first
-    result = cmd.bind(challenge_id, session_id)
-    if result.error is not None:
-        return {
-            "status": "error",
-            "message": result.message,
-            "snapshot_hash": "",
-            "error": result.error or result.message,
-        }
-
-    return {
-        "status": "confirmed",
-        "message": result.message,
         "snapshot_hash": result.snapshot_hash or "",
     }
 
@@ -310,11 +268,15 @@ async def handle_status(args: dict[str, Any], **context: Any) -> dict[str, Any]:
     Checks the ``AriadneCommand`` for any active engagement in the
     ledger.  Otherwise falls back to the generic non-active response.
     """
-    del args
+    if "session_id" in args:
+        return {
+            "status": "error",
+            "message": "session_id must come from trusted Hades context.",
+        }
     try:
         cmd = _get_command(context)
         session_id = context.get("session_id", "")
-        if cmd.ledger.is_session_bound(session_id):
+        if cmd.get_session_binding(session_id) is not None:
             return {
                 "status": "active",
                 "message": "Active engagement found for this session.",
@@ -341,8 +303,14 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
     recorded in the command's plan ledger awaiting user approval.
     """
     cmd = _get_command(context)
+    if "session_id" in args:
+        return {
+            "status": "error",
+            "message": "session_id must come from trusted Hades context.",
+            "plan_id": "",
+        }
     session_id = context.get("session_id", "")
-    input_session_id = args.get("session_id", session_id)
+    input_session_id = session_id
 
     # 1. Check active engagement FIRST (before getting planner/catalog)
     binding_info = _get_binding(cmd, input_session_id)
@@ -509,8 +477,14 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
     execution as an evidence event in the store.
     """
     cmd = _get_command(context)
+    if "session_id" in args:
+        return {
+            "status": "error",
+            "message": "session_id must come from trusted Hades context.",
+            "plan_id": args.get("plan_id", ""),
+        }
     session_id = context.get("session_id", "")
-    input_session_id = args.get("session_id", session_id)
+    input_session_id = session_id
     plan_id = args.get("plan_id", "")
 
     # 1. Check active engagement
@@ -839,8 +813,14 @@ async def handle_render_report(args: dict[str, Any], **context: Any) -> dict[str
     validation via ReportValidator.
     """
     cmd = _get_command(context)
+    if "session_id" in args:
+        return {
+            "status": "error",
+            "message": "session_id must come from trusted Hades context.",
+            "path": "",
+        }
     session_id = context.get("session_id", "")
-    input_session_id = args.get("session_id", session_id)
+    input_session_id = session_id
     style = args.get("style", "walkthrough")
 
     # 1. Check active engagement

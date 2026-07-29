@@ -1,8 +1,7 @@
 """Hades PluginContext registration for all Ariadne services.
 
 Registers the skill, tools, /ariadne command, and guard hook.
-Tool handlers receive an ``ariadne_command`` object in their context
-so they can enforce challenge-based confirmation.
+Tool handlers receive an ``ariadne_command`` object in their context.
 """
 
 from __future__ import annotations
@@ -12,7 +11,6 @@ from typing import Any
 
 from ariadne.composition import ServiceContainer
 from ariadne.hades_adapter.handlers import (
-    handle_bind_engagement,
     handle_execute_plan,
     handle_prepare_engagement,
     handle_propose_plan,
@@ -78,7 +76,7 @@ def _register_command(ctx: object, services: ServiceContainer) -> None:
         handler=command_handler,
         description="Ariadne pentesting engagement commands",
         args_hint=(
-            "[new|confirm <code>|status|plan|approve <plan-id>|"
+            "[new|status|plan|approve <plan-id>|"
             "reject <plan-id>|evidence|report|abort|doctor]"
         ),
     )
@@ -124,7 +122,6 @@ def _handler_for(tool_name: str, services: ServiceContainer) -> object:
 
 _HANDLER_MAP: dict[str, Any] = {
     "ariadne_prepare_engagement": handle_prepare_engagement,
-    "ariadne_bind_engagement": handle_bind_engagement,
     "ariadne_status": handle_status,
     "ariadne_propose_plan": handle_propose_plan,
     "ariadne_execute_plan": handle_execute_plan,

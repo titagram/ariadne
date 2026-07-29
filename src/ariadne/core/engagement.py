@@ -249,6 +249,59 @@ def lock_engagement(
     )
 
 
+def lock_attested_engagement(
+    draft: EngagementDraft,
+    *,
+    confirmed_at: datetime | None = None,
+    max_duration_minutes: int = 480,
+) -> EngagementSnapshot:
+    """Lock a Q/A-attested draft without a second confirmation challenge.
+
+    The caller is responsible for establishing that the answers came from the
+    interactive Hades session.  This entry point deliberately has no token or
+    expiry: accepting the server-controlled disclaimer is the initial
+    authorization act.
+    """
+    if not draft.authorization_attested:
+        raise ConfirmationError("Authorization attestation is required")
+    if max_duration_minutes < 1:
+        raise ValueError("max_duration_minutes must be positive")
+
+    engagement_id = uuid4()
+    locked_at = confirmed_at or datetime.now(UTC)
+    constraints = EngagementConstraints(
+        max_duration_minutes=max_duration_minutes,
+    )
+    data = {
+        "engagement_id": str(engagement_id),
+        "revision": 1,
+        "previous_snapshot_hash": None,
+        "confirmed_at": locked_at.isoformat(),
+        "authorization_attested": draft.authorization_attested,
+        "disclaimer_version": draft.disclaimer_version,
+        "profile": draft.profile.value,
+        "autonomy": draft.autonomy.value,
+        "targets": [draft.target.model_dump(mode="json")],
+        "objectives": [o.model_dump(mode="json") for o in draft.objectives],
+        "constraints": constraints.model_dump(mode="json"),
+    }
+    snapshot_hash = _make_content_hash(data)
+    return EngagementSnapshot(
+        engagement_id=engagement_id,
+        revision=1,
+        previous_snapshot_hash=None,
+        snapshot_hash=snapshot_hash,
+        confirmed_at=locked_at,
+        authorization_attested=True,
+        disclaimer_version=draft.disclaimer_version,
+        profile=draft.profile,
+        autonomy=draft.autonomy,
+        targets=(draft.target,),
+        objectives=tuple(draft.objectives),
+        constraints=constraints,
+    )
+
+
 def amend_scope(
     snapshot: EngagementSnapshot,
     targets: tuple[TargetSpec, ...],

@@ -55,7 +55,7 @@ class RecordingPluginContext:
 
 
 def test_register_exposes_namespaced_skill_tools_command_and_hook() -> None:
-    """register() exposes the skill, six tools, /ariadne cmd, and guard hook."""
+    """register() exposes five tools, /ariadne command, and guard hook."""
     ctx = RecordingPluginContext(profile_name="test")
     register(ctx)
     assert [(name, path.name) for name, path in ctx.skills] == [
@@ -63,7 +63,6 @@ def test_register_exposes_namespaced_skill_tools_command_and_hook() -> None:
     ]
     assert set(ctx.tools) == {
         "ariadne_prepare_engagement",
-        "ariadne_bind_engagement",
         "ariadne_status",
         "ariadne_propose_plan",
         "ariadne_execute_plan",

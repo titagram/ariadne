@@ -295,7 +295,7 @@ class DockerInstaller:
         if confirmation is None or proposal.canonical_digest is None:
             raise ConfirmationRequiredError(
                 "Installation confirmation is required. "
-                "Use /ariadne confirm <digest> to approve the proposal."
+                "Request explicit host-install approval through the guided flow."
             )
 
         # Recompute digest to detect any modification between propose and execute

@@ -131,6 +131,11 @@ class RunStore:
         """
         self._base_path = base_path
 
+    @property
+    def base_path(self) -> Path | None:
+        """Return the configured storage root override."""
+        return self._base_path
+
     def _engagement_path(self, engagement_id: UUID) -> Path:
         """Resolve the run directory path, creating it with 0o700."""
         from ariadne.store.paths import run_dir
@@ -347,6 +352,63 @@ class RunStore:
         path = self._engagement_path(engagement_id)
         lock = path / "engagement.lock.yaml"
         return lock.is_file()
+
+    def iter_snapshots(self) -> tuple[EngagementSnapshot, ...]:
+        """Load all immutable engagement snapshots without mutating storage."""
+        import json
+
+        from ariadne.store.paths import ariadne_home
+
+        runs = ariadne_home(override=self._base_path) / "runs"
+        if not runs.is_dir():
+            return ()
+        snapshots: list[EngagementSnapshot] = []
+        for lock_path in sorted(runs.glob("*/engagement.lock.yaml")):
+            try:
+                snapshots.append(
+                    EngagementSnapshot.model_validate(
+                        json.loads(lock_path.read_text(encoding="utf-8"))
+                    )
+                )
+            except (OSError, ValueError):
+                continue
+        return tuple(snapshots)
+
+    def open(self, engagement_id: UUID) -> RunHandle | None:
+        """Open an existing run without creating a replacement snapshot."""
+        for snapshot in self.iter_snapshots():
+            if snapshot.engagement_id == engagement_id:
+                path = self._engagement_path(snapshot.engagement_id)
+                if (path / "engagement.lock.yaml").is_file():
+                    return RunHandle(snapshot.engagement_id, path, snapshot)
+        return None
+
+    def find_session_binding(self, session_id: str) -> dict[str, str] | None:
+        """Recover the latest durable session binding from append-only events."""
+        if not session_id:
+            return None
+        latest: dict[str, str] | None = None
+        latest_timestamp = ""
+        for snapshot in self.iter_snapshots():
+            handle = self.open(snapshot.engagement_id)
+            if handle is None:
+                continue
+            if not verify_events_integrity(handle.path / "events.jsonl").valid:
+                continue
+            for event in self.read_events(handle):
+                payload = event.get("payload", {})
+                if (
+                    event.get("event_type") == "session_bound"
+                    and payload.get("session_id") == session_id
+                    and event.get("timestamp", "") >= latest_timestamp
+                ):
+                    latest_timestamp = event.get("timestamp", "")
+                    latest = {
+                        "session_id": session_id,
+                        "engagement_id": str(snapshot.engagement_id),
+                        "snapshot_hash": snapshot.snapshot_hash,
+                    }
+        return latest
 
     def read_events(self, handle: RunHandle) -> list[dict]:
         """Read all events from the run's JSONL log.

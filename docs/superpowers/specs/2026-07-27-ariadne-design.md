@@ -36,7 +36,7 @@ typed adapters.
 ## 2. Design Principles
 
 1. **Authorization before capability.** No target action occurs before the user
-   confirms an engagement contract.
+   completes the Q/A, attests authorization, and accepts the current disclaimer.
 2. **Fail closed.** Unknown state, ambiguous policy, stale approval, malformed
    output, or unexpected scope stops execution.
 3. **Guardrails are not an autonomy setting.** Full autonomy may remove routine
@@ -181,7 +181,6 @@ The planned user-facing commands are:
 
 ```text
 /ariadne new
-/ariadne confirm <code>
 /ariadne status
 /ariadne plan
 /ariadne approve <plan-id>
@@ -195,9 +194,11 @@ The planned user-facing commands are:
 /ariadne doctor
 ```
 
-The initial contract and approvals that can never be delegated are confirmed
-through direct slash commands. A model cannot satisfy them by inserting a value
-into a normal tool call.
+The initial contract is locked and bound atomically when the completed Q/A is
+submitted from the trusted Hades session. Scope amendments, guardrail
+exceptions, host installation, uncurated PoCs, and SysReptor push remain
+separate, explicit user decisions. A model-supplied session identifier is never
+accepted as a substitute for trusted Hades context.
 
 ## 5. Engagement Contract
 
@@ -221,19 +222,17 @@ Each execution begins with Q/A covering:
 
 The system never chooses the environment profile on behalf of the user.
 
-After validation, Ariadne displays a concise contract summary and returns a
-short confirmation code. The user locks the engagement with:
-
-```text
-/ariadne confirm <code>
-```
-
-This writes an immutable `engagement.lock.yaml` and its digest.
+After validation, Ariadne displays a concise contract summary and asks the user
+to accept the current, server-controlled disclaimer. That acceptance is the
+single initial authorization act: `ariadne_prepare_engagement` writes the
+immutable `engagement.lock.yaml`, appends lock and binding events, and binds the
+snapshot to the trusted Hades session as one logical operation. There is no
+initial confirmation token or TTL.
 
 The summary includes an authorized-use disclaimer stating that Ariadne,
 Metasploit, exploit modules, and the other integrated tools may only be used
 against systems the user owns or is explicitly authorized to test. Direct
-confirmation records the acknowledgement, disclaimer version, and timestamp.
+the atomic lock records the acknowledgement, disclaimer version, and timestamp.
 
 ### 5.2 Autonomy
 
@@ -255,10 +254,11 @@ without routine approval.
 
 The following always require a direct user decision:
 
-- initial contract confirmation;
+- initial Q/A authorization and disclaimer acceptance;
 - scope amendment;
 - host container-runtime installation;
 - acquisition or execution of uncurated PoC code.
+- SysReptor network push.
 
 Hades's existing `--yolo` option has no effect on Ariadne policy or immutable
 approval requirements.

@@ -22,10 +22,9 @@ from ariadne.core.enums import AutonomyMode, EnvironmentProfile
 from ariadne.core.planner import Planner
 from ariadne.core.policy import CapabilityRule, EffectivePolicy
 from ariadne.core.workflow import WorkflowCatalog
-from ariadne.hades_adapter.commands import AriadneCommand
+from ariadne.hades_adapter.commands import CURRENT_DISCLAIMER_VERSION, AriadneCommand
 from ariadne.hades_adapter.handlers import (
     _get_run_handle,  # type: ignore[attr-defined]
-    handle_bind_engagement,
     handle_execute_plan,
     handle_prepare_engagement,
     handle_propose_plan,
@@ -124,10 +123,10 @@ def policy() -> EffectivePolicy:
 
 
 async def _bind_engagement(command: AriadneCommand, session_id: str) -> str:
-    """Helper: prepare, confirm, and bind an engagement. Returns snapshot_hash."""
+    """Helper: atomically prepare and bind an engagement."""
     args = {
         "authorization_attested": True,
-        "disclaimer_version": "2026-07-27",
+        "disclaimer_version": CURRENT_DISCLAIMER_VERSION,
         "profile": "private-lab",
         "target_host": "10.10.10.10",
         "objectives": ["proof"],
@@ -138,14 +137,7 @@ async def _bind_engagement(command: AriadneCommand, session_id: str) -> str:
         session_id=session_id,
         ariadne_command=command,
     )
-    challenge_id = prepare_result["challenge_id"]
-    command.handle(f"confirm {challenge_id}")
-    bind_result = await handle_bind_engagement(
-        {"challenge_id": challenge_id},
-        session_id=session_id,
-        ariadne_command=command,
-    )
-    return bind_result["snapshot_hash"]
+    return prepare_result["snapshot_hash"]
 
 
 # ── RED tests (expected to fail before fixes) ───────────────────────────────

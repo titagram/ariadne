@@ -15,7 +15,6 @@ from ariadne.hades_adapter.session import ChallengeLedger
 
 ARIADNE_TOOLS: frozenset[str] = frozenset({
     "ariadne_prepare_engagement",
-    "ariadne_bind_engagement",
     "ariadne_status",
     "ariadne_propose_plan",
     "ariadne_execute_plan",

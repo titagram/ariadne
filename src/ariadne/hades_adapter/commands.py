@@ -1,10 +1,8 @@
 """Ariadne command parser and engagement approval service.
 
-AriadneCommand enforces the rule that model-facing tool calls cannot
-self-confirm.  A real user must type ``/ariadne confirm <challenge-id>``
-to commit an engagement snapshot.  The confirmation challenge is a
-one-time, time-limited random value that is never exposed through a
-regular tool handler.
+The initial engagement is locked atomically when the interactive Q/A accepts
+the server-controlled disclaimer.  Separate approval challenges remain for
+scope amendments, host installation, uncurated PoCs, and SysReptor push.
 """
 
 from __future__ import annotations
@@ -12,22 +10,22 @@ from __future__ import annotations
 import shlex
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
-from ariadne.core.canonical import canonical_digest
 from ariadne.core.engagement import (
-    Confirmation,
     EngagementDraft,
     Objective,
     TargetSpec,
-    lock_engagement,
+    lock_attested_engagement,
 )
 from ariadne.core.enums import AutonomyMode, EnvironmentProfile
 from ariadne.core.planner import Plan
 from ariadne.hades_adapter.session import ChallengeLedger
 from ariadne.store.run_store import RunStore
+
+CURRENT_DISCLAIMER_VERSION = "2026-07-28"
 
 # Shared plan ledger — keyed by plan_id, stored alongside the ChallengeLedger
 # so both tool handlers and /ariadne commands see the same plans.
@@ -38,7 +36,6 @@ _PLAN_LEDGER: dict[str, PlanRecord] = {}
 
 _COMMANDS: dict[str, int] = {
     "new": 0,
-    "confirm": 1,
     "status": 0,
     "plan": 0,
     "approve": 1,
@@ -67,22 +64,12 @@ class ParseResult:
 
 @dataclass
 class PrepareResult:
-    """Result of engagement preparation before confirmation."""
+    """Result of atomically locking and binding an engagement."""
 
     status: str
-    challenge_id: str | None
     engagement_id: UUID | None
-    message: str
-
-
-@dataclass
-class BindResult:
-    """Result of binding a confirmed engagement to a Hades session."""
-
-    status: str
     snapshot_hash: str | None
     message: str
-    error: str | None = None
 
 
 @dataclass
@@ -166,23 +153,29 @@ class AriadneCommand:
 
         return ParseResult(command=cmd, args=args)
 
-    # ── Prepare: collect answers, create challenge ──────────────────────
+    # ── Prepare: validate Q/A, lock, persist, and bind ──────────────────
 
-    def prepare(self, answers: dict[str, Any]) -> PrepareResult:
-        """Collect engagement answers and return a user challenge.
-
-        Creates an ``EngagementDraft`` from the answers, computes its
-        canonical digest, and stores a one-time challenge linked to that
-        digest.  The draft is NOT locked into a snapshot until the user
-        confirms via ``/ariadne confirm <challenge-id>``.
-
-        Args:
-            answers: Engagement answers from the model-facing tool,
-                matching ``PrepareEngagementInput`` schema fields.
-
-        Returns:
-            A ``PrepareResult`` with the challenge id and awaiting status.
-        """
+    def prepare(
+        self,
+        answers: dict[str, Any],
+        *,
+        session_id: str,
+    ) -> PrepareResult:
+        """Atomically lock the accepted Q/A and bind its trusted session."""
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("A trusted Hades session_id is required")
+        if self.get_session_binding(session_id) is not None:
+            raise ValueError(
+                "This Hades session already has an active engagement; "
+                "use an explicit scope amendment or a new session"
+            )
+        if answers.get("authorization_attested") is not True:
+            raise ValueError("Authorization attestation must be explicitly true")
+        if answers.get("disclaimer_version") != CURRENT_DISCLAIMER_VERSION:
+            raise ValueError(
+                "Disclaimer version mismatch: expected "
+                f"{CURRENT_DISCLAIMER_VERSION!r}"
+            )
         profile = EnvironmentProfile(answers["profile"])
         autonomy = AutonomyMode(answers.get("autonomy", "controlled"))
         objectives = [
@@ -199,23 +192,56 @@ class AriadneCommand:
             objectives=objectives,
         )
 
-        digest = canonical_digest(draft)
-        engagement_id = uuid4()
-        challenge_id = self.ledger.create_challenge(
-            payload_digest=digest,
-            payload=answers,
-            challenge_type="contract",
-            engagement_id=engagement_id,
+        snapshot = lock_attested_engagement(
+            draft,
+            max_duration_minutes=answers.get("time_window_minutes", 60),
+        )
+        handle = self.store.create(snapshot)
+        now = datetime.now(UTC)
+        from ariadne.store.run_store import Event
+
+        self.store.append_event(
+            handle,
+            Event(
+                event_type="engagement_locked",
+                payload={
+                    "snapshot_hash": snapshot.snapshot_hash,
+                    "authorization_attested": True,
+                    "disclaimer_version": CURRENT_DISCLAIMER_VERSION,
+                    "profile": snapshot.profile.value,
+                    "autonomy": snapshot.autonomy.value,
+                    "target": snapshot.targets[0].host,
+                    "objectives": [o.model_dump(mode="json") for o in snapshot.objectives],
+                    "time_window_minutes": snapshot.constraints.max_duration_minutes,
+                    "notes": answers.get("notes", ""),
+                },
+                timestamp=now,
+            ),
+        )
+        binding_key = f"atomic:{snapshot.engagement_id}"
+        self.ledger.bind_session(
+            challenge_id=binding_key,
+            session_id=session_id,
+            engagement_id=snapshot.engagement_id,
+            snapshot_hash=snapshot.snapshot_hash,
+        )
+        self.store.append_event(
+            handle,
+            Event(
+                event_type="session_bound",
+                payload={
+                    "session_id": session_id,
+                    "snapshot_hash": snapshot.snapshot_hash,
+                },
+                timestamp=now,
+            ),
         )
 
         return PrepareResult(
-            status="awaiting_user_confirmation",
-            challenge_id=challenge_id,
-            engagement_id=engagement_id,
-            message=(
-                "Engagement answers recorded. "
-                f"Use /ariadne confirm {challenge_id} to lock."
-            ),
+            status="active",
+            engagement_id=snapshot.engagement_id,
+            snapshot_hash=snapshot.snapshot_hash,
+            message="Engagement locked and bound to the current Hades session.",
         )
 
     # ── Handle: process parsed /ariadne commands ────────────────────────
@@ -241,9 +267,6 @@ class AriadneCommand:
 
         if result.command == "new":
             return "Use the ariadne_prepare_engagement tool to start a new engagement."
-
-        if result.command == "confirm":
-            return self._handle_confirm(result.args[0])
 
         if result.command == "status":
             return self._handle_status()
@@ -273,79 +296,9 @@ class AriadneCommand:
 
     # ── Internal command handlers ───────────────────────────────────────
 
-    def _handle_confirm(self, challenge_id: str) -> str:
-        """Confirm a pending challenge and lock the engagement snapshot.
-
-        Consumes the challenge from the ledger, builds the
-        ``EngagementSnapshot``, writes it to the store via lock_and_bind,
-        and binds the challenge to the resulting snapshot so that
-        ``bind_engagement`` can complete the session binding.
-        """
-        record = self.ledger.consume_challenge(challenge_id)
-        if record is None:
-            existing = self.ledger.get_challenge(challenge_id)
-            if existing is None:
-                return f"Error: Invalid or unknown challenge: {challenge_id!r}"
-            if existing.consumed:
-                return f"Error: Challenge {challenge_id!r} has already been used."
-            return f"Error: Challenge {challenge_id!r} has expired."
-
-        # Build engagement snapshot from stored answers
-        if record.payload is None:
-            return (
-                f"Error: Challenge {challenge_id!r} has no associated payload. "
-                "Cannot lock engagement."
-            )
-
-        profile = EnvironmentProfile(record.payload["profile"])
-        autonomy = AutonomyMode(record.payload.get("autonomy", "controlled"))
-        objectives = [
-            Objective(kind=cast(Any, o))
-            if isinstance(o, str)
-            else Objective(**o)
-            for o in record.payload.get("objectives", [])
-        ]
-
-        draft = EngagementDraft(
-            authorization_attested=record.payload["authorization_attested"],
-            disclaimer_version=record.payload["disclaimer_version"],
-            profile=profile,
-            autonomy=autonomy,
-            target=TargetSpec(host=record.payload["target_host"]),
-            objectives=objectives,
-        )
-
-        now = datetime.now(UTC)
-        confirmation = Confirmation(
-            challenge_id=challenge_id,
-            challenge_digest=record.payload_digest,
-            confirmed_at=now,
-            expires_at=now + timedelta(minutes=5),
-            actor="user",
-        )
-
-        snapshot = lock_engagement(draft, confirmation)
-
-        # Write snapshot to the store
-        self.store.create(snapshot)
-
-        # Pre-bind the challenge to the session (session_id unknown at this
-        # point — it'll be completed in bind_engagement)
-        self.ledger.bind_session(
-            challenge_id=challenge_id,
-            session_id="",  # placeholder — set in bind_engagement
-            engagement_id=snapshot.engagement_id,
-            snapshot_hash=snapshot.snapshot_hash,
-        )
-
-        return (
-            f"Confirmed. Engagement locked. "
-            f"Snapshot: {snapshot.snapshot_hash}"
-        )
-
     def _handle_status(self) -> str:
         """Return the current engagement status."""
-        return "Engagement is in draft. Use /ariadne confirm <challenge-id> to lock."
+        return "Use ariadne_status to inspect the current session engagement."
 
     def _handle_approve(self, plan_id: str) -> str:
         """Approve a plan by id."""
@@ -374,71 +327,6 @@ class AriadneCommand:
     def _handle_abort(self) -> str:
         """Abort the current engagement."""
         return "Abort acknowledged. No active engagement to abort."
-
-    # ── Bind: bind session after user confirmation ──────────────────────
-
-    def bind(
-        self,
-        challenge_id: str,
-        session_id: str,
-    ) -> BindResult:
-        """Bind a confirmed challenge to a Hades session.
-
-        The challenge must have been confirmed via ``/ariadne confirm``,
-        which creates the engagement snapshot in the store.  This method
-        then records the session binding so the model tool can access the
-        snapshot.
-
-        Args:
-            challenge_id: The confirmed challenge identifier.
-            session_id: The Hades session identifier to bind.
-
-        Returns:
-            A ``BindResult`` with the snapshot hash on success.
-        """
-        # Check if already bound
-        existing_binding = self.ledger.get_binding(challenge_id)
-        if existing_binding is not None:
-            # Update session_id if needed
-            if not existing_binding.session_id:
-                self.ledger.bind_session(
-                    challenge_id=challenge_id,
-                    session_id=session_id,
-                    engagement_id=existing_binding.engagement_id or UUID(int=0),
-                    snapshot_hash=existing_binding.snapshot_hash,
-                )
-            return BindResult(
-                status="confirmed",
-                snapshot_hash=existing_binding.snapshot_hash,
-                message="Engagement bound to session.",
-            )
-
-        # Check if the challenge was consumed (confirmed)
-        record = self.ledger.get_challenge(challenge_id)
-        if record is None:
-            return BindResult(
-                status="error",
-                snapshot_hash=None,
-                message=f"Error: Invalid or unknown challenge: {challenge_id!r}",
-                error="Challenge not found",
-            )
-        if not record.consumed:
-            return BindResult(
-                status="error",
-                snapshot_hash=None,
-                message=(
-                    f"Challenge {challenge_id!r} has not been confirmed yet. "
-                    "Use /ariadne confirm <challenge-id> first."
-                ),
-                error="Challenge not yet confirmed",
-            )
-
-        return BindResult(
-            status="error",
-            snapshot_hash=None,
-            message=f"Error: Challenge {challenge_id!r} was confirmed but no snapshot was created.",
-            error="Challenge consumed without snapshot",
-        )
 
     # ── Plan ledger ─────────────────────────────────────────────────────
 
@@ -483,4 +371,21 @@ class AriadneCommand:
 
     def has_active_engagement(self, session_id: str) -> bool:
         """Check whether this session has a bound engagement."""
-        return self.ledger.is_session_bound(session_id)
+        return self.get_session_binding(session_id) is not None
+
+    def get_session_binding(self, session_id: str):
+        """Return a binding, rehydrating it from durable events if necessary."""
+        binding = self.ledger.get_session_binding(session_id)
+        if binding is not None:
+            return binding
+        durable = self.store.find_session_binding(session_id)
+        if durable is None:
+            return None
+        engagement_id = UUID(durable["engagement_id"])
+        self.ledger.bind_session(
+            challenge_id=f"atomic:{engagement_id}",
+            session_id=session_id,
+            engagement_id=engagement_id,
+            snapshot_hash=durable["snapshot_hash"],
+        )
+        return self.ledger.get_session_binding(session_id)

@@ -27,7 +27,8 @@ Ariadne will begin interactive Q/A covering:
 7. **Additional constraints** — ports, rates, credentials, auth limits
 8. **Reporting preferences** — offline walkthrough, professional report, SysReptor
 
-After Q/A, Ariadne displays a **contract summary** and a confirmation code.
+After Q/A, Ariadne displays a **contract summary** and the current legal
+disclaimer. Explicit acceptance locks and activates the engagement immediately.
 
 ### Example: Private lab
 
@@ -39,8 +40,7 @@ After Q/A, Ariadne displays a **contract summary** and a confirmation code.
   Autonomy: controlled
   Time window: 8 hours
 → Contract summary displayed
-→ Confirmation code: a7k3
-/ariadne confirm a7k3
+→ Disclaimer accepted; engagement locked and bound
 ```
 
 ### Example: HTB
@@ -53,8 +53,7 @@ After Q/A, Ariadne displays a **contract summary** and a confirmation code.
   Autonomy: full
   Time window: 24 hours
 → Contract summary displayed
-→ Confirmation code: b2x9
-/ariadne confirm b2x9
+→ Disclaimer accepted; engagement locked and bound
 ```
 
 ---
@@ -79,10 +78,11 @@ Plans that satisfy all policy and playbook conditions run without routine
 approval. The following always require a direct user decision regardless of
 autonomy mode:
 
-- Initial contract confirmation
+- Initial Q/A authorization and disclaimer acceptance
 - Scope amendment
 - Host container-runtime installation
 - Acquisition or execution of uncurated PoC code
+- SysReptor network push
 
 > Hades's `--yolo` flag has **no effect** on Ariadne guardrails.
 
@@ -96,8 +96,7 @@ If you want to add a target during an active engagement:
 /ariadne amend-scope
 → New target: 10.10.10.20
 → Contract summary displayed
-→ Confirmation code: c3m5
-/ariadne confirm c3m5
+→ Explicit scope-amendment approval requested
 ```
 
 This creates a new immutable snapshot linked to the previous one. Any plans

@@ -97,8 +97,8 @@ session. The typical lifecycle:
 
 1. **`/ariadne new`** — Interactive Q/A to define the engagement contract
    (target, objectives, profile, autonomy mode, time window, etc.)
-2. **`/ariadne confirm <code>`** — Lock the engagement with the displayed
-   confirmation code
+2. **Accept the current disclaimer** — Atomically lock and bind the completed
+   Q/A to the trusted Hades session
 3. **`/ariadne status`** — View current engagement state and progress
 4. **`/ariadne plan`** — Generate a bounded action plan
 5. **`/ariadne approve <plan-id>`** — Approve a plan for execution

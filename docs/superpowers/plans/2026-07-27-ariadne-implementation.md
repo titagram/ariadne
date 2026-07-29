@@ -17,10 +17,14 @@
 - Supported Python: `>=3.11,<3.14`, matching Hades.
 - Runtime imports are limited to the Python standard library and dependencies already pinned by Hades; new Python packages must not be installed implicitly by plugin loading.
 - The initial target is one user-confirmed IP address or FQDN; objectives are one or more explicit typed objectives.
-- Every run requires interactive Hades/Hermes Q/A, a versioned legal disclaimer, and direct user confirmation.
+- Every run requires interactive Hades/Hermes Q/A, authorization attestation,
+  and acceptance of the current server-controlled legal disclaimer. Completion
+  atomically locks and binds the initial snapshot; there is no second token.
 - Environment profiles are selected only by the user.
 - Effective policy is `base ∩ environment ∩ engagement ∩ action plan`; lower layers may never widen higher layers.
-- `autonomy: full` never bypasses contract confirmation, scope amendments, host installation approval, uncurated PoC approval, or base invariants.
+- `autonomy: full` never bypasses initial Q/A attestation, scope amendments,
+  host installation approval, uncurated PoC approval, SysReptor push, or base
+  invariants.
 - Hades `--yolo` has no effect on Ariadne guardrails.
 - Newly discovered assets are `observed_only` until a direct scope amendment creates a new immutable snapshot.
 - HTB policy forbids denial of service, resource exhaustion, subnet scanning, and actions against other platform targets.
@@ -225,7 +229,6 @@ description: Policy-bounded lab and CTF pentesting for Hades
 author: Gabriele
 provides_tools:
   - ariadne_prepare_engagement
-  - ariadne_bind_engagement
   - ariadne_status
   - ariadne_propose_plan
   - ariadne_execute_plan
@@ -934,7 +937,7 @@ git commit -m "feat: add hash-chained engagement store"
   `ctx.register_skill(name, path, description)`,
   `ctx.register_command(name, handler, description, args_hint)`, and
   `ctx.register_hook(name, callback)`.
-- Produces: registered skill `ariadne:lab-pentest`, six typed tools,
+- Produces: registered skill `ariadne:lab-pentest`, five typed tools,
   `/ariadne`, and `pre_tool_call`.
 
 - [ ] **Step 1: Write a failing fake-PluginContext contract test**
@@ -946,7 +949,6 @@ def test_register_exposes_namespaced_skill_tools_command_and_hook(tmp_path):
     assert ctx.skills == [("lab-pentest", "skills/lab-pentest/SKILL.md")]
     assert set(ctx.tools) == {
         "ariadne_prepare_engagement",
-        "ariadne_bind_engagement",
         "ariadne_status",
         "ariadne_propose_plan",
         "ariadne_execute_plan",
@@ -972,7 +974,7 @@ The skill must:
 - display the authorization disclaimer before collecting operational details;
 - ask one concise contract question at a time;
 - call `ariadne_prepare_engagement` only after all answers are explicit;
-- direct the user to `/ariadne confirm <challenge>`;
+- submit the complete Q/A once, after explicit disclaimer acceptance;
 - call only Ariadne tools for target-facing actions;
 - stop when a handler reports scope amendment, policy denial, or ambiguity;
 - never tell Hades that `--yolo` changes Ariadne policy.
@@ -995,7 +997,7 @@ git add src/ariadne/composition.py src/ariadne/hades_adapter skills tests/contra
 git commit -m "feat: register Ariadne tools and skill with Hades"
 ```
 
-## Task 9: Implement Interactive Contract Challenges and Direct Approvals
+## Task 9: Implement Atomic Initial Lock and Direct Exceptional Approvals
 
 **Files:**
 - Create: `src/ariadne/hades_adapter/commands.py`
@@ -1009,42 +1011,33 @@ git commit -m "feat: register Ariadne tools and skill with Hades"
 - Consumes: `RunStore`, snapshot locking, planner, and approval records.
 - Produces:
   `AriadneCommand.handle(raw_args: str) -> str`,
-  `prepare_engagement(args: dict, **context: object) -> dict`,
-  and
-  `bind_engagement(args: dict, session_id: str, **context: object) -> dict`.
+  and `prepare_engagement(args: dict, **trusted_context: object) -> dict`.
 
-- [ ] **Step 1: Write failing tests proving models cannot self-confirm**
+- [ ] **Step 1: Write failing tests for atomic trusted-session locking**
 
 ```python
-def test_prepare_returns_challenge_but_does_not_lock(command_service, valid_answers):
-    result = command_service.prepare(valid_answers)
-    assert result.status == "awaiting_user_confirmation"
-    assert not command_service.store.has_snapshot(result.engagement_id)
-
-
-def test_direct_confirm_locks_then_bind_requires_same_challenge(command, session_id):
-    challenge = command.prepare(valid_answers()).challenge_id
-    response = command.handle(f"confirm {challenge}")
-    assert "confirmed" in response.lower()
-    binding = command.bind(challenge, session_id=session_id)
-    assert binding.snapshot_hash
+def test_prepare_atomically_locks_and_binds(command, valid_answers, session_id):
+    result = command.prepare(valid_answers, session_id=session_id)
+    assert result.status == "active"
+    assert command.store.has_snapshot(result.engagement_id)
+    assert command.get_session_binding(session_id).snapshot_hash == result.snapshot_hash
 ```
 
-Also test expired challenge, second use, wrong disclaimer version, stale plan,
-scope amendment, install approval, and uncurated-PoC approval.
+Also test missing trusted context, caller-supplied `session_id`, false
+authorization, wrong disclaimer version, restart recovery, stale plans, scope
+amendment, install approval, uncurated-PoC approval, and SysReptor push.
 
-- [ ] **Step 2: Run command tests and verify direct-confirmation failures**
+- [ ] **Step 2: Run command tests and verify atomic-lock failures**
 
 Run: `uv run pytest tests/contract/test_ariadne_command.py tests/contract/test_engagement_handlers.py -v`
-Expected: FAIL.
+Expected: FAIL before the atomic lock exists.
 
-- [ ] **Step 3: Implement challenge ledger and command grammar**
+- [ ] **Step 3: Implement atomic lock and reduced command grammar**
 
 Supported grammar:
 
 ```text
 /ariadne new
-/ariadne confirm <challenge-id>
 /ariadne status
 /ariadne plan
 /ariadne approve <plan-id>
@@ -1059,14 +1052,14 @@ Supported grammar:
 ```
 
 Parse with `shlex.split`, reject extra tokens, and render deterministic text.
-Challenges are random 128-bit URL-safe values, stored with a canonical payload
-digest, type (`contract`, `scope`, `host_install`, `uncurated_poc`), five-minute
-expiry, and one-use flag. Approval records set `actor="user"` and are appended
-to the event chain.
+The prepare handler validates the complete Q/A, exact disclaimer version, and
+trusted Hades `context["session_id"]`; it then creates the snapshot and appends
+`engagement_locked` and `session_bound` events. Binding recovery scans the
+append-only store after restart. No model-callable schema accepts `session_id`.
 
-Session binding occurs only after a direct confirmation and is stored by Hades
-`session_id`; the confirmation challenge cannot be supplied to a normal
-target-facing tool as an approval substitute.
+Challenges remain only for separate exceptional approvals: scope amendment,
+host installation, uncurated PoC, guardrail exception, and SysReptor push.
+Approval records set `actor="user"` and are appended to the event chain.
 
 - [ ] **Step 4: Run all engagement and Hades contract tests**
 
@@ -1083,7 +1076,7 @@ Expected: PASS.
 
 ```bash
 git add src/ariadne/hades_adapter src/ariadne/composition.py tests/contract
-git commit -m "feat: require direct Ariadne contract approvals"
+git commit -m "feat: atomically lock Ariadne engagements"
 ```
 
 ## Task 10: Enforce In-Session Guardrails with `pre_tool_call`
@@ -1134,7 +1127,6 @@ Maintain explicit sets:
 ```python
 ARIADNE_TOOLS = frozenset({
     "ariadne_prepare_engagement",
-    "ariadne_bind_engagement",
     "ariadne_status",
     "ariadne_propose_plan",
     "ariadne_execute_plan",
