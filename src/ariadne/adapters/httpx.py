@@ -170,7 +170,7 @@ class HttpxAdapter:
         return ProcessSpec(
             argv=tuple(argv),
             stdin=stdin_input,
-            timeout_seconds=int(inputs.get("timeout", 300)),  # type: ignore[arg-type]
+            timeout_seconds=int(inputs.get("timeout", 10)),  # type: ignore[arg-type]
             max_output_bytes=int(inputs.get("max_output", 10 * 1024 * 1024)),  # type: ignore[arg-type]
         )
 

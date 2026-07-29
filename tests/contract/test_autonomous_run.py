@@ -129,6 +129,15 @@ class BuiltinProgressionRuntime(DryRunRuntime):
                 stdout="No matching modules",
                 stderr="",
             )
+        if spec.argv[0] == "httpx-toolkit":
+            return ProcessResult(
+                exit_code=0,
+                stdout=(
+                    '{"url":"http://192.0.2.10:80/","status_code":200,'
+                    '"title":"Fixture","tech":["Apache httpd"]}\n'
+                ),
+                stderr="",
+            )
         raise AssertionError(f"Unexpected executable: {spec.argv[0]}")
 
 
@@ -732,6 +741,7 @@ async def test_builtin_catalog_researches_each_service_without_blind_validation(
     registry.register("research", ResearchAdapter())
     registry.register("nmap", NmapAdapter())
     registry.register("nuclei", NucleiAdapter())
+    registry.register("httpx", HttpxAdapter())
     runtime = BuiltinProgressionRuntime()
     registry.default_runtime = runtime
     services = ServiceContainer(
@@ -761,7 +771,7 @@ async def test_builtin_catalog_researches_each_service_without_blind_validation(
 
     result = json.loads(
         await run(
-            {"max_steps": 6},
+            {"max_steps": 8},
             session_id="builtin-progression-session",
         )
     )
@@ -802,6 +812,8 @@ async def test_builtin_catalog_researches_each_service_without_blind_validation(
         "service.protocol-routing.v1",
         "research.service-vulnerability.v1",
         "research.service-vulnerability.v1",
+        "ssh.enumeration.v1",
+        "web.fingerprint.v1",
     ]
     routed_ports = {
         event["payload"]["observation_data"]["port"]
@@ -815,10 +827,12 @@ async def test_builtin_catalog_researches_each_service_without_blind_validation(
     assert routed_ports == {22, 80}
     assert any(
         event["event_type"] == "evidence_collected"
-        and event["payload"]["evidence_type"] == "research_complete"
+        and event["payload"]["evidence_type"] == "web_technologies"
         and event["payload"]["execution_classification"] == "success"
         for event in events
     )
+    httpx_call = next(call for call in runtime.argv_calls if call[0] == "httpx-toolkit")
+    assert httpx_call[httpx_call.index("-p") + 1] == "80"
 
 
 @pytest.mark.asyncio
@@ -900,3 +914,75 @@ async def test_proposal_follows_declared_next_playbooks(tmp_path) -> None:
 
     assert first_plan["playbook_id"] == first.id
     assert next_plan["playbook_id"] == second.id
+
+
+@pytest.mark.asyncio
+async def test_failed_playbook_attempt_is_not_reproposed(tmp_path) -> None:
+    playbook = Playbook(
+        id="fails-once.v1",
+        version=1,
+        stage="environment_preflight",
+        triggers=(Trigger(kind="engagement_state", types=("snapshot_locked",)),),
+        required_evidence_types=frozenset(),
+        capabilities=frozenset({"preflight.check"}),
+        actions=(
+            PlaybookAction(
+                adapter="research",
+                operation="investigate",
+                inputs={"product": "preflight"},
+            ),
+        ),
+        limits=PlaybookLimits(max_attempts=1),
+        stop_conditions=(),
+        success_emits=(),
+        next_playbooks=(),
+        report_sections=(),
+    )
+    services = ServiceContainer(
+        profile_name="failed-attempt",
+        store=RunStore(base_path=tmp_path),
+        catalog=WorkflowCatalog(playbooks={playbook.id: playbook}),
+        adapter_registry=AdapterRegistry(),
+        consent_gateway=AcceptContract(),
+    )
+    prepare = _handler_for("ariadne_prepare_engagement", services)
+    propose = _handler_for("ariadne_propose_plan", services)
+    created = json.loads(
+        await prepare(
+            {
+                "profile": "private-lab",
+                "target_host": "192.0.2.10",
+                "objectives": ["proof"],
+                "autonomy": "controlled",
+                "intensity": "normal",
+                "exclusions": ["dos"],
+                "time_window_minutes": 30,
+            },
+            session_id="failed-attempt-session",
+        )
+    )
+    binding = services.command.get_session_binding("failed-attempt-session")
+    assert binding is not None and binding.engagement_id is not None
+    handle = services.store.open(binding.engagement_id)
+    assert handle is not None
+    services.store.append_event(
+        handle,
+        Event(
+            event_type="plan_executed",
+            payload={"playbook_id": playbook.id, "status": "error"},
+            timestamp=datetime.now(UTC),
+        ),
+    )
+
+    result = json.loads(
+        await propose(
+            {
+                "snapshot_hash": created["snapshot_hash"],
+                "hypothesis": "do not retry failed bounded attempt",
+            },
+            session_id="failed-attempt-session",
+        )
+    )
+
+    assert result["status"] == "error"
+    assert result["plan_id"] == ""

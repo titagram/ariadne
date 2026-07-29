@@ -615,6 +615,27 @@ def _typed_progression_observations(
             ):
                 add("vulnerability_validated", observation)
 
+    if adapter == "httpx" and operation == "scan":
+        for observation in observations:
+            if (
+                observation.target != target
+                or observation.source != "httpx"
+                or not isinstance(observation.data.get("url"), str)
+                or not observation.data["url"]
+            ):
+                continue
+            status_code = observation.data.get("status_code")
+            if (
+                isinstance(status_code, int)
+                and not isinstance(status_code, bool)
+                and 0 < status_code <= 599
+            ):
+                add("web_technologies", observation)
+            if isinstance(observation.data.get("title"), str) and observation.data["title"]:
+                add("web_title", observation)
+            if observation.data.get("redirect") is True:
+                add("web_redirect", observation)
+
     if (
         playbook_id == "foothold.confirmation.v1"
         and adapter == "screenshot"
@@ -930,6 +951,32 @@ def _service_fingerprint_identity(
         protocol.strip().casefold() if isinstance(protocol, str) else "",
         port if isinstance(port, int) and not isinstance(port, bool) and port > 0 else None,
         cpe.strip().casefold() if isinstance(cpe, str) else "",
+    )
+
+
+def _observed_web_ports(
+    observations: tuple[Observation, ...],
+    target: TargetSpec,
+) -> tuple[int, ...]:
+    web_services = {
+        "http",
+        "https",
+        "http-proxy",
+        "ssl/http",
+    }
+    return tuple(
+        sorted(
+            {
+                port
+                for observation in observations
+                if observation.target == target
+                and str(observation.data.get("service", "")).casefold()
+                in web_services
+                and isinstance((port := observation.data.get("port")), int)
+                and not isinstance(port, bool)
+                and 0 < port <= 65535
+            }
+        )
     )
 
 
@@ -1272,7 +1319,12 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
     for evt in events:
         if evt.get("event_type") == "plan_executed":
             payload = evt.get("payload", {})
-            if payload.get("status") in ("executed", "success", "failed"):
+            if payload.get("status") in (
+                "executed",
+                "success",
+                "failed",
+                "error",
+            ):
                 pb_id = payload.get("playbook_id", "")
                 if pb_id:
                     executed_playbooks.add(pb_id)
@@ -1460,6 +1512,43 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                         }
                     )
                     if action.adapter == "research" and action.operation == "investigate"
+                    else action
+                    for action in plan.actions
+                ),
+            }
+        )
+
+    if any(
+        action.adapter == "httpx"
+        and action.operation == "scan"
+        and not action.inputs.get("ports")
+        for action in plan.actions
+    ):
+        web_ports = _observed_web_ports(observations, plan.target)
+        if not web_ports:
+            return {
+                "status": "blocked",
+                "boundary": "missing_evidence",
+                "message": (
+                    "HTTP probing requires a target-bound port observed as an "
+                    "HTTP service."
+                ),
+                "plan_id": "",
+            }
+        plan = plan.model_copy(
+            update={
+                "actions": tuple(
+                    action.model_copy(
+                        update={
+                            "inputs": {
+                                **action.inputs,
+                                "ports": list(web_ports),
+                            },
+                        }
+                    )
+                    if action.adapter == "httpx"
+                    and action.operation == "scan"
+                    and not action.inputs.get("ports")
                     else action
                     for action in plan.actions
                 ),
