@@ -434,7 +434,7 @@ def test_generic_curated_contract_accepts_target_bound_httpx_and_denies_shell_to
     )
     spec = ProcessSpec(
         argv=(
-            "httpx-toolkit", "-l", "-", "-p", "80", "-json", "-no-fallback",
+            "httpx-toolkit", "-p", "80", "-json", "-no-fallback",
             "-t", "10", "-timeout", "10",
         ),
         stdin=b"https://10.10.10.10\nhttp://10.10.10.10\n",

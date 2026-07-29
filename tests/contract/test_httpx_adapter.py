@@ -74,11 +74,10 @@ class TestHttpxPlan:
             context,
         )
         assert spec.argv[0] == "httpx-toolkit"
-        # Should contain the target IP
-        # Uses stdin to feed targets (safer than argv)
-        assert any("-l" in arg for arg in spec.argv) or any(
-            "-json" in arg for arg in spec.argv
-        )
+        assert "-json" in spec.argv
+        assert "-l" not in spec.argv
+        assert spec.stdin is not None
+        assert b"10.10.10.10" in spec.stdin
 
     def test_scan_plan_disables_hostname_probe(self, context: AdapterContext) -> None:
         """Verify that unrelated hostname probing is disabled."""

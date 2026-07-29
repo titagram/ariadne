@@ -1324,6 +1324,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 "success",
                 "failed",
                 "error",
+                "failure",
             ):
                 pb_id = payload.get("playbook_id", "")
                 if pb_id:

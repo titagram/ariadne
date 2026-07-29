@@ -150,13 +150,12 @@ class HttpxAdapter:
         target = str(context.target.host)
 
         # Build bounded argv:
-        # - targets piped through stdin (-l -)
+        # - targets piped through stdin (httpx reads stdin when -l is omitted)
         # - JSONL output (-json)
         # - don't probe unrelated hostnames and don't follow redirects
         # - limited threads
         argv = [
             "httpx-toolkit",
-            "-l", "-",
             "-p", port_str,
             "-json",
             "-no-fallback", # don't fall back to unrelated hostnames

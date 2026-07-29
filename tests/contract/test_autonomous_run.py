@@ -969,7 +969,7 @@ async def test_failed_playbook_attempt_is_not_reproposed(tmp_path) -> None:
         handle,
         Event(
             event_type="plan_executed",
-            payload={"playbook_id": playbook.id, "status": "error"},
+            payload={"playbook_id": playbook.id, "status": "failure"},
             timestamp=datetime.now(UTC),
         ),
     )

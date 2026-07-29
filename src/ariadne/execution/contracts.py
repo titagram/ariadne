@@ -597,24 +597,22 @@ class GuardedRuntime:
 
     def _validate_httpx(self, spec: ProcessSpec) -> tuple[int, int]:
         argv = spec.argv
-        if len(argv) != 11 or argv[:4] != (
+        if len(argv) != 9 or argv[:2] != (
             "httpx-toolkit",
-            "-l",
-            "-",
             "-p",
         ):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
-        if argv[5:8] != ("-json", "-no-fallback", "-t") or argv[9] != "-timeout":
+        if argv[3:6] != ("-json", "-no-fallback", "-t") or argv[7] != "-timeout":
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
-        if not argv[4] or spec.stdin is None:
+        if not argv[2] or spec.stdin is None:
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         target = self._envelope.exact_target.host
         expected_stdin = f"https://{target}\nhttp://{target}\n".encode()
         if spec.stdin != expected_stdin:
             self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
         try:
-            threads = int(argv[8])
-            timeout = int(argv[10])
+            threads = int(argv[6])
+            timeout = int(argv[8])
         except (IndexError, ValueError):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         if threads < 1 or timeout < 1:
