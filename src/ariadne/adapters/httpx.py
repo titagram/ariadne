@@ -145,6 +145,7 @@ class HttpxAdapter:
         ports = inputs.get("ports", ())
         if not ports or not isinstance(ports, (list, tuple)):
             raise AdapterError("ports must be a non-empty list or tuple")
+        request_timeout = int(inputs.get("timeout", 10))
 
         port_str = ",".join(str(p) for p in ports)
         target = str(context.target.host)
@@ -160,7 +161,7 @@ class HttpxAdapter:
             "-json",
             "-no-fallback", # don't fall back to unrelated hostnames
             "-t", "10",    # 10 threads max
-            "-timeout", str(inputs.get("timeout", 10)),
+            "-timeout", str(request_timeout),
         ]
 
         # Target IP goes into stdin
@@ -169,7 +170,9 @@ class HttpxAdapter:
         return ProcessSpec(
             argv=tuple(argv),
             stdin=stdin_input,
-            timeout_seconds=int(inputs.get("timeout", 10)),  # type: ignore[arg-type]
+            timeout_seconds=int(
+                inputs.get("process_timeout", max(30, request_timeout * 2 + 5))
+            ),  # type: ignore[arg-type]
             max_output_bytes=int(inputs.get("max_output", 10 * 1024 * 1024)),  # type: ignore[arg-type]
         )
 

@@ -128,6 +128,7 @@ class TestProcessRunner:
             )
         )
         assert result.status is ProcessStatus.TIMED_OUT
+        assert result.timed_out
         assert result.process_tree_terminated
 
     @pytest.mark.asyncio

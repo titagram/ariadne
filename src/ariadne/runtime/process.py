@@ -261,4 +261,5 @@ class ProcessRunner:
             stderr=partial_stderr,
             status=ProcessStatus.TIMED_OUT,
             process_tree_terminated=tree_terminated,
+            timed_out=True,
         )

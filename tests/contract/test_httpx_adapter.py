@@ -120,6 +120,7 @@ class TestHttpxPlan:
             context,
         )
         assert 1 <= spec.timeout_seconds <= 3600
+        assert spec.timeout_seconds > int(spec.argv[spec.argv.index("-timeout") + 1])
         assert spec.max_output_bytes >= 1024
 
     def test_rejects_unknown_operation(self, context: AdapterContext) -> None:
