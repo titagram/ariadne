@@ -2202,6 +2202,109 @@ async def test_failed_crawler_uses_declared_http_fallback_in_same_run(
 
 
 @pytest.mark.asyncio
+async def test_application_surface_paths_are_derived_from_observed_web_url(tmp_path) -> None:
+    playbook = Playbook(
+        id="web.application-surface.v1",
+        version=1,
+        stage="enumeration",
+        triggers=(Trigger(kind="observation_type", types=("web_technologies",)),),
+        required_evidence_types=frozenset({"web_technologies"}),
+        capabilities=frozenset({"web.content_discovery"}),
+        actions=(
+            PlaybookAction(
+                adapter="curl",
+                operation="fetch",
+                inputs={"path": "/admin", "timeout": 10},
+            ),
+        ),
+        limits=PlaybookLimits(max_attempts=1),
+        stop_conditions=(),
+        success_emits=("web_paths",),
+        next_playbooks=(),
+        report_sections=("web",),
+    )
+    registry = AdapterRegistry()
+    registry.register("curl", CurlAdapter())
+    services = ServiceContainer(
+        profile_name="application-surface",
+        store=RunStore(base_path=tmp_path),
+        catalog=WorkflowCatalog(playbooks={playbook.id: playbook}),
+        adapter_registry=registry,
+        consent_gateway=AcceptContract(),
+    )
+    object.__setattr__(services, "tool_card_verifier", None)
+    prepare = _handler_for("ariadne_prepare_engagement", services)
+    propose = _handler_for("ariadne_propose_plan", services)
+    created = json.loads(
+        await prepare(
+            {
+                "profile": "private-lab",
+                "target_host": "192.0.2.10",
+                "objectives": ["proof"],
+                "autonomy": "controlled",
+                "intensity": "normal",
+                "exclusions": ["dos"],
+                "time_window_minutes": 30,
+            },
+            session_id="application-surface-session",
+        )
+    )
+    binding = services.command.get_session_binding("application-surface-session")
+    assert binding is not None and binding.engagement_id is not None
+    handle = services.store.open(binding.engagement_id)
+    assert handle is not None
+    services.store.append_event(
+        handle,
+        Event(
+            event_type="evidence_collected",
+            payload={
+                "evidence_type": "web_technologies",
+                "execution_classification": "success",
+                "observation_data": {
+                    "type": "web_technologies",
+                    "url": "http://192.0.2.10:80/",
+                    "status_code": 200,
+                },
+            },
+            timestamp=datetime.now(UTC),
+        ),
+    )
+    services.store.append_event(
+        handle,
+        Event(
+            event_type="evidence_collected",
+            payload={
+                "evidence_type": "service_fingerprinted",
+                "execution_classification": "success",
+                "observation_data": {
+                    "type": "service_fingerprinted",
+                    "service": "http",
+                    "protocol": "tcp",
+                    "port": 80,
+                    "product": "nginx",
+                    "version": "1.18.0",
+                },
+            },
+            timestamp=datetime.now(UTC),
+        ),
+    )
+    proposal = json.loads(
+        await propose(
+            {"snapshot_hash": created["snapshot_hash"], "hypothesis": "surface"},
+            session_id="application-surface-session",
+        )
+    )
+    assert proposal["playbook_id"] == "web.application-surface.v1"
+    plan_event = next(
+        event
+        for event in reversed(services.store.read_events(handle))
+        if event["event_type"] == "plan_proposed"
+    )
+    action = plan_event["payload"]["plan"]["actions"][0]
+    assert action["inputs"]["url"] == "http://192.0.2.10:80/admin"
+
+
+@pytest.mark.asyncio
 async def test_proposal_follows_declared_next_playbooks(tmp_path) -> None:
     def playbook(identifier: str, next_playbooks: tuple[str, ...] = ()) -> Playbook:
         return Playbook(

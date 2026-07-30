@@ -44,6 +44,7 @@
     - web.content-discovery.v1
     - web.passive-zap.v1
     - web.http-fallback.v1
+    - web.application-surface.v1
     - web.nuclei-selected.v1
   report_sections:
     - "enumeration"
@@ -91,6 +92,7 @@
     - web.object-reference.v1
     - web.passive-zap.v1
     - web.http-fallback.v1
+    - web.application-surface.v1
     - web.nuclei-selected.v1
   report_sections:
     - "web"
@@ -134,6 +136,7 @@
   next_playbooks:
     - web.object-reference.v1
     - web.passive-zap.v1
+    - web.application-surface.v1
     - web.nuclei-selected.v1
   report_sections:
     - "web"
@@ -174,6 +177,81 @@
     - "zap_alerts"
     - "zap_passive_alerts"
   next_playbooks:
+    - web.application-surface.v1
+    - web.nuclei-selected.v1
+  report_sections:
+    - "web"
+
+# Bounded discovery of common application surfaces. Paths are deliberately
+# generic and are requested only against the already observed target URL.
+- id: web.application-surface.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["web_technologies"]
+  required_evidence_types:
+    - "web_technologies"
+  capabilities:
+    - web.content_discovery
+  actions:
+    - adapter: curl
+      operation: fetch
+      inputs:
+        path: "/admin"
+        timeout: 10
+        max_output: 524288
+        tool_card:
+          title: "curl"
+          official_source_url: "https://curl.se/docs/manpage.html"
+          source_date: "2026-07-30"
+          summary: "Official curl client used for bounded application-surface discovery."
+    - adapter: curl
+      operation: fetch
+      inputs:
+        path: "/login"
+        timeout: 10
+        max_output: 524288
+        tool_card:
+          title: "curl"
+          official_source_url: "https://curl.se/docs/manpage.html"
+          source_date: "2026-07-30"
+          summary: "Official curl client used for bounded application-surface discovery."
+    - adapter: curl
+      operation: fetch
+      inputs:
+        path: "/api"
+        timeout: 10
+        max_output: 524288
+        tool_card:
+          title: "curl"
+          official_source_url: "https://curl.se/docs/manpage.html"
+          source_date: "2026-07-30"
+          summary: "Official curl client used for bounded application-surface discovery."
+    - adapter: curl
+      operation: fetch
+      inputs:
+        path: "/version"
+        timeout: 10
+        max_output: 524288
+        tool_card:
+          title: "curl"
+          official_source_url: "https://curl.se/docs/manpage.html"
+          source_date: "2026-07-30"
+          summary: "Official curl client used for bounded application-surface discovery."
+  limits:
+    max_rate: 4
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 2097152
+  stop_conditions:
+    - "application_surfaces_checked"
+    - "target_unreachable"
+  success_emits:
+    - "web_paths"
+  next_playbooks:
+    - web.object-reference.v1
     - web.nuclei-selected.v1
   report_sections:
     - "web"
