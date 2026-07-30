@@ -179,7 +179,8 @@ class TestAdapterOperations:
 
         assert crawler.actions[0].adapter == "katana"
         assert crawler.actions[0].operation == "crawl"
-        assert crawler.actions[0].inputs["duration_seconds"] == 30
+        assert crawler.actions[0].inputs["duration_seconds"] == 90
+        assert crawler.actions[0].inputs["request_timeout"] == 20
         assert crawler.actions[0].inputs["tool_card"]["official_source_url"] == (
             "https://docs.projectdiscovery.io/opensource/katana/overview"
         )
