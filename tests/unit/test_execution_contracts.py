@@ -10,6 +10,7 @@ import yaml
 
 from ariadne.adapters.base import AdapterContext
 from ariadne.adapters.base import PlannedAction as AdapterPlannedAction
+from ariadne.adapters.katana import KatanaAdapter
 from ariadne.adapters.nmap import NmapAdapter
 from ariadne.adapters.research import ResearchAdapter
 from ariadne.adapters.screenshot import ScreenshotAdapter
@@ -547,7 +548,7 @@ def test_zap_contract_accepts_only_the_exact_operation_yaml_shape(
         tmp_path,
         RecordingRuntime(),
         plan=plan,
-        policy=_policy(capability=capability, tools=frozenset({"zap.sh"})),
+        policy=_policy(capability=capability, tools=frozenset({"zaproxy"})),
     )
     context = AdapterContext(
         target=plan.target,
@@ -572,6 +573,63 @@ def test_zap_contract_accepts_only_the_exact_operation_yaml_shape(
         guard.authorize_initial(
             spec.model_copy(update={"stdin": yaml.safe_dump(automation).encode()})
         )
+
+
+def test_katana_contract_rejects_a_seed_outside_the_exact_target(
+    tmp_path: Path,
+) -> None:
+    capability = "web.content_discovery"
+    plan = _plan(
+        adapter="katana",
+        operation="crawl",
+        capability=capability,
+        inputs={},
+        limits=PlaybookLimits(
+            max_rate=20,
+            max_concurrency=1,
+            max_attempts=1,
+            max_duration_seconds=30,
+            max_output_bytes=4096,
+        ),
+    )
+    guard = _guard(
+        tmp_path,
+        RecordingRuntime(),
+        plan=plan,
+        policy=_policy(capability=capability, tools=frozenset({"katana"})),
+    )
+    context = AdapterContext(
+        target=plan.target,
+        snapshot_hash=plan.snapshot_hash,
+        engagement_id=UUID("00000000-0000-0000-0000-000000000001"),
+        adapter_name="katana",
+        limits=plan.limits,
+        capabilities=plan.capabilities,
+    )
+    spec = KatanaAdapter().plan(
+        AdapterPlannedAction(
+            operation="crawl",
+            inputs={
+                "urls": ["http://10.10.10.10/"],
+                "duration_seconds": 5,
+            },
+        ),
+        context,
+    )
+
+    guard.authorize_initial(spec)
+    mutated = spec.model_copy(
+        update={
+            "argv": tuple(
+                "http://10.10.10.11/"
+                if item == "http://10.10.10.10/"
+                else item
+                for item in spec.argv
+            )
+        }
+    )
+    with pytest.raises(ProcessAuthorizationError, match="target"):
+        guard.authorize_initial(mutated)
 
 
 @pytest.mark.asyncio

@@ -80,7 +80,7 @@ capabilities:
       - httpx-toolkit
       - whatweb
       - nuclei
-      - zap.sh
+      - zaproxy
   web.active_scan:
     allowed: true
     max_rate: 10
@@ -89,7 +89,7 @@ capabilities:
     max_duration_seconds: 14400
     max_output_bytes: 100_000_000
     allowed_tools:
-      - zap.sh
+      - zaproxy
       - nuclei
   web.fuzz:
     allowed: true
@@ -300,7 +300,9 @@ capabilities:
   web.content_discovery:
     <<: *web_workflow
     allowed_tools:
+      - curl
       - httpx-toolkit
+      - katana
   web.nuclei_scan:
     <<: *web_workflow
     allowed_tools:

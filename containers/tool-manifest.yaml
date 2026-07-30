@@ -30,6 +30,7 @@ packages:
   - exploitdb
   - nuclei
   - metasploit-framework
+  - zaproxy
 
   # Active Directory and Windows-facing collection
   - smbclient
@@ -73,6 +74,7 @@ executables:
   - ip
   - john
   - jq
+  - katana
   - ldapsearch
   - ligolo-proxy
   - msfconsole
@@ -89,6 +91,15 @@ executables:
   - ssh
   - tcpdump
   - tshark
+  - zaproxy
+
+external_binaries:
+  katana:
+    version: "1.6.1"
+    source: "https://github.com/projectdiscovery/katana/releases/tag/v1.6.1"
+    sha256:
+      amd64: "503754f1bd370c3ef287df6998e317baed2dd75bdd13ea64034f09b80ca393f3"
+      arm64: "663b4ed2c6559a7dacc819e816889940d567ff554ac3f543c8c8f9b50245cd45"
 
 nuclei_templates:
   repository: "https://github.com/projectdiscovery/nuclei-templates"

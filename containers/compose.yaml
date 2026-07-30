@@ -1,7 +1,7 @@
-# Ariadne Docker Compose — pinned Kali, ZAP, and netguard egress firewall.
+# Ariadne Docker Compose — pinned Kali and netguard egress firewall.
 #
-# Kali and ZAP share netguard's network namespace so all egress from both
-# containers passes through nftables rules. Only netguard carries NET_ADMIN.
+# Kali shares netguard's network namespace so all egress passes through
+# nftables rules. Only netguard carries NET_ADMIN.
 # The Docker socket is deliberately not mounted into any container.
 name: ariadne
 
@@ -33,6 +33,9 @@ services:
       args:
         KALI_BASE_REF: ${KALI_BASE_REF:-sha256:2951c3e7760bf1d85e1475dafcc5ea8a637fc53e14e84dd9638dd5d1d6fe843b}
         NUCLEI_TEMPLATES_REF: ${NUCLEI_TEMPLATES_REF:-9979ce144c257f1c427a75604f8c0ffbc8293390}
+        KATANA_VERSION: ${KATANA_VERSION:-1.6.1}
+        KATANA_AMD64_SHA256: ${KATANA_AMD64_SHA256:-503754f1bd370c3ef287df6998e317baed2dd75bdd13ea64034f09b80ca393f3}
+        KATANA_ARM64_SHA256: ${KATANA_ARM64_SHA256:-663b4ed2c6559a7dacc819e816889940d567ff554ac3f543c8c8f9b50245cd45}
     network_mode: "service:netguard"
     read_only: true
     depends_on:
@@ -48,18 +51,4 @@ services:
       - ENGAGEMENT_DIR=/engagement
       - EVIDENCE_DIR=/evidence
       - HOME=/workspace/home
-    restart: "no"
-
-  zap:
-    image: softwaresecurityproject/zap-stable@${ZAP_IMAGE_REF:-sha256:b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c}
-    network_mode: "service:netguard"
-    depends_on:
-      - netguard
-    volumes:
-      - ${ARIADNE_RUN_DIR:?ARIADNE_RUN_DIR is required}:/engagement:ro
-      - ${ARIADNE_RUN_DIR:?ARIADNE_RUN_DIR is required}/workspace:/workspace
-      - ${ARIADNE_RUN_DIR:?ARIADNE_RUN_DIR is required}/artifacts:/evidence
-    environment:
-      - ENGAGEMENT_DIR=/engagement
-      - EVIDENCE_DIR=/evidence
     restart: "no"

@@ -102,6 +102,8 @@ _EXCLUSION_CAPABILITY_ALIASES = {
     "web fuzzing": frozenset({"web.fuzz"}),
     "metasploit": frozenset({"exploit.metasploit"}),
 }
+_RECOVERABLE_PROVIDER_BOUNDARIES = frozenset({"kali_runtime"})
+_PROVIDER_FALLBACK_PLAYBOOKS = frozenset({"web.http-fallback.v1"})
 
 
 def _tool_id_for_executable(executable: str) -> str:
@@ -189,11 +191,11 @@ def _inspect_planned_tool(
     if (
         not isinstance(version_args, (list, tuple))
         or not isinstance(help_args, (list, tuple))
-        or tuple(version_args) != ("--version",)
-        or tuple(help_args) != ("--help",)
+        or tuple(version_args) not in {("--version",), ("-version",)}
+        or tuple(help_args) not in {("--help",), ("-h",), ("-help",)}
     ):
         raise ToolVerificationBlockedError(
-            f"{tool_id}: unknown-tool probes are documentation-only and fixed to --version/--help"
+            f"{tool_id}: unknown-tool probes must use a curated version/help form"
         )
 
     slug = tool_id.removeprefix("tool.")
@@ -547,11 +549,18 @@ def _typed_progression_observations(
         if any(
             existing.source == kind and existing.target == observation.target
             and (
-                kind != "protocol_routed"
+                kind not in {"protocol_routed", "web_paths", "web_parameters"}
                 or (
-                    existing.data.get("port") == observation.data.get("port")
-                    and existing.data.get("protocol") == observation.data.get("protocol")
-                    and existing.data.get("service") == observation.data.get("service")
+                    (
+                        kind == "protocol_routed"
+                        and existing.data.get("port") == observation.data.get("port")
+                        and existing.data.get("protocol") == observation.data.get("protocol")
+                        and existing.data.get("service") == observation.data.get("service")
+                    )
+                    or (
+                        kind in {"web_paths", "web_parameters"}
+                        and existing.data.get("url") == observation.data.get("url")
+                    )
                 )
             )
             for existing in (*observations, *additions)
@@ -635,6 +644,20 @@ def _typed_progression_observations(
                 add("web_title", observation)
             if observation.data.get("redirect") is True:
                 add("web_redirect", observation)
+
+    if adapter in {"katana", "curl"} and operation in {"crawl", "fetch"}:
+        for observation in observations:
+            if (
+                observation.target != target
+                or observation.source != adapter
+                or not isinstance(observation.data.get("url"), str)
+                or not observation.data["url"]
+            ):
+                continue
+            add("web_paths", observation)
+            parameters = observation.data.get("parameters")
+            if isinstance(parameters, (list, tuple)) and parameters:
+                add("web_parameters", observation)
 
     if (
         playbook_id == "foothold.confirmation.v1"
@@ -980,6 +1003,35 @@ def _observed_web_ports(
     )
 
 
+def _observed_web_urls(
+    observations: tuple[Observation, ...],
+    target: TargetSpec,
+) -> tuple[str, ...]:
+    urls: list[str] = []
+    for observation in reversed(observations):
+        if observation.target != target:
+            continue
+        value = observation.data.get("url")
+        if not isinstance(value, str) or not value:
+            continue
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.hostname.casefold() != target.host.casefold()
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            continue
+        root = f"{parsed.scheme}://{parsed.netloc}/"
+        if root not in urls:
+            urls.append(root)
+        if len(urls) == 10:
+            break
+    return tuple(reversed(urls))
+
+
 def _get_binding(cmd: AriadneCommand, session_id: str) -> dict[str, Any] | None:
     """Check for an active engagement binding and return its metadata.
 
@@ -1317,8 +1369,8 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
     events = cmd.store.read_events(run_handle)
     executed_playbooks: set[str] = set()
     for evt in events:
+        payload = evt.get("payload", {})
         if evt.get("event_type") == "plan_executed":
-            payload = evt.get("payload", {})
             if payload.get("status") in (
                 "executed",
                 "success",
@@ -1329,6 +1381,13 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 pb_id = payload.get("playbook_id", "")
                 if pb_id:
                     executed_playbooks.add(pb_id)
+        elif (
+            evt.get("event_type") == "execution_boundary"
+            and payload.get("boundary") in _RECOVERABLE_PROVIDER_BOUNDARIES
+        ):
+            pb_id = payload.get("playbook_id", "")
+            if pb_id:
+                executed_playbooks.add(pb_id)
 
     # Use the first target as the hypothesis target
     first_target = snapshot.targets[0] if snapshot.targets else TargetSpec(host="unknown")
@@ -1377,6 +1436,17 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
 
     # 5. Find eligible playbooks and build the first plan
     eligible = catalog.eligible(planning_context)
+    provider_fallback_needed = False
+    for event in reversed(events):
+        event_type = event.get("event_type")
+        if event_type == "execution_boundary":
+            provider_fallback_needed = (
+                event.get("payload", {}).get("boundary")
+                in _RECOVERABLE_PROVIDER_BOUNDARIES
+            )
+            break
+        if event_type == "plan_executed":
+            break
     unresearched_fingerprint = _latest_service_fingerprint(
         observations,
         first_target,
@@ -1384,10 +1454,16 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
     eligible = tuple(
         playbook
         for playbook in eligible
-        if playbook.id not in executed_playbooks
-        or (
-            playbook.id == "research.service-vulnerability.v1"
-            and unresearched_fingerprint is not None
+        if (
+            playbook.id not in _PROVIDER_FALLBACK_PLAYBOOKS
+            or provider_fallback_needed
+        )
+        and (
+            playbook.id not in executed_playbooks
+            or (
+                playbook.id == "research.service-vulnerability.v1"
+                and unresearched_fingerprint is not None
+            )
         )
     )
     last_completed_playbook = next(
@@ -1550,6 +1626,47 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                     if action.adapter == "httpx"
                     and action.operation == "scan"
                     and not action.inputs.get("ports")
+                    else action
+                    for action in plan.actions
+                ),
+            }
+        )
+
+    if any(
+        action.adapter in {"katana", "curl", "zap"}
+        and not action.inputs.get("urls")
+        and not action.inputs.get("url")
+        for action in plan.actions
+    ):
+        web_urls = _observed_web_urls(observations, plan.target)
+        if not web_urls:
+            return {
+                "status": "blocked",
+                "boundary": "missing_evidence",
+                "message": (
+                    "Web crawling requires a target-bound URL from successful "
+                    "HTTP fingerprint evidence."
+                ),
+                "plan_id": "",
+            }
+        plan = plan.model_copy(
+            update={
+                "actions": tuple(
+                    action.model_copy(
+                        update={
+                            "inputs": {
+                                **action.inputs,
+                                **(
+                                    {"urls": list(web_urls)}
+                                    if action.adapter == "katana"
+                                    else {"url": web_urls[0]}
+                                ),
+                            },
+                        }
+                    )
+                    if action.adapter in {"katana", "curl", "zap"}
+                    and not action.inputs.get("urls")
+                    and not action.inputs.get("url")
                     else action
                     for action in plan.actions
                 ),
@@ -2965,6 +3082,7 @@ async def handle_run_engagement(
     max_steps = args.get("max_steps", 30)
     if not isinstance(max_steps, int) or not 1 <= max_steps <= 100:
         return {"status": "error", "message": "max_steps must be between 1 and 100"}
+    last_provider_boundary: dict[str, Any] | None = None
     for step in range(1, max_steps + 1):
         binding = _get_binding(cmd, session_id)
         if binding is None or binding["engagement_id"] is None:
@@ -3014,6 +3132,16 @@ async def handle_run_engagement(
             "plan_auto_approved",
             "plan_proposed",
         }:
+            if last_provider_boundary is not None:
+                return {
+                    **last_provider_boundary,
+                    "steps": step - 1,
+                    "message": (
+                        f"{last_provider_boundary.get('message', 'Provider unavailable')} "
+                        "No eligible fallback provider remains."
+                    ),
+                    "fallback_details": proposed,
+                }
             return {
                 "status": "blocked",
                 "boundary": proposed.get("boundary", "no_eligible_plan"),
@@ -3025,11 +3153,18 @@ async def handle_run_engagement(
             **context,
         )
         if executed.get("status") == "blocked":
+            if (
+                executed.get("boundary") in _RECOVERABLE_PROVIDER_BOUNDARIES
+                and step < max_steps
+            ):
+                last_provider_boundary = executed
+                continue
             return {
                 **executed,
                 "boundary": executed.get("boundary", "manual_choice"),
                 "steps": step,
             }
+        last_provider_boundary = None
         if executed.get("status") != "executed":
             events = cmd.store.read_events(run_handle)
             blocked_candidate_ids = {

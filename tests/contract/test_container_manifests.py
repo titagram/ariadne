@@ -1,4 +1,4 @@
-"""Contract tests for the pinned Kali, ZAP, and netguard container stack.
+"""Contract tests for the pinned Kali and netguard container stack.
 
 Verifies the structural invariants of the Compose orchestrator, the
 Kali Dockerfile, the netguard egress entrypoint, and pinned image/manifest
@@ -20,12 +20,11 @@ _CONTAINERS = Path(__file__).resolve().parent.parent.parent / "containers"
 
 
 def test_compose_shares_netguard_namespace() -> None:
-    """Kali and ZAP must route egress through netguard's NET_ADMIN namespace."""
+    """Kali must route egress through netguard's NET_ADMIN namespace."""
     compose = yaml.safe_load((_CONTAINERS / "compose.yaml").read_text())
     services = compose["services"]
 
     assert services["kali"]["network_mode"] == "service:netguard"
-    assert services["zap"]["network_mode"] == "service:netguard"
     assert services["netguard"]["cap_add"] == ["NET_ADMIN"]
 
     # Only netguard carries NET_ADMIN; Kali and ZAP must not widen their caps.
@@ -44,10 +43,10 @@ def test_netguard_image_includes_nftables() -> None:
 
 
 def test_compose_has_required_services() -> None:
-    """Stack must expose kali, zap, and netguard services."""
+    """Stack exposes only the on-demand Kali runtime and its netguard."""
     compose = yaml.safe_load((_CONTAINERS / "compose.yaml").read_text())
     service_names = set(compose["services"])
-    assert service_names >= {"kali", "zap", "netguard"}
+    assert service_names == {"kali", "netguard"}
 
 
 def test_kali_root_filesystem_is_read_only_with_persistent_home() -> None:
@@ -69,7 +68,7 @@ def test_image_lock_records_pinned_digests() -> None:
     lock = yaml.safe_load((_CONTAINERS / "image-lock.yaml").read_text())
     assert isinstance(lock, dict)
     records = lock.get("images", [])
-    assert len(records) >= 2  # kali-rolling + stable ZAP
+    assert len(records) >= 2
 
     for rec in records:
         assert "image" in rec, f"Missing 'image' key in {rec}"
@@ -81,12 +80,15 @@ def test_image_lock_records_pinned_digests() -> None:
         assert "retrieved_at" in rec
 
 
-def test_image_lock_kali_and_zap_present() -> None:
-    """image-lock must reference both kalilinux and ZAP images."""
+def test_image_lock_uses_the_custom_kali_image_for_zap() -> None:
+    """ZAP ships inside curated Kali; no disconnected ZAP service remains."""
     lock = yaml.safe_load((_CONTAINERS / "image-lock.yaml").read_text())
     images = {rec["image"] for rec in lock.get("images", [])}
     assert any("kalilinux" in img for img in images), "Missing kalilinux image"
-    assert any("zap" in img.lower() for img in images), "Missing ZAP image"
+    assert not any("zap" in img.lower() for img in images)
+
+    compose = yaml.safe_load((_CONTAINERS / "compose.yaml").read_text())
+    assert "zap" not in compose["services"]
 
 
 # ── Tool manifest ───────────────────────────────────────────────────────────────
@@ -135,6 +137,7 @@ def test_tool_manifest_is_curated_for_ariadne_runtime() -> None:
         "nmap",
         "nuclei",
         "tshark",
+        "zaproxy",
     } <= packages
     assert {
         "chromium",
@@ -143,7 +146,17 @@ def test_tool_manifest_is_curated_for_ariadne_runtime() -> None:
         "nmap",
         "nuclei",
         "searchsploit",
+        "zaproxy",
     } <= executables
+
+    katana = manifest["external_binaries"]["katana"]
+    assert katana["version"] == "1.6.1"
+    assert katana["source"].startswith(
+        "https://github.com/projectdiscovery/katana/releases/"
+    )
+    assert len(katana["sha256"]["amd64"]) == 64
+    assert len(katana["sha256"]["arm64"]) == 64
+    assert "katana" in executables
 
 
 def test_kali_backed_execution_contracts_are_present_in_the_curated_image() -> None:
@@ -152,7 +165,9 @@ def test_kali_backed_execution_contracts_are_present_in_the_curated_image() -> N
     executables = set(manifest["executables"])
     kali_backed_adapters = {
         "active_directory",
+        "curl",
         "httpx",
+        "katana",
         "metasploit",
         "nmap",
         "nuclei",
@@ -160,6 +175,7 @@ def test_kali_backed_execution_contracts_are_present_in_the_curated_image() -> N
         "postex",
         "research",
         "screenshot",
+        "zap",
     }
     required = {
         executable
@@ -205,6 +221,9 @@ def test_kali_dockerfile_redeclares_runtime_build_args_after_from() -> None:
     stage = dockerfile.split("FROM ", maxsplit=1)[1]
 
     assert "ARG NUCLEI_TEMPLATES_REF" in stage
+    assert "ARG KATANA_VERSION" in stage
+    assert "KATANA_AMD64_SHA256" in stage
+    assert "KATANA_ARM64_SHA256" in stage
 
 
 # ── Netguard entrypoint ─────────────────────────────────────────────────────────

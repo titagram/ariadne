@@ -64,6 +64,12 @@ not install `kali-linux-headless`, desktop frontends, or unrelated Kali tool
 families. The manifest is the reviewable boundary for adding a curated tool;
 uncurated code still requires explicit approval.
 
+Web discovery is provider-aware. Ariadne prefers a bounded Katana crawl,
+uses ZAP only for its passive or active analysis capabilities, and retains a
+single-page, same-host `curl` extractor as the local fallback. If a specialist
+provider is unavailable, only that branch is exhausted; Ariadne continues with
+the next eligible provider instead of blocking the whole engagement.
+
 There is no VM fallback. If Docker is required but missing, Ariadne stops at a
 typed `kali_runtime` boundary and never installs Docker implicitly.
 

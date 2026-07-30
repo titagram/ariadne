@@ -23,8 +23,10 @@ from ariadne.core.workflow import WorkflowCatalog
 # in each src/ariadne/adapters/*.py file.
 
 REGISTERED_ADAPTERS: dict[str, frozenset[str]] = {
+    "curl": frozenset({"fetch"}),
     "nmap": frozenset({"tcp_discovery", "service_fingerprint", "udp_targeted"}),
     "httpx": frozenset({"scan"}),
+    "katana": frozenset({"crawl"}),
     "nuclei": frozenset({"scan"}),
     "zap": frozenset({"passive_scan", "active_scan", "spider"}),
     "metasploit": frozenset({"search", "info", "check", "run_module"}),
@@ -168,6 +170,23 @@ class TestAdapterOperations:
                 assert card.get("official_source_url") == (
                     "https://docs.projectdiscovery.io/opensource/httpx/overview"
                 )
+
+    def test_web_content_discovery_uses_a_curated_crawler_with_fallbacks(
+        self,
+        catalog: WorkflowCatalog,
+    ) -> None:
+        crawler = catalog.playbooks["web.content-discovery.v1"]
+
+        assert crawler.actions[0].adapter == "katana"
+        assert crawler.actions[0].operation == "crawl"
+        assert crawler.actions[0].inputs["tool_card"]["official_source_url"] == (
+            "https://docs.projectdiscovery.io/opensource/katana/overview"
+        )
+        assert {
+            "web.passive-zap.v1",
+            "web.http-fallback.v1",
+            "web.nuclei-selected.v1",
+        } <= set(crawler.next_playbooks)
 
 
 # ---------------------------------------------------------------------------

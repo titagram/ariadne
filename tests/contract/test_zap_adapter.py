@@ -105,6 +105,12 @@ class TestZapPlan:
         self, context: AdapterContext
     ) -> None:
         spec = ZapAdapter().plan(action("passive_scan"), context)
+        assert spec.argv == (
+            "zaproxy",
+            "-cmd",
+            "-autorun",
+            "/dev/stdin",
+        )
         assert spec.stdin is not None
         stdin_text = spec.stdin.decode("utf-8")
         parsed = yaml.safe_load(stdin_text)
@@ -159,10 +165,9 @@ class TestZapParse:
         obs = ZapAdapter().parse(result)
         assert obs == ()
 
-    def test_malformed_json_raises(self) -> None:
+    def test_progress_logs_do_not_create_simulated_alerts(self) -> None:
         result = ProcessResult(exit_code=0, stdout="not json at all", stderr="")
-        with pytest.raises(AdapterError):
-            ZapAdapter().parse(result)
+        assert ZapAdapter().parse(result) == ()
 
     def test_alert_target_matches_context_host(self, load_fixture) -> None:
         result = ProcessResult(

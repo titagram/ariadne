@@ -9,11 +9,13 @@ from uuid import uuid4
 import pytest
 
 from ariadne.adapters import AdapterRegistry
+from ariadne.adapters.curl import CurlAdapter
 from ariadne.adapters.httpx import HttpxAdapter
 from ariadne.adapters.nmap import NmapAdapter
 from ariadne.adapters.nuclei import NucleiAdapter
 from ariadne.adapters.pivot import PivotAdapter
 from ariadne.adapters.research import ResearchAdapter
+from ariadne.adapters.zap import ZapAdapter
 from ariadne.composition import ServiceContainer
 from ariadne.core.engagement import TargetSpec
 from ariadne.core.observations import Observation
@@ -34,7 +36,7 @@ from ariadne.knowledge import (
     RuntimeVerificationStore,
     ToolCardVerifier,
 )
-from ariadne.runtime.process import ProcessResult
+from ariadne.runtime.process import ProcessResult, ProcessRunner
 from ariadne.store.run_store import ArtifactInput, Event, RunStore
 
 
@@ -136,6 +138,21 @@ class BuiltinProgressionRuntime(DryRunRuntime):
                     '{"url":"http://192.0.2.10:80/","status_code":200,'
                     '"title":"Fixture","tech":["Apache httpd"]}\n'
                 ),
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected executable: {spec.argv[0]}")
+
+
+class ProviderFallbackRuntime(ProcessRunner):
+    def __init__(self) -> None:
+        self.argv_calls: list[tuple[str, ...]] = []
+
+    async def run(self, spec) -> ProcessResult:
+        self.argv_calls.append(tuple(spec.argv))
+        if spec.argv[0] == "curl":
+            return ProcessResult(
+                exit_code=0,
+                stdout='<a href="/admin?view=summary">Admin</a>',
                 stderr="",
             )
         raise AssertionError(f"Unexpected executable: {spec.argv[0]}")
@@ -833,6 +850,124 @@ async def test_builtin_catalog_researches_each_service_without_blind_validation(
     )
     httpx_call = next(call for call in runtime.argv_calls if call[0] == "httpx-toolkit")
     assert httpx_call[httpx_call.index("-p") + 1] == "80"
+
+
+@pytest.mark.asyncio
+async def test_unavailable_web_provider_falls_back_without_ending_engagement(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    primary = Playbook(
+        id="web.primary-zap.v1",
+        version=1,
+        stage="environment_preflight",
+        triggers=(Trigger(kind="engagement_state", types=("snapshot_locked",)),),
+        required_evidence_types=frozenset(),
+        capabilities=frozenset({"web.passive_scan"}),
+        actions=(
+            PlaybookAction(
+                adapter="zap",
+                operation="passive_scan",
+                inputs={
+                    "scan_type": "passive",
+                    "url": "https://192.0.2.10/",
+                },
+            ),
+        ),
+        limits=PlaybookLimits(max_attempts=1),
+        stop_conditions=("provider_complete",),
+        success_emits=("zap_passive_alerts",),
+        next_playbooks=("web.http-fallback.v1",),
+        report_sections=("web",),
+    )
+    fallback = Playbook(
+        id="web.http-fallback.v1",
+        version=1,
+        stage="environment_preflight",
+        triggers=(Trigger(kind="engagement_state", types=("snapshot_locked",)),),
+        required_evidence_types=frozenset(),
+        capabilities=frozenset({"web.content_discovery"}),
+        actions=(
+            PlaybookAction(
+                adapter="curl",
+                operation="fetch",
+                inputs={"url": "http://192.0.2.10/"},
+            ),
+        ),
+        limits=PlaybookLimits(max_attempts=1),
+        stop_conditions=("fallback_complete",),
+        success_emits=("web_paths",),
+        next_playbooks=(),
+        report_sections=("web",),
+    )
+    registry = AdapterRegistry()
+    registry.register("zap", ZapAdapter())
+    registry.register("curl", CurlAdapter())
+    runtime = ProviderFallbackRuntime()
+    registry.default_runtime = runtime
+    services = ServiceContainer(
+        profile_name="provider-fallback",
+        store=RunStore(base_path=tmp_path),
+        catalog=WorkflowCatalog(
+            playbooks={
+                primary.id: primary,
+                fallback.id: fallback,
+            }
+        ),
+        adapter_registry=registry,
+        consent_gateway=AcceptContract(),
+    )
+    object.__setattr__(services, "tool_card_verifier", None)
+    monkeypatch.setattr(
+        "ariadne.hades_adapter.handlers.shutil.which",
+        lambda executable: (
+            None if executable in {"zap.sh", "zaproxy"} else f"/fixture/{executable}"
+        ),
+    )
+    prepare = _handler_for("ariadne_prepare_engagement", services)
+    run = _handler_for("ariadne_run", services)
+    created = json.loads(
+        await prepare(
+            {
+                "profile": "private-lab",
+                "target_host": "192.0.2.10",
+                "objectives": ["proof"],
+                "autonomy": "controlled",
+                "intensity": "normal",
+                "exclusions": ["dos"],
+                "time_window_minutes": 30,
+            },
+            session_id="provider-fallback-session",
+        )
+    )
+
+    result = json.loads(
+        await run(
+            {"max_steps": 2},
+            session_id="provider-fallback-session",
+        )
+    )
+    binding = services.command.get_session_binding("provider-fallback-session")
+    assert binding is not None and binding.engagement_id is not None
+    handle = services.store.open(binding.engagement_id)
+    assert handle is not None
+    events = services.store.read_events(handle)
+
+    assert created["status"] == "active"
+    assert result["boundary"] == "safety_step_limit", result
+    assert any(
+        event["event_type"] == "execution_boundary"
+        and event["payload"]["playbook_id"] == primary.id
+        and event["payload"]["boundary"] == "kali_runtime"
+        for event in events
+    )
+    assert any(
+        event["event_type"] == "plan_executed"
+        and event["payload"]["playbook_id"] == fallback.id
+        and event["payload"]["status"] == "executed"
+        for event in events
+    )
+    assert runtime.argv_calls[0][0] == "curl"
 
 
 @pytest.mark.asyncio

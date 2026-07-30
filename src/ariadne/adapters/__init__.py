@@ -80,7 +80,9 @@ def build_default_registry() -> AdapterRegistry:
         An ``AdapterRegistry`` instance with all built-in adapters.
     """
     from ariadne.adapters.active_directory import ActiveDirectoryAdapter
+    from ariadne.adapters.curl import CurlAdapter
     from ariadne.adapters.httpx import HttpxAdapter
+    from ariadne.adapters.katana import KatanaAdapter
     from ariadne.adapters.metasploit import MetasploitAdapter
     from ariadne.adapters.nmap import NmapAdapter
     from ariadne.adapters.nuclei import NucleiAdapter
@@ -91,9 +93,11 @@ def build_default_registry() -> AdapterRegistry:
     from ariadne.adapters.zap import ZapAdapter
 
     registry = AdapterRegistry()
+    registry.register("curl", CurlAdapter())
     registry.register("nmap", NmapAdapter())
     registry.register("research", ResearchAdapter())
     registry.register("httpx", HttpxAdapter())
+    registry.register("katana", KatanaAdapter())
     registry.register("zap", ZapAdapter())
     registry.register("nuclei", NucleiAdapter())
     registry.register("metasploit", MetasploitAdapter())

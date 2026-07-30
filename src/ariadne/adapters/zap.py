@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, ClassVar
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import yaml
@@ -36,27 +37,40 @@ from ariadne.adapters.base import (
 from ariadne.core.observations import Observation
 
 
-def _escape_regex_for_zap(host: str) -> str:
-    """Escape a host string for use in a ZAP includePath regex."""
-    return re.escape(host)
-
-
-def _build_automation_plan(context: AdapterContext) -> dict[str, Any]:
+def _build_automation_plan(
+    context: AdapterContext,
+    *,
+    seed_url: str | None = None,
+) -> dict[str, Any]:
     """Build a ZAP Automation Framework plan dict from the engagement context.
 
     The plan restricts scope to the confirmed target and its sub-paths,
     and includes passive scanning, spidering, and optionally active scan.
     """
     host = str(context.target.host)
-    escaped_host = _escape_regex_for_zap(host)
+    target_url = seed_url or f"https://{host}"
+    parsed = urlparse(target_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname is None
+        or parsed.hostname.casefold() != host.casefold()
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise AdapterError(
+            f"ZAP seed {target_url!r} is outside the exact target scope"
+        )
+    root_url = f"{parsed.scheme}://{parsed.netloc}"
+    escaped_root = re.escape(root_url)
 
     plan: dict[str, Any] = {
         "env": {
             "contexts": [
                 {
                     "name": "ariadne",
-                    "urls": [f"https://{host}"],
-                    "includePaths": [f"https://{escaped_host}/.*"],
+                    "urls": [root_url],
+                    "includePaths": [f"{escaped_root}/.*"],
                     "excludePaths": [],
                 }
             ]
@@ -119,8 +133,11 @@ class ZapAdapter:
                 f"Supported: {', '.join(sorted(_OPERATIONS))}"
             )
 
-        plan = _build_automation_plan(context)
         inputs = action.inputs
+        seed_url = inputs.get("url")
+        if seed_url is not None and not isinstance(seed_url, str):
+            raise AdapterError("ZAP url must be a string")
+        plan = _build_automation_plan(context, seed_url=seed_url)
 
         if op == "active_scan":
             plan["jobs"].append(
@@ -151,10 +168,10 @@ class ZapAdapter:
 
         return ProcessSpec(
             argv=(
-                "zap.sh",
+                "zaproxy",
                 "-cmd",
                 "-autorun",
-                "-",
+                "/dev/stdin",
             ),
             stdin=yaml_bytes,
             timeout_seconds=int(inputs.get("timeout", 600)),  # type: ignore[arg-type]
@@ -179,14 +196,21 @@ class ZapAdapter:
         observations: list[Observation] = []
 
         try:
-            alerts = json.loads(stdout)
-        except json.JSONDecodeError as e:
-            raise AdapterError(
-                f"Failed to parse ZAP output as JSON: {e}"
-            ) from e
-
-        if not isinstance(alerts, list):
+            payload = json.loads(stdout)
+        except json.JSONDecodeError:
+            # Automation Framework progress and JVM logs are not findings.
+            # Preserve them as process output without inventing observations.
             return ()
+
+        alerts: list[object] = []
+        if isinstance(payload, list):
+            alerts = payload
+        elif isinstance(payload, dict):
+            sites = payload.get("site")
+            if isinstance(sites, list):
+                for site in sites:
+                    if isinstance(site, dict) and isinstance(site.get("alerts"), list):
+                        alerts.extend(site["alerts"])
 
         from ariadne.core.engagement import TargetSpec
 
@@ -205,7 +229,7 @@ class ZapAdapter:
                 "description": alert.get("description", ""),
                 "solution": alert.get("solution", ""),
                 "alertRef": alert.get("alertRef", ""),
-                "pluginId": alert.get("pluginId", ""),
+                "pluginId": alert.get("pluginId", alert.get("pluginid", "")),
             }
 
             # Determine target host from the alert URL

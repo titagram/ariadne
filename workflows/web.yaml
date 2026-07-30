@@ -43,6 +43,8 @@
   next_playbooks:
     - web.content-discovery.v1
     - web.passive-zap.v1
+    - web.http-fallback.v1
+    - web.nuclei-selected.v1
   report_sections:
     - "enumeration"
     - "web"
@@ -59,16 +61,19 @@
   capabilities:
     - web.content_discovery
   actions:
-    - adapter: httpx
-      operation: scan
+    - adapter: katana
+      operation: crawl
       inputs:
-        path_discovery: true
-        max_paths: 200
+        depth: 3
+        duration_seconds: 60
+        max_pages: 200
         tool_card:
-          title: "ProjectDiscovery httpx"
-          official_source_url: "https://docs.projectdiscovery.io/opensource/httpx/overview"
+          title: "ProjectDiscovery Katana"
+          official_source_url: "https://docs.projectdiscovery.io/opensource/katana/overview"
           source_date: "2026-07-30"
-          summary: "Official HTTP probing toolkit used for bounded web discovery."
+          summary: "Official target-scoped crawler used for bounded endpoint discovery."
+          version_args: ["-version"]
+          help_args: ["-h"]
   limits:
     max_rate: 30
     max_concurrency: 2
@@ -83,6 +88,50 @@
     - "web_parameters"
   next_playbooks:
     - web.passive-zap.v1
+    - web.http-fallback.v1
+    - web.nuclei-selected.v1
+  report_sections:
+    - "web"
+
+# Minimal local fallback when a specialist crawler or passive scanner is
+# unavailable. It fetches one already-confirmed target URL without redirects
+# and extracts only same-host links and forms.
+- id: web.http-fallback.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["web_technologies"]
+  required_evidence_types:
+    - "web_technologies"
+  capabilities:
+    - web.content_discovery
+  actions:
+    - adapter: curl
+      operation: fetch
+      inputs:
+        timeout: 20
+        max_output: 1048576
+        tool_card:
+          title: "curl"
+          official_source_url: "https://curl.se/docs/manpage.html"
+          source_date: "2026-07-30"
+          summary: "Official curl client used for a bounded same-host HTML fallback."
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 30
+    max_output_bytes: 1048576
+  stop_conditions:
+    - "fallback_fetch_complete"
+    - "target_unreachable"
+  success_emits:
+    - "web_paths"
+    - "web_parameters"
+  next_playbooks:
+    - web.passive-zap.v1
+    - web.nuclei-selected.v1
   report_sections:
     - "web"
 
@@ -102,6 +151,13 @@
       operation: passive_scan
       inputs:
         scan_type: "passive"
+        tool_card:
+          title: "OWASP ZAP"
+          official_source_url: "https://www.zaproxy.org/docs/desktop/cmdline/"
+          source_date: "2026-07-30"
+          summary: "Official OWASP proxy used for bounded passive analysis."
+          version_args: ["-version"]
+          help_args: ["-help"]
   limits:
     max_rate: 20
     max_concurrency: 1
@@ -211,6 +267,13 @@
       inputs:
         scan_type: "active"
         max_attack_duration_seconds: 600
+        tool_card:
+          title: "OWASP ZAP"
+          official_source_url: "https://www.zaproxy.org/docs/desktop/cmdline/"
+          source_date: "2026-07-30"
+          summary: "Official OWASP proxy used for bounded active validation."
+          version_args: ["-version"]
+          help_args: ["-help"]
   limits:
     max_rate: 10
     max_concurrency: 1

@@ -90,9 +90,15 @@ version, source, and date. Successful execution promotes it to
 
 Local curated tools are preferred. Ariadne can select the official
 `kalilinux/kali-rolling` image when a specialist toolchain, isolation,
-VPN/routing, or compatibility makes it necessary, but container lifecycle is
-not yet connected to the current Hades execution path. Docker is therefore not
-started automatically today.
+VPN/routing, or compatibility makes it necessary. The Hades execution path
+starts the pinned custom Kali service lazily; it never installs Docker
+implicitly.
+
+For web discovery, Katana is the bounded crawler, ZAP is reserved for passive
+or active analysis, and `curl` is the minimal same-host fallback. Failure to
+start one specialist provider exhausts that playbook branch and allows the next
+eligible provider to run. If no fallback remains, Ariadne returns the original
+typed runtime boundary.
 
 No VM fallback is used. Acquiring or running uncurated code also remains a
 specific approval boundary.

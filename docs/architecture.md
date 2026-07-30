@@ -172,8 +172,15 @@ ephemeral.
 `ariadne-kali` is derived from the pinned, minimal official
 `kalilinux/kali-rolling` base. Its flat tool manifest installs only packages
 used by supported workflows; bulk Kali metapackages, GUI BloodHound/Wireshark,
-and GPU cracking packages are excluded. OWASP ZAP remains in its separate
-official image.
+and GPU cracking packages are excluded. The curated Kali image also contains
+the Kali `zaproxy` package and a checksum-verified, architecture-specific
+Katana release. This keeps all target-facing providers behind the same runtime
+selection and netguard boundary.
+
+Unavailable web providers are branch-local failures. The planner may continue
+from Katana or ZAP to another eligible provider; the final local fallback uses
+`curl` to fetch one already-observed URL and extracts only same-host links and
+forms. A real policy, scope, or runtime boundary remains globally blocking.
 
 Nuclei selection uses a local index of the official template repository pinned
 to one commit. The Kali image checks out that commit. Before every execution,
@@ -189,6 +196,8 @@ Each adapter follows the `ToolAdapter` protocol (see
 |---------------------|-------------------------------|
 | `nmap.py`           | Nmap scanner                  |
 | `httpx.py`          | httpx HTTP probing            |
+| `katana.py`         | Bounded, target-scoped crawler |
+| `curl.py`           | Same-host single-page fallback |
 | `zap.py`            | OWASP ZAP Automation Framework |
 | `nuclei.py`         | Pinned, evidence-selected Nuclei execution |
 | `research.py`       | SearchSploit/vendor/NVD/CISA/MSF research |

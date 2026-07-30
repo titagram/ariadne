@@ -202,9 +202,21 @@ class ExecutionContractRegistry:
                 allow_stdin=True,
             ),
             *bounded(
+                "curl",
+                ("fetch",),
+                frozenset({"curl"}),
+                "ariadne.adapters.curl.CurlAdapter",
+            ),
+            *bounded(
+                "katana",
+                ("crawl",),
+                frozenset({"katana"}),
+                "ariadne.adapters.katana.KatanaAdapter",
+            ),
+            *bounded(
                 "zap",
                 ("passive_scan", "active_scan", "spider"),
-                frozenset({"zap.sh"}),
+                frozenset({"zaproxy"}),
                 "ariadne.adapters.zap.ZapAdapter",
                 allow_stdin=True,
             ),
@@ -574,6 +586,11 @@ class GuardedRuntime:
             return 1, 1
         if self._contract.adapter == "httpx":
             return self._validate_httpx(spec)
+        if self._contract.adapter == "curl":
+            self._validate_curl(spec)
+            return 1, 1
+        if self._contract.adapter == "katana":
+            return self._validate_katana(spec)
         if self._contract.adapter == "nuclei":
             return self._validate_nuclei(spec), 1
         if self._contract.adapter == "metasploit":
@@ -619,6 +636,137 @@ class GuardedRuntime:
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         return threads, 1
 
+    def _validate_curl(self, spec: ProcessSpec) -> None:
+        target = self._envelope.exact_target.host
+        if (
+            len(spec.argv) != 14
+            or spec.argv[:5]
+            != (
+                "curl",
+                "--silent",
+                "--show-error",
+                "--proto",
+                "=http,https",
+            )
+            or spec.argv[5] != "--connect-timeout"
+            or spec.argv[7] != "--max-time"
+            or spec.argv[9] != "--max-filesize"
+            or spec.argv[11] != "--compressed"
+            or spec.argv[12] != "--url"
+            or spec.stdin is not None
+        ):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        parsed = urlsplit(spec.argv[13])
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname != target
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+        try:
+            connect_timeout = int(spec.argv[6])
+            timeout = int(spec.argv[8])
+            max_bytes = int(spec.argv[10])
+        except ValueError:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        if (
+            not 1 <= connect_timeout <= 10
+            or not 1 <= timeout <= 30
+            or connect_timeout > timeout
+            or not 1 <= max_bytes <= 2 * 1024 * 1024
+        ):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+
+    def _validate_katana(self, spec: ProcessSpec) -> tuple[int, int]:
+        argv = spec.argv
+        fixed_flags = {
+            "-jc",
+            "-fx",
+            "-xhr",
+            "-iqp",
+            "-jsonl",
+            "-omit-raw",
+            "-omit-body",
+            "-silent",
+            "-duc",
+        }
+        valued_flags = {
+            "-u",
+            "-d",
+            "-ct",
+            "-mdp",
+            "-c",
+            "-p",
+            "-rl",
+            "-timeout",
+            "-retry",
+            "-cs",
+            "-kf",
+        }
+        if not argv or argv[0] != "katana" or spec.stdin is not None:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        parsed: dict[str, str] = {}
+        switches: set[str] = set()
+        index = 1
+        while index < len(argv):
+            flag = argv[index]
+            if flag in fixed_flags:
+                switches.add(flag)
+                index += 1
+                continue
+            if flag not in valued_flags or index + 1 >= len(argv):
+                self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+            parsed[flag] = argv[index + 1]
+            index += 2
+        if set(parsed) != valued_flags or switches != fixed_flags:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+
+        target = self._envelope.exact_target.host
+        expected_scope = (
+            rf"^https?://{re.escape(target)}"
+            r"(?::[0-9]+)?(?:/|$)"
+        )
+        seeds = parsed["-u"].split(",")
+        if not 1 <= len(seeds) <= 10:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        for seed in seeds:
+            parsed_seed = urlsplit(seed)
+            if (
+                parsed_seed.scheme not in {"http", "https"}
+                or parsed_seed.hostname != target
+                or parsed_seed.username is not None
+                or parsed_seed.password is not None
+                or parsed_seed.fragment
+            ):
+                self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+        try:
+            depth = int(parsed["-d"])
+            duration = int(parsed["-ct"].removesuffix("s"))
+            max_pages = int(parsed["-mdp"])
+            concurrency = int(parsed["-c"])
+            parallelism = int(parsed["-p"])
+            rate = int(parsed["-rl"])
+            timeout = int(parsed["-timeout"])
+            retries = int(parsed["-retry"])
+        except ValueError:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        if (
+            not 1 <= depth <= 5
+            or not 5 <= duration <= 300
+            or not 1 <= max_pages <= 500
+            or not 1 <= concurrency <= 4
+            or parallelism != 1
+            or not 1 <= rate <= 20
+            or not 1 <= timeout <= 30
+            or retries != 1
+            or parsed["-cs"] != expected_scope
+            or parsed["-kf"] != "robotstxt,sitemapxml"
+        ):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        return rate, concurrency
+
     def _validate_nuclei(self, spec: ProcessSpec) -> int:
         argv = spec.argv
         target = self._envelope.exact_target.host
@@ -657,7 +805,10 @@ class GuardedRuntime:
         return rate
 
     def _validate_zap(self, spec: ProcessSpec) -> None:
-        if spec.argv != ("zap.sh", "-cmd", "-autorun", "-") or spec.stdin is None:
+        if (
+            spec.argv != ("zaproxy", "-cmd", "-autorun", "/dev/stdin")
+            or spec.stdin is None
+        ):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         try:
             automation = yaml.safe_load(spec.stdin)
@@ -670,8 +821,22 @@ class GuardedRuntime:
             jobs = automation["jobs"]
         except (KeyError, TypeError, yaml.YAMLError, IndexError):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
-        target_url = f"https://{self._envelope.exact_target.host}"
-        include_path = f"https://{re.escape(self._envelope.exact_target.host)}/.*"
+        urls = contexts[0].get("urls") if contexts and isinstance(contexts[0], dict) else None
+        if not isinstance(urls, list) or len(urls) != 1 or not isinstance(urls[0], str):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        target_url = urls[0]
+        parsed_target = urlsplit(target_url)
+        if (
+            parsed_target.scheme not in {"http", "https"}
+            or parsed_target.hostname != self._envelope.exact_target.host
+            or parsed_target.username is not None
+            or parsed_target.password is not None
+            or parsed_target.fragment
+            or parsed_target.path not in {"", "/"}
+            or parsed_target.query
+        ):
+            self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+        include_path = f"{re.escape(target_url.rstrip('/'))}/.*"
         expected_context = {
             "name": "ariadne",
             "urls": [target_url],

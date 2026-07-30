@@ -31,8 +31,10 @@ from ariadne.core.workflow import (
 # Adjudicated at planning time so unregistered adapters are rejected early.
 
 _REGISTERED_ADAPTERS: frozenset[str] = frozenset({
+    "curl",
     "nmap",
     "httpx",
+    "katana",
     "zap",
     "nuclei",
     "research",
