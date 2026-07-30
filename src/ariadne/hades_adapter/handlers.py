@@ -1221,7 +1221,24 @@ def _observed_unfetched_web_endpoint(
             or parsed.password is not None
             or parsed.fragment
             or path == "/"
-            or path.casefold().endswith((".js", ".json", ".map", ".xml"))
+            or path.casefold().endswith(
+                (
+                    ".js",
+                    ".json",
+                    ".map",
+                    ".xml",
+                    ".css",
+                    ".ico",
+                    ".png",
+                    ".jpg",
+                    ".jpeg",
+                    ".gif",
+                    ".svg",
+                    ".woff",
+                    ".woff2",
+                    ".ttf",
+                )
+            )
         ):
             continue
         if value not in candidates:
