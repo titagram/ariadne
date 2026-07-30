@@ -582,7 +582,7 @@ def _determine_engagement_state(
                 target=run_handle.snapshot.targets[0]
                 if run_handle.snapshot.targets
                 else TargetSpec(host="unknown"),
-                source="curl",
+                source="service_fingerprinted",
                 data={
                     "event_type": "evidence_collected",
                     "finding": "curl:technology-version",
