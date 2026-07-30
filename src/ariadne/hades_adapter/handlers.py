@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from pydantic import ValidationError
 
@@ -409,6 +410,7 @@ def _determine_engagement_state(
 
     # Collect evidence type strings from evidence_collected events
     evidence_types: set[str] = set()
+    completed_objectives: set[tuple[str, str]] = set()
     observations: list[Observation] = []
 
     for evt in events:
@@ -419,7 +421,12 @@ def _determine_engagement_state(
         # from an adapter cleanup result.  Do not infer either state from a
         # playbook's declarative ``success_emits`` metadata.
         if event_type == "objective_completed":
-            evidence_types.add("objective_proven")
+            kind = payload.get("objective_kind")
+            description = payload.get("description", "")
+            if isinstance(kind, str) and isinstance(description, str):
+                completed_objectives.add(
+                    (kind, description if kind == "custom" else "")
+                )
             continue
         if event_type == "cleanup_completed":
             evidence_types.add("cleanup_complete")
@@ -447,8 +454,6 @@ def _determine_engagement_state(
             if classification in (None, "success"):
                 # Reconstruct only evidence that is either a trusted imported
                 # record or the successful result of an executed action.
-                from uuid import uuid4
-
                 obs = Observation(
                     observation_id=uuid4(),
                     target=run_handle.snapshot.targets[0]
@@ -463,6 +468,35 @@ def _determine_engagement_state(
                     },
                 )
                 observations.append(obs)
+
+    required_objectives = {
+        (
+            objective.kind,
+            objective.description if objective.kind == "custom" else "",
+        )
+        for objective in run_handle.snapshot.objectives
+    }
+    if required_objectives and required_objectives.issubset(
+        completed_objectives
+    ):
+        evidence_types.add("objective_proven")
+        observations.append(
+            Observation(
+                observation_id=uuid4(),
+                target=(
+                    run_handle.snapshot.targets[0]
+                    if run_handle.snapshot.targets
+                    else TargetSpec(host="unknown")
+                ),
+                source="objective_proven",
+                data={
+                    "type": "objective_proven",
+                    "completed_objectives": sorted(
+                        kind for kind, _ in completed_objectives
+                    ),
+                },
+            )
+        )
 
     # Get already-executed playbook IDs from the store
     executed_playbooks: set[str] = set()
@@ -685,6 +719,7 @@ def _typed_progression_observations(
                 and bool(observation.data.get("identity"))
             ):
                 add("host_info_collected", observation)
+                add("linux_host_info", observation)
             elif (
                 observation.target == target
                 and operation == "sudo_rules"
@@ -1030,6 +1065,213 @@ def _observed_web_urls(
         if len(urls) == 10:
             break
     return tuple(reversed(urls))
+
+
+def _observed_object_reference_urls(
+    observations: tuple[Observation, ...],
+    target: TargetSpec,
+) -> tuple[str, ...]:
+    """Derive one bounded adjacent-ID set from already observed same-host URLs."""
+    for observation in reversed(observations):
+        if observation.target != target:
+            continue
+        value = observation.data.get("url")
+        if not isinstance(value, str):
+            continue
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.hostname.casefold() != target.host.casefold()
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            continue
+        match = re.search(r"(?P<prefix>/)(?P<identifier>\d+)(?P<suffix>/?$)", parsed.path)
+        if match is None:
+            continue
+        identifier = int(match.group("identifier"))
+        start = max(0, identifier - 3)
+        identifiers = range(start, min(identifier + 4, start + 8))
+        urls = []
+        for candidate in identifiers:
+            path = (
+                parsed.path[: match.start("identifier")]
+                + str(candidate)
+                + parsed.path[match.end("identifier") :]
+            )
+            urls.append(parsed._replace(path=path, query="").geturl())
+        return tuple(dict.fromkeys(urls))
+    return ()
+
+
+def _observed_unfetched_capture_url(
+    observations: tuple[Observation, ...],
+    target: TargetSpec,
+) -> str | None:
+    """Return the one observed capture endpoint that has not been fetched."""
+    for observation in reversed(observations):
+        if observation.target != target:
+            continue
+        value = observation.data.get("url")
+        if not isinstance(value, str) or observation.data.get("fetched") is True:
+            continue
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.hostname.casefold() != target.host.casefold()
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or parsed.query
+            or parsed.path.rstrip("/") != "/capture"
+        ):
+            continue
+        return parsed.geturl()
+    return None
+
+
+def _validated_object_reference_candidate(
+    observations: tuple[Observation, ...],
+    target: TargetSpec,
+) -> dict[str, object] | None:
+    candidates: list[dict[str, object]] = []
+    for observation in observations:
+        data = observation.data
+        url = data.get("url")
+        if (
+            observation.target != target
+            or observation.source != "web_object_reference"
+            or data.get("type") != "object_reference_candidate"
+            or data.get("download_candidate") is not True
+            or not isinstance(url, str)
+        ):
+            continue
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.hostname.casefold() != target.host.casefold()
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            continue
+        candidates.append(dict(data))
+    if not candidates:
+        return None
+
+    def rank(candidate: dict[str, object]) -> tuple[int, str]:
+        url = str(candidate["url"])
+        match = re.search(r"/(\d+)/?$", urlsplit(url).path)
+        return (
+            int(match.group(1)) if match is not None else 2**31,
+            url,
+        )
+
+    return min(candidates, key=rank)
+
+
+def _validated_downloaded_artifact(
+    observations: tuple[Observation, ...],
+    target: TargetSpec,
+    run_handle: RunHandle,
+) -> dict[str, str] | None:
+    artifact_root = (run_handle.path / "artifacts").resolve()
+    for observation in reversed(observations):
+        data = observation.data
+        artifact = data.get("artifact")
+        digest = data.get("sha256")
+        if (
+            observation.target != target
+            or observation.source != "web_artifact"
+            or data.get("type") != "downloaded_artifact"
+            or not isinstance(artifact, str)
+            or Path(artifact).name != artifact
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            continue
+        path = (artifact_root / artifact).resolve()
+        if not path.is_relative_to(artifact_root) or not path.is_file():
+            continue
+        with path.open("rb") as stream:
+            actual = hashlib.file_digest(stream, "sha256").hexdigest()
+        if hmac.compare_digest(actual, digest):
+            return {"artifact": artifact, "sha256": digest}
+    return None
+
+
+def _protected_credential(
+    observations: tuple[Observation, ...],
+    target: TargetSpec,
+    run_handle: RunHandle,
+) -> dict[str, object] | None:
+    secret_root = (run_handle.path / "secrets").resolve()
+    for observation in reversed(observations):
+        data = observation.data
+        username = data.get("username")
+        credential_ref = data.get("credential_ref")
+        if (
+            observation.target != target
+            or observation.source != "credential_material"
+            or data.get("type") != "credential_material"
+            or not isinstance(username, str)
+            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}", username) is None
+            or not isinstance(credential_ref, str)
+        ):
+            continue
+        secret = (run_handle.path / credential_ref).resolve()
+        if (
+            not secret.is_relative_to(secret_root)
+            or not secret.is_file()
+            or secret.stat().st_mode & 0o077
+        ):
+            continue
+        return {
+            "username": username,
+            "credential_ref": credential_ref,
+        }
+    return None
+
+
+def _observed_ssh_port(
+    observations: tuple[Observation, ...],
+    target: TargetSpec,
+) -> int | None:
+    for observation in reversed(observations):
+        port = observation.data.get("port")
+        if (
+            observation.target == target
+            and str(observation.data.get("service", "")).casefold() == "ssh"
+            and isinstance(port, int)
+            and not isinstance(port, bool)
+            and 1 <= port <= 65535
+        ):
+            return port
+    return None
+
+
+def _observed_python_setuid_candidate(
+    observations: tuple[Observation, ...],
+    target: TargetSpec,
+) -> str | None:
+    pattern = re.compile(
+        r"(?m)^(?P<path>/(?:usr/(?:local/)?)?bin/python(?:3(?:\.\d+)?)?)"
+        r"\s*(?:=|\s)\s*[^\n]*\bcap_setuid\b"
+    )
+    for observation in reversed(observations):
+        if observation.target != target:
+            continue
+        capabilities = observation.data.get("capabilities")
+        if not isinstance(capabilities, str):
+            continue
+        match = pattern.search(capabilities)
+        if match is not None:
+            return match.group("path")
+    return None
 
 
 def _get_binding(cmd: AriadneCommand, session_id: str) -> dict[str, Any] | None:
@@ -1464,12 +1706,24 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         observations,
         first_target,
     )
+    object_reference_urls = _observed_object_reference_urls(
+        observations,
+        first_target,
+    )
+    pending_capture_url = _observed_unfetched_capture_url(
+        observations,
+        first_target,
+    )
     eligible = tuple(
         playbook
         for playbook in eligible
         if (
             playbook.id not in _PROVIDER_FALLBACK_PLAYBOOKS
             or provider_fallback_needed
+            or (
+                playbook.id == "web.http-fallback.v1"
+                and pending_capture_url is not None
+            )
         )
         and (
             playbook.id not in executed_playbooks
@@ -1477,6 +1731,18 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 playbook.id == "research.service-vulnerability.v1"
                 and unresearched_fingerprint is not None
             )
+            or (
+                playbook.id == "web.http-fallback.v1"
+                and pending_capture_url is not None
+            )
+        )
+        and (
+            playbook.id != "web.object-reference.v1"
+            or bool(object_reference_urls)
+        )
+        and (
+            playbook.id != "foothold.ssh-credentials.v1"
+            or _observed_ssh_port(observations, first_target) is not None
         )
     )
     if last_routing_playbook in catalog.playbooks:
@@ -1637,7 +1903,10 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         )
 
     if any(
-        action.adapter in {"katana", "curl", "zap"}
+        (
+            action.adapter in {"katana", "zap"}
+            or (action.adapter == "curl" and action.operation == "fetch")
+        )
         and not action.inputs.get("urls")
         and not action.inputs.get("url")
         for action in plan.actions
@@ -1663,14 +1932,227 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                                 **(
                                     {"urls": list(web_urls)}
                                     if action.adapter == "katana"
-                                    else {"url": web_urls[0]}
+                                    else {
+                                        "url": (
+                                            pending_capture_url
+                                            if (
+                                                action.adapter == "curl"
+                                                and pending_capture_url is not None
+                                            )
+                                            else web_urls[0]
+                                        )
+                                    }
                                 ),
                             },
                         }
                     )
-                    if action.adapter in {"katana", "curl", "zap"}
+                    if (
+                        action.adapter in {"katana", "zap"}
+                        or (action.adapter == "curl" and action.operation == "fetch")
+                    )
                     and not action.inputs.get("urls")
                     and not action.inputs.get("url")
+                    else action
+                    for action in plan.actions
+                ),
+            }
+        )
+
+    if any(
+        action.adapter == "curl"
+        and action.operation == "probe_references"
+        and not action.inputs.get("urls")
+        for action in plan.actions
+    ):
+        reference_urls = _observed_object_reference_urls(
+            observations,
+            plan.target,
+        )
+        if not reference_urls:
+            return {
+                "status": "blocked",
+                "boundary": "missing_evidence",
+                "message": (
+                    "Object-reference testing requires one observed same-host "
+                    "URL with a numeric path segment."
+                ),
+                "plan_id": "",
+            }
+        plan = plan.model_copy(
+            update={
+                "actions": tuple(
+                    action.model_copy(
+                        update={
+                            "inputs": {
+                                **action.inputs,
+                                "urls": list(reference_urls),
+                            },
+                        }
+                    )
+                    if action.adapter == "curl"
+                    and action.operation == "probe_references"
+                    and not action.inputs.get("urls")
+                    else action
+                    for action in plan.actions
+                ),
+            }
+        )
+
+    if any(
+        action.adapter == "curl"
+        and action.operation == "download"
+        and not action.inputs.get("url")
+        for action in plan.actions
+    ):
+        candidate = _validated_object_reference_candidate(
+            observations,
+            plan.target,
+        )
+        if candidate is None:
+            return {
+                "status": "blocked",
+                "boundary": "missing_validated_object_reference",
+                "message": (
+                    "Artifact download requires a successful, same-target "
+                    "object-reference probe."
+                ),
+                "plan_id": "",
+            }
+        plan = plan.model_copy(
+            update={
+                "actions": tuple(
+                    action.model_copy(
+                        update={
+                            "inputs": {
+                                **action.inputs,
+                                "url": candidate["url"],
+                                "expected_content_type": candidate.get(
+                                    "content_type",
+                                    "",
+                                ),
+                            },
+                        }
+                    )
+                    if action.adapter == "curl"
+                    and action.operation == "download"
+                    and not action.inputs.get("url")
+                    else action
+                    for action in plan.actions
+                ),
+            }
+        )
+
+    if any(
+        action.adapter == "pcap"
+        and action.operation == "extract_plaintext_credentials"
+        and not action.inputs.get("artifact")
+        for action in plan.actions
+    ):
+        artifact = _validated_downloaded_artifact(
+            observations,
+            plan.target,
+            run_handle,
+        )
+        if artifact is None:
+            return {
+                "status": "blocked",
+                "boundary": "missing_validated_artifact",
+                "message": (
+                    "Packet inspection requires an integrity-checked artifact "
+                    "downloaded from the current target."
+                ),
+                "plan_id": "",
+            }
+        plan = plan.model_copy(
+            update={
+                "actions": tuple(
+                    action.model_copy(
+                        update={"inputs": {**action.inputs, **artifact}}
+                    )
+                    if action.adapter == "pcap"
+                    and action.operation == "extract_plaintext_credentials"
+                    and not action.inputs.get("artifact")
+                    else action
+                    for action in plan.actions
+                ),
+            }
+        )
+
+    if any(
+        action.adapter in {"ssh", "postex"}
+        and not action.inputs.get("credential_ref")
+        for action in plan.actions
+    ):
+        credential = _protected_credential(
+            observations,
+            plan.target,
+            run_handle,
+        )
+        port = _observed_ssh_port(observations, plan.target)
+        if credential is None or port is None:
+            return {
+                "status": "blocked",
+                "boundary": "missing_protected_ssh_credential",
+                "message": (
+                    "Authenticated SSH execution requires a protected "
+                    "credential reference and an observed SSH service."
+                ),
+                "plan_id": "",
+            }
+        plan = plan.model_copy(
+            update={
+                "actions": tuple(
+                    action.model_copy(
+                        update={
+                            "inputs": {
+                                **action.inputs,
+                                **credential,
+                                "port": port,
+                            },
+                        }
+                    )
+                    if action.adapter in {"ssh", "postex"}
+                    and not action.inputs.get("credential_ref")
+                    else action
+                    for action in plan.actions
+                ),
+            }
+        )
+
+    if any(
+        action.adapter == "postex"
+        and action.operation == "capability_python_proof"
+        and not action.inputs.get("interpreter")
+        for action in plan.actions
+    ):
+        interpreter = _observed_python_setuid_candidate(
+            observations,
+            plan.target,
+        )
+        if interpreter is None:
+            return {
+                "status": "blocked",
+                "boundary": "missing_validated_privesc_candidate",
+                "message": (
+                    "Python cap_setuid proof requires an interpreter path "
+                    "observed in successful file-capability evidence."
+                ),
+                "plan_id": "",
+            }
+        plan = plan.model_copy(
+            update={
+                "actions": tuple(
+                    action.model_copy(
+                        update={
+                            "inputs": {
+                                **action.inputs,
+                                "interpreter": interpreter,
+                            },
+                        }
+                    )
+                    if action.adapter == "postex"
+                    and action.operation == "capability_python_proof"
+                    and not action.inputs.get("interpreter")
                     else action
                     for action in plan.actions
                 ),
@@ -2545,6 +3027,25 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 )
             else:
                 evidence_results = await adapter.collect(process_result, evidence_collector)
+            observation_artifact_digests = {
+                str(observation.data["artifact"]): str(observation.data["sha256"])
+                for observation in observations
+                if isinstance(observation.data.get("artifact"), str)
+                and isinstance(observation.data.get("sha256"), str)
+            }
+            if action.adapter == "curl" and action.operation == "download":
+                for artifact_name in evidence_results or ():
+                    cmd.store.register_downloaded_artifact(
+                        run_handle,
+                        str(artifact_name),
+                        maximum_bytes=(
+                            record.plan.limits.max_output_bytes
+                            or process_spec.max_output_bytes
+                        ),
+                        expected_sha256=observation_artifact_digests.get(
+                            str(artifact_name)
+                        ),
+                    )
             transcript = process_result.stdout.encode("utf-8", errors="replace")
             if process_result.stderr:
                 transcript += b"\n--- stderr ---\n" + process_result.stderr.encode(

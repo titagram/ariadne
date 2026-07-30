@@ -37,12 +37,14 @@ _REGISTERED_ADAPTERS: frozenset[str] = frozenset({
     "katana",
     "zap",
     "nuclei",
+    "pcap",
     "research",
     "metasploit",
     "postex",
     "active_directory",
     "pivot",
     "screenshot",
+    "ssh",
 })
 
 _MANUAL_ONLY_CAPABILITIES: frozenset[str] = frozenset({
@@ -172,7 +174,15 @@ class Planner:
 
         # 4. Validate evidence requirements
         if playbook.required_evidence_types:
-            observed_types = {o.source for o in context.observations}
+            observed_types = {
+                value
+                for observation in context.observations
+                for value in (
+                    observation.source,
+                    str(observation.data.get("type", "")),
+                )
+                if value
+            }
             missing = playbook.required_evidence_types - observed_types
             if missing:
                 raise WorkflowConfigurationError(

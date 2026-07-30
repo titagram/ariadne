@@ -19,6 +19,20 @@ class MissingRuntime:
         raise FileNotFoundError("searchsploit")
 
 
+class NoIcmpReplyRuntime:
+    async def run(self, spec: object) -> ProcessResult:
+        del spec
+        return ProcessResult(
+            exit_code=1,
+            stdout=(
+                "PING 10.10.10.10 (10.10.10.10): 56 data bytes\n\n"
+                "--- 10.10.10.10 ping statistics ---\n"
+                "1 packets transmitted, 0 packets received, 100.0% packet loss\n"
+            ),
+            stderr="",
+        )
+
+
 def _context() -> AdapterContext:
     return AdapterContext(
         target=TargetSpec(host="10.10.10.10"),
@@ -110,3 +124,27 @@ def test_parsed_observation_uses_explicit_context_target() -> None:
 
     assert len(observations) == 1
     assert observations[0].target.host == "10.10.10.10"
+
+
+@pytest.mark.asyncio
+async def test_preflight_icmp_no_reply_defers_reachability_to_tcp_discovery() -> None:
+    adapter = ResearchAdapter()
+    result = await adapter.execute(
+        adapter.plan(
+            PlannedAction(
+                operation="investigate",
+                inputs={"product": "preflight"},
+            ),
+            _context(),
+        ),
+        NoIcmpReplyRuntime(),
+    )
+    observations = adapter.parse_for_target(
+        result,
+        TargetSpec(host="10.10.10.10"),
+    )
+
+    assert result.exit_code == 0
+    assert adapter.classify(result, observations).kind == "success"
+    assert observations[0].source == "preflight_passed"
+    assert observations[0].data["reachability"] == "icmp_inconclusive"

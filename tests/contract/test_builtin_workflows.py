@@ -23,7 +23,7 @@ from ariadne.core.workflow import WorkflowCatalog
 # in each src/ariadne/adapters/*.py file.
 
 REGISTERED_ADAPTERS: dict[str, frozenset[str]] = {
-    "curl": frozenset({"fetch"}),
+    "curl": frozenset({"fetch", "probe_references", "download"}),
     "nmap": frozenset({"tcp_discovery", "service_fingerprint", "udp_targeted"}),
     "httpx": frozenset({"scan"}),
     "katana": frozenset({"crawl"}),
@@ -32,10 +32,13 @@ REGISTERED_ADAPTERS: dict[str, frozenset[str]] = {
     "metasploit": frozenset({"search", "info", "check", "run_module"}),
     "research": frozenset({"investigate"}),
     "screenshot": frozenset({"capture"}),
+    "pcap": frozenset({"extract_plaintext_credentials"}),
+    "ssh": frozenset({"authenticate"}),
     "postex": frozenset({
         # Linux
         "identity", "sudo_rules", "suid_files", "file_capabilities",
         "scheduled_jobs", "services", "linpeas", "pspy_bounded",
+        "capability_python_proof",
         # Windows
         "token_privileges", "scheduled_tasks", "registry", "winpeas",
         "privesccheck", "seatbelt",

@@ -46,6 +46,7 @@ from ariadne.core.research import (
     ResearchSource,
     ServiceFingerprint,
 )
+from ariadne.runtime.process import ProcessStatus
 
 _CVE_RE = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)
 _MSF_MODULE_RE = re.compile(r"\b(?:exploit|auxiliary)/[a-z0-9_/-]+\b")
@@ -919,18 +920,26 @@ class ResearchAdapter:
                     fingerprint,
                     initial_spec=spec,
                 )
-                from ariadne.runtime.process import ProcessStatus
-
                 return ProcessResult(
                     exit_code=0,
                     stdout=dossier.model_dump_json(),
                     stderr="\n".join(dossier.source_limitations),
                     status=ProcessStatus.COMPLETED,
                 )
-            return await runtime.run(spec)
+            result = await runtime.run(spec)
+            if (
+                spec.argv[0] == "ping"
+                and result.exit_code == 1
+                and result.status == ProcessStatus.COMPLETED
+                and "packet loss" in result.stdout.lower()
+            ):
+                # ICMP silence is not proof that an HTB/lab target is down.
+                # The following nmap -Pn discovery is the authoritative TCP
+                # reachability check; only failures to execute ping remain a
+                # hard preflight boundary.
+                return result.model_copy(update={"exit_code": 0})
+            return result
         except FileNotFoundError:
-            from ariadne.runtime.process import ProcessStatus
-
             return ProcessResult(
                 exit_code=127,
                 stdout="",
@@ -967,13 +976,23 @@ class ResearchAdapter:
             dossier: ResearchDossier | None = None
 
             if is_ping:
+                icmp_inconclusive = "100.0% packet loss" in stdout_preview.lower()
                 obs = Observation(
                     observation_id=uuid4(),
                     target=target,
                     source="preflight_passed",
                     data={
                         "type": "preflight_passed",
-                        "summary": "Target is reachable — environment ready",
+                        "summary": (
+                            "ICMP unanswered; defer reachability to TCP discovery"
+                            if icmp_inconclusive
+                            else "Target is reachable — environment ready"
+                        ),
+                        "reachability": (
+                            "icmp_inconclusive"
+                            if icmp_inconclusive
+                            else "icmp_reachable"
+                        ),
                         "stdout_preview": stdout_preview,
                     },
                 )

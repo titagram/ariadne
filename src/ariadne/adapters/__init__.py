@@ -86,10 +86,12 @@ def build_default_registry() -> AdapterRegistry:
     from ariadne.adapters.metasploit import MetasploitAdapter
     from ariadne.adapters.nmap import NmapAdapter
     from ariadne.adapters.nuclei import NucleiAdapter
+    from ariadne.adapters.pcap import PcapAdapter
     from ariadne.adapters.pivot import PivotAdapter
     from ariadne.adapters.postex import PostExAdapter
     from ariadne.adapters.research import ResearchAdapter
     from ariadne.adapters.screenshot import ScreenshotAdapter
+    from ariadne.adapters.ssh import SshAdapter
     from ariadne.adapters.zap import ZapAdapter
 
     registry = AdapterRegistry()
@@ -100,10 +102,12 @@ def build_default_registry() -> AdapterRegistry:
     registry.register("katana", KatanaAdapter())
     registry.register("zap", ZapAdapter())
     registry.register("nuclei", NucleiAdapter())
+    registry.register("pcap", PcapAdapter())
     registry.register("metasploit", MetasploitAdapter())
     registry.register("postex", PostExAdapter())
     registry.register("pivot", PivotAdapter())
     registry.register("screenshot", ScreenshotAdapter())
+    registry.register("ssh", SshAdapter())
     registry.register("active_directory", ActiveDirectoryAdapter())
 
     registry.freeze()

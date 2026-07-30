@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -64,6 +65,7 @@ class ExecutionEnvelope(BaseModel):
     run_root: Path
     limits: PlaybookLimits
     policy_digests: tuple[str, ...]
+    action_inputs: dict[str, Any]
     normalized_ports: str | None = None
 
     @classmethod
@@ -92,6 +94,7 @@ class ExecutionEnvelope(BaseModel):
             run_root=run_root.resolve(),
             limits=plan.limits,
             policy_digests=policy_digests,
+            action_inputs=dict(action.inputs),
             normalized_ports=(
                 normalize_nmap_ports(action.operation, action.inputs)
                 if action.adapter == "nmap"
@@ -146,6 +149,7 @@ class ExecutionContractRegistry:
             implementation_id: str,
             *,
             allow_stdin: bool = False,
+            allowed_environment_keys: frozenset[str] = frozenset(),
         ) -> list[ExecutionContract]:
             return [
                 ExecutionContract(
@@ -154,6 +158,7 @@ class ExecutionContractRegistry:
                     executable_ids=executable_ids,
                     implementation_id=implementation_id,
                     allow_stdin=allow_stdin,
+                    allowed_environment_keys=allowed_environment_keys,
                     max_rate=1000,
                     max_concurrency=5,
                     max_attempts=3,
@@ -203,7 +208,7 @@ class ExecutionContractRegistry:
             ),
             *bounded(
                 "curl",
-                ("fetch",),
+                ("fetch", "probe_references", "download"),
                 frozenset({"curl"}),
                 "ariadne.adapters.curl.CurlAdapter",
             ),
@@ -233,6 +238,24 @@ class ExecutionContractRegistry:
                 "ariadne.adapters.metasploit.MetasploitAdapter",
             ),
             *bounded(
+                "pcap",
+                ("extract_plaintext_credentials",),
+                frozenset({"tshark"}),
+                "ariadne.adapters.pcap.PcapAdapter",
+            ),
+            *bounded(
+                "ssh",
+                ("authenticate",),
+                frozenset({"ssh"}),
+                "ariadne.adapters.ssh.SshAdapter",
+                allowed_environment_keys=frozenset({
+                    "ARIADNE_SECRET_FILE",
+                    "DISPLAY",
+                    "SSH_ASKPASS",
+                    "SSH_ASKPASS_REQUIRE",
+                }),
+            ),
+            *bounded(
                 "screenshot",
                 ("capture",),
                 frozenset({"chromium"}),
@@ -247,9 +270,16 @@ class ExecutionContractRegistry:
                     "scheduled_jobs",
                     "linpeas",
                     "pspy_bounded",
+                    "capability_python_proof",
                 ),
                 frozenset({"ssh"}),
                 "ariadne.adapters.postex.PostExAdapter",
+                allowed_environment_keys=frozenset({
+                    "ARIADNE_SECRET_FILE",
+                    "DISPLAY",
+                    "SSH_ASKPASS",
+                    "SSH_ASKPASS_REQUIRE",
+                }),
             ),
             # The immutable action inputs select an OS-specific executable
             # for these shared operations.  Runtime policy still requires the
@@ -259,6 +289,12 @@ class ExecutionContractRegistry:
                 ("identity", "services"),
                 frozenset({"ssh", "impacket-wmiexec"}),
                 "ariadne.adapters.postex.PostExAdapter",
+                allowed_environment_keys=frozenset({
+                    "ARIADNE_SECRET_FILE",
+                    "DISPLAY",
+                    "SSH_ASKPASS",
+                    "SSH_ASKPASS_REQUIRE",
+                }),
             ),
             *bounded(
                 "postex",
@@ -602,6 +638,12 @@ class GuardedRuntime:
         if self._contract.adapter == "screenshot":
             self._validate_screenshot(spec)
             return 1, 1
+        if self._contract.adapter == "pcap":
+            self._validate_pcap(spec)
+            return 1, 1
+        if self._contract.adapter == "ssh":
+            self._validate_ssh(spec)
+            return 1, 1
         if self._contract.adapter == "postex":
             self._validate_postex(spec)
             return 1, 1
@@ -637,7 +679,12 @@ class GuardedRuntime:
         return threads, 1
 
     def _validate_curl(self, spec: ProcessSpec) -> None:
-        target = self._envelope.exact_target.host
+        if self._contract.operation == "probe_references":
+            self._validate_curl_probe(spec)
+            return
+        if self._contract.operation == "download":
+            self._validate_curl_download(spec)
+            return
         if (
             len(spec.argv) != 14
             or spec.argv[:5]
@@ -656,28 +703,119 @@ class GuardedRuntime:
             or spec.stdin is not None
         ):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
-        parsed = urlsplit(spec.argv[13])
+        self._validate_curl_numbers(
+            spec.argv[6],
+            spec.argv[8],
+            spec.argv[10],
+            max_timeout=30,
+        )
+        if int(spec.argv[10]) > 2 * 1024 * 1024:
+            self._deny(AuthorizationReason.OUTPUT_LIMIT, spec)
+        self._validate_exact_target_url(spec.argv[13], spec)
+
+    def _validate_curl_probe(self, spec: ProcessSpec) -> None:
+        argv = spec.argv
+        fixed = (
+            "curl",
+            "--silent",
+            "--show-error",
+            "--proto",
+            "=http,https",
+            "--connect-timeout",
+        )
+        if (
+            argv[:6] != fixed
+            or len(argv) < 17
+            or argv[7] != "--max-time"
+            or argv[9:13]
+            != (
+                "--max-filesize",
+                str(2 * 1024 * 1024),
+                "--write-out",
+                "%{json}\\n",
+            )
+            or (len(argv) - 13) % 4 != 0
+            or argv[13::4] != ("--output",) * len(argv[13::4])
+            or argv[14::4] != ("/dev/null",) * len(argv[14::4])
+            or argv[15::4] != ("--url",) * len(argv[15::4])
+            or spec.stdin is not None
+        ):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        urls = argv[16::4]
+        if not 1 <= len(urls) <= 8:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        self._validate_curl_numbers(argv[6], argv[8], argv[10], max_timeout=30)
+        for url in urls:
+            self._validate_exact_target_url(url, spec)
+
+    def _validate_curl_download(self, spec: ProcessSpec) -> None:
+        argv = spec.argv
+        if (
+            len(argv) != 18
+            or argv[:7]
+            != (
+                "curl",
+                "--silent",
+                "--show-error",
+                "--fail",
+                "--proto",
+                "=http,https",
+                "--connect-timeout",
+            )
+            or argv[8] != "--max-time"
+            or argv[10] != "--max-filesize"
+            or argv[12] != "--output"
+            or argv[14:17] != ("--write-out", "%{json}\\n", "--url")
+            or spec.stdin is not None
+        ):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        output = Path(argv[13]).resolve()
+        allowed = (self._envelope.run_root / "artifacts").resolve()
+        if (
+            not output.is_relative_to(allowed)
+            or re.fullmatch(r"web_[0-9a-f]{20}\.download", output.name) is None
+        ):
+            self._deny(AuthorizationReason.CWD_DENIED, spec)
+        self._validate_curl_numbers(argv[7], argv[9], argv[11], max_timeout=60)
+        if (
+            self._envelope.limits.max_output_bytes is not None
+            and int(argv[11]) > self._envelope.limits.max_output_bytes
+        ):
+            self._deny(AuthorizationReason.OUTPUT_LIMIT, spec)
+        self._validate_exact_target_url(argv[17], spec)
+
+    def _validate_curl_numbers(
+        self,
+        connect: str,
+        timeout: str,
+        maximum: str,
+        *,
+        max_timeout: int,
+    ) -> None:
+        try:
+            connect_timeout = int(connect)
+            request_timeout = int(timeout)
+            max_bytes = int(maximum)
+        except ValueError:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, None)
+        if (
+            not 1 <= connect_timeout <= 10
+            or not 1 <= request_timeout <= max_timeout
+            or connect_timeout > request_timeout
+            or not 1 <= max_bytes <= 10 * 1024 * 1024
+        ):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, None)
+
+    def _validate_exact_target_url(self, value: str, spec: ProcessSpec) -> None:
+        parsed = urlsplit(value)
         if (
             parsed.scheme not in {"http", "https"}
-            or parsed.hostname != target
+            or parsed.hostname != self._envelope.exact_target.host
             or parsed.username is not None
             or parsed.password is not None
             or parsed.fragment
         ):
             self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
-        try:
-            connect_timeout = int(spec.argv[6])
-            timeout = int(spec.argv[8])
-            max_bytes = int(spec.argv[10])
-        except ValueError:
-            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
-        if (
-            not 1 <= connect_timeout <= 10
-            or not 1 <= timeout <= 30
-            or connect_timeout > timeout
-            or not 1 <= max_bytes <= 2 * 1024 * 1024
-        ):
-            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
 
     def _validate_katana(self, spec: ProcessSpec) -> tuple[int, int]:
         argv = spec.argv
@@ -963,6 +1101,143 @@ class GuardedRuntime:
         if budget < 1:
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
 
+    def _validate_pcap(self, spec: ProcessSpec) -> None:
+        from ariadne.adapters.pcap import _PCAP_FILTER
+
+        artifact_name = self._envelope.action_inputs.get("artifact")
+        expected_digest = self._envelope.action_inputs.get("sha256")
+        if (
+            not isinstance(artifact_name, str)
+            or Path(artifact_name).name != artifact_name
+            or not isinstance(expected_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None
+        ):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        expected_artifact = (
+            self._envelope.run_root / "artifacts" / artifact_name
+        ).resolve()
+        expected = (
+            "tshark",
+            "-r",
+            str(expected_artifact),
+            "-Y",
+            _PCAP_FILTER,
+            "-T",
+            "fields",
+            "-E",
+            "separator=\t",
+            "-E",
+            "quote=d",
+            "-E",
+            "occurrence=f",
+            "-e",
+            "ftp.request.command",
+            "-e",
+            "ftp.request.arg",
+            "-e",
+            "http.authorization",
+        )
+        if (
+            spec.argv != expected
+            or spec.stdin is not None
+            or not expected_artifact.is_file()
+            or hashlib.sha256(expected_artifact.read_bytes()).hexdigest()
+            != expected_digest
+        ):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+
+    def _validate_ssh(self, spec: ProcessSpec) -> None:
+        from ariadne.adapters.ssh import SSH_FOOTHOLD_COMMAND
+
+        self._validate_credential_ssh(spec, SSH_FOOTHOLD_COMMAND)
+
+    def _validate_credential_ssh(
+        self,
+        spec: ProcessSpec,
+        remote_command: str,
+    ) -> None:
+        argv = spec.argv
+        target = self._envelope.exact_target.host
+        if (
+            len(argv) != 16
+            or argv[:8]
+            != (
+                "ssh",
+                "-o",
+                "BatchMode=no",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+            )
+            or not argv[8].startswith("UserKnownHostsFile=")
+            or argv[9:12] != ("-o", "ConnectTimeout=10", "-p")
+            or argv[13] != "--"
+            or argv[15] != remote_command
+            or spec.stdin is not None
+        ):
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        try:
+            port = int(argv[12])
+        except ValueError:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        if not 1 <= port <= 65535:
+            self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        destination = argv[14]
+        username, separator, host = destination.rpartition("@")
+        action_inputs = self._envelope.action_inputs
+        expected_username = action_inputs.get("username")
+        expected_ref = action_inputs.get("credential_ref")
+        expected_port = action_inputs.get("port", 22)
+        if (
+            separator != "@"
+            or host != target
+            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}", username) is None
+            or username != expected_username
+            or port != expected_port
+            or not isinstance(expected_ref, str)
+            or not expected_ref
+        ):
+            self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+        run_root = self._envelope.run_root.resolve()
+        workspace = (run_root / "workspace").resolve()
+        secrets = (run_root / "secrets").resolve()
+        known_hosts = Path(
+            argv[8].removeprefix("UserKnownHostsFile=")
+        ).resolve()
+        helper = Path(str(spec.environment.get("SSH_ASKPASS", ""))).resolve()
+        secret = Path(
+            str(spec.environment.get("ARIADNE_SECRET_FILE", ""))
+        ).resolve()
+        expected_helper = (
+            Path(__file__).resolve().parents[1] / "runtime" / "ssh_askpass.py"
+        )
+        expected_secret = (run_root / expected_ref).resolve()
+        if (
+            set(spec.environment)
+            != {
+                "ARIADNE_SECRET_FILE",
+                "DISPLAY",
+                "SSH_ASKPASS",
+                "SSH_ASKPASS_REQUIRE",
+            }
+            or spec.environment.get("DISPLAY") != "ariadne:0"
+            or spec.environment.get("SSH_ASKPASS_REQUIRE") != "force"
+            or spec.cwd is None
+            or spec.cwd.resolve() != workspace
+            or known_hosts != workspace / "known_hosts"
+            or helper != workspace / "ariadne_ssh_askpass.py"
+            or not helper.is_file()
+            or helper.stat().st_mode & 0o077
+            or helper.read_bytes() != expected_helper.read_bytes()
+            or secret != expected_secret
+            or not expected_secret.is_relative_to(secrets)
+            or not secret.is_file()
+            or secret.stat().st_mode & 0o077
+        ):
+            self._deny(AuthorizationReason.ENVIRONMENT_DENIED, spec)
+
     def _validate_postex(self, spec: ProcessSpec) -> None:
         target = self._envelope.exact_target.host
         operation = self._contract.operation
@@ -986,6 +1261,35 @@ class GuardedRuntime:
             "pspy_bounded": ("timeout 60 /opt/tools/pspy64 2>/dev/null || echo 'pspy not found'"),
         }
         if spec.argv[0] == "ssh":
+            if spec.environment:
+                if operation == "capability_python_proof":
+                    from ariadne.adapters.postex import (
+                        python_capability_proof_command,
+                    )
+
+                    remote = spec.argv[-1]
+                    interpreter = remote.split(" ", 1)[0]
+                    if (
+                        interpreter
+                        != self._envelope.action_inputs.get("interpreter")
+                        or
+                        re.fullmatch(
+                            r"/(?:usr/(?:local/)?)?bin/python(?:3(?:\.\d+)?)?",
+                            interpreter,
+                        )
+                        is None
+                    ):
+                        self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+                    self._validate_credential_ssh(
+                        spec,
+                        python_capability_proof_command(interpreter),
+                    )
+                    return
+                expected = linux_commands.get(operation)
+                if expected is None:
+                    self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+                self._validate_credential_ssh(spec, expected)
+                return
             if spec.argv != ("ssh", target, linux_commands.get(operation, "")):
                 self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
             return

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 from datetime import UTC, datetime
@@ -14,8 +15,11 @@ from ariadne.adapters.httpx import HttpxAdapter
 from ariadne.adapters.katana import KatanaAdapter
 from ariadne.adapters.nmap import NmapAdapter
 from ariadne.adapters.nuclei import NucleiAdapter
+from ariadne.adapters.pcap import PcapAdapter
 from ariadne.adapters.pivot import PivotAdapter
+from ariadne.adapters.postex import PostExAdapter
 from ariadne.adapters.research import ResearchAdapter
+from ariadne.adapters.ssh import SshAdapter
 from ariadne.adapters.zap import ZapAdapter
 from ariadne.composition import ServiceContainer
 from ariadne.core.engagement import TargetSpec
@@ -179,6 +183,110 @@ class CrawlerFallbackRuntime(ProcessRunner):
                 stderr="",
             )
         raise AssertionError(f"Unexpected executable: {spec.argv[0]}")
+
+
+class SyntheticGuardedVerticalRuntime:
+    """Deterministic tool results behind the production GuardedRuntime."""
+
+    def __init__(self) -> None:
+        self.argv_calls: list[tuple[str, ...]] = []
+
+    async def run(self, spec) -> ProcessResult:
+        argv = tuple(spec.argv)
+        self.argv_calls.append(argv)
+        executable = argv[0]
+        if executable == "curl" and "--write-out" not in argv:
+            return ProcessResult(
+                exit_code=0,
+                stdout='<a href="/data/3">Download capture</a>',
+                stderr="",
+            )
+        if executable == "curl" and argv[argv.index("--output") + 1] == "/dev/null":
+            records = []
+            for url in argv[16::2]:
+                downloadable = url.endswith("/0")
+                records.append(
+                    json.dumps(
+                        {
+                            "url_effective": url,
+                            "response_code": 200 if downloadable else 404,
+                            "content_type": (
+                                "application/vnd.tcpdump.pcap"
+                                if downloadable
+                                else "text/html"
+                            ),
+                            "size_download": 68 if downloadable else 32,
+                        },
+                        sort_keys=True,
+                    )
+                )
+            return ProcessResult(
+                exit_code=0,
+                stdout="\n".join(records),
+                stderr="",
+            )
+        if executable == "curl":
+            output = Path(argv[argv.index("--output") + 1])
+            output.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\0" * 64)
+            url = argv[argv.index("--url") + 1]
+            return ProcessResult(
+                exit_code=0,
+                stdout=json.dumps(
+                    {
+                        "url_effective": url,
+                        "response_code": 200,
+                        "content_type": "application/vnd.tcpdump.pcap",
+                        "size_download": output.stat().st_size,
+                    }
+                ),
+                stderr="",
+            )
+        if executable == "tshark":
+            return ProcessResult(
+                exit_code=0,
+                stdout=(
+                    'USER\t"lab-user"\t\n'
+                    'PASS\t"synthetic-credential-never-in-evidence"\t\n'
+                ),
+                stderr="",
+            )
+        if executable == "ssh":
+            remote_command = argv[-1]
+            if "user_flag_sha256" in remote_command:
+                stdout = json.dumps(
+                    {
+                        "uid": 1000,
+                        "gid": 1000,
+                        "username": "lab-user",
+                        "user_flag_sha256": "1" * 64,
+                    }
+                )
+            elif remote_command == "id":
+                stdout = "uid=1000(lab-user) gid=1000(lab-user) groups=1000(lab-user)"
+            elif remote_command.startswith("getcap "):
+                stdout = "/usr/bin/python3.8 = cap_setuid+ep"
+            elif "root_flag_sha256" in remote_command:
+                stdout = json.dumps(
+                    {
+                        "euid": 0,
+                        "root_flag_sha256": "2" * 64,
+                    }
+                )
+            else:
+                raise AssertionError(f"Unexpected SSH command: {remote_command}")
+            return ProcessResult(exit_code=0, stdout=stdout, stderr="")
+        if executable == "nmap":
+            return ProcessResult(
+                exit_code=0,
+                stdout=(
+                    '<?xml version="1.0"?><nmaprun><host>'
+                    '<address addr="192.0.2.10" addrtype="ipv4"/>'
+                    '<ports><port protocol="tcp" portid="22">'
+                    '<state state="open"/></port></ports></host></nmaprun>'
+                ),
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected executable: {executable}")
 
 
 class AcceptContract:
@@ -377,6 +485,287 @@ async def test_public_dry_run_reaches_both_offline_reports(tmp_path) -> None:
     assert result["walkthrough_path"].endswith("walkthrough.md")
     assert result["professional_path"].endswith("professional.html")
     assert (tmp_path / "canonical-knowledge" / "tools" / "ping.md").is_file()
+
+
+def test_evidence_driven_foothold_replay_uses_guarded_runtime_end_to_end(
+    tmp_path: Path,
+) -> None:
+    def playbook(
+        *,
+        identifier: str,
+        stage: str,
+        evidence: str,
+        capability: str,
+        adapter: str,
+        operation: str,
+        inputs: dict[str, object],
+        next_playbooks: tuple[str, ...],
+        success_emits: tuple[str, ...] = (),
+        max_output: int = 10_000_000,
+        max_duration: int = 180,
+    ) -> Playbook:
+        return Playbook(
+            id=identifier,
+            version=1,
+            stage=stage,
+            triggers=(
+                Trigger(kind="observation_type", types=(evidence,)),
+            ),
+            required_evidence_types=frozenset({evidence}),
+            capabilities=frozenset({capability}),
+            actions=(
+                PlaybookAction(
+                    adapter=adapter,
+                    operation=operation,
+                    inputs=inputs,
+                ),
+            ),
+            limits=PlaybookLimits(
+                max_rate=5,
+                max_concurrency=1,
+                max_attempts=1,
+                max_duration_seconds=max_duration,
+                max_output_bytes=max_output,
+            ),
+            stop_conditions=("bounded_synthetic_replay",),
+            success_emits=success_emits,
+            next_playbooks=next_playbooks,
+            report_sections=("evidence",),
+        )
+
+    playbooks = (
+        playbook(
+            identifier="web.http-fallback.v1",
+            stage="enumeration",
+            evidence="web_paths",
+            capability="web.content_discovery",
+            adapter="curl",
+            operation="fetch",
+            inputs={"timeout": 20, "max_output": 1024 * 1024},
+            next_playbooks=("web.object-reference.v1",),
+        ),
+        playbook(
+            identifier="web.object-reference.v1",
+            stage="enumeration",
+            evidence="web_paths",
+            capability="web.object_reference",
+            adapter="curl",
+            operation="probe_references",
+            inputs={"timeout": 20},
+            next_playbooks=("web.artifact-download.v1",),
+        ),
+        playbook(
+            identifier="web.artifact-download.v1",
+            stage="enumeration",
+            evidence="web_object_reference",
+            capability="web.object_reference",
+            adapter="curl",
+            operation="download",
+            inputs={"timeout": 30, "max_output": 10_000_000},
+            next_playbooks=("artifact.pcap-inspection.v1",),
+        ),
+        playbook(
+            identifier="artifact.pcap-inspection.v1",
+            stage="enumeration",
+            evidence="web_artifact",
+            capability="artifact.packet_inspection",
+            adapter="pcap",
+            operation="extract_plaintext_credentials",
+            inputs={},
+            next_playbooks=("foothold.ssh-credentials.v1",),
+        ),
+        playbook(
+            identifier="foothold.ssh-credentials.v1",
+            stage="enumeration",
+            evidence="credential_material",
+            capability="foothold.ssh",
+            adapter="ssh",
+            operation="authenticate",
+            inputs={},
+            next_playbooks=("synthetic.linux.identity.v1",),
+            max_output=64 * 1024,
+            max_duration=60,
+        ),
+        playbook(
+            identifier="synthetic.linux.identity.v1",
+            stage="post_exploitation",
+            evidence="foothold_established",
+            capability="postex.linux.identity",
+            adapter="postex",
+            operation="identity",
+            inputs={},
+            next_playbooks=("linux.capabilities.v1",),
+        ),
+        playbook(
+            identifier="linux.capabilities.v1",
+            stage="privilege_escalation",
+            evidence="linux_host_info",
+            capability="privesc.linux.capabilities",
+            adapter="postex",
+            operation="file_capabilities",
+            inputs={},
+            next_playbooks=("linux.capability-python-proof.v1",),
+        ),
+        playbook(
+            identifier="linux.capability-python-proof.v1",
+            stage="privilege_escalation",
+            evidence="privilege_escalation",
+            capability="privesc.linux.capabilities",
+            adapter="postex",
+            operation="capability_python_proof",
+            inputs={},
+            next_playbooks=("cleanup.verify.v1",),
+            max_output=64 * 1024,
+            max_duration=60,
+        ),
+        playbook(
+            identifier="cleanup.verify.v1",
+            stage="cleanup",
+            evidence="objective_proven",
+            capability="cleanup.execute",
+            adapter="nmap",
+            operation="tcp_discovery",
+            inputs={"ports": "22"},
+            next_playbooks=(),
+            success_emits=("cleanup_complete",),
+            max_output=2 * 1024 * 1024,
+            max_duration=60,
+        ),
+    )
+    registry = AdapterRegistry()
+    registry.register("curl", CurlAdapter())
+    registry.register("pcap", PcapAdapter())
+    registry.register("ssh", SshAdapter())
+    registry.register("postex", PostExAdapter())
+    registry.register("nmap", NmapAdapter())
+    runtime = SyntheticGuardedVerticalRuntime()
+    registry.default_runtime = runtime
+    services = ServiceContainer(
+        profile_name="synthetic-guarded-vertical",
+        store=RunStore(base_path=tmp_path),
+        catalog=WorkflowCatalog(
+            playbooks={item.id: item for item in playbooks},
+        ),
+        adapter_registry=registry,
+        consent_gateway=AcceptContract(),
+    )
+    object.__setattr__(services, "tool_card_verifier", None)
+    prepare = _handler_for("ariadne_prepare_engagement", services)
+    run = _handler_for("ariadne_run", services)
+
+    async def replay() -> tuple[dict[str, object], object]:
+        created = json.loads(
+            await prepare(
+                {
+                    "profile": "private-lab",
+                    "target_host": "192.0.2.10",
+                    "objectives": ["user_flag", "root_flag"],
+                    "autonomy": "controlled",
+                    "intensity": "normal",
+                    "exclusions": ["dos"],
+                    "time_window_minutes": 30,
+                },
+                session_id="synthetic-guarded-vertical-session",
+            )
+        )
+        assert created["status"] == "active"
+        binding = services.command.get_session_binding(
+            "synthetic-guarded-vertical-session"
+        )
+        assert binding is not None and binding.engagement_id is not None
+        handle = services.store.open(binding.engagement_id)
+        assert handle is not None
+        seed = services.store.add_bytes(
+            handle,
+            b"synthetic prior web and service evidence",
+            ArtifactInput(
+                media_type="text/plain",
+                evidence_type="seed_observation",
+                source_name="synthetic:prior-evidence",
+                maximum_bytes=4096,
+            ),
+        )
+        for evidence_type, observation_data in (
+            (
+                "web_paths",
+                {
+                    "type": "web_paths",
+                    "url": "http://192.0.2.10/capture",
+                    "path": "/capture",
+                    "method": "GET",
+                },
+            ),
+            (
+                "service_fingerprinted",
+                {
+                    "type": "service_fingerprinted",
+                    "service": "ssh",
+                    "protocol": "tcp",
+                    "port": 22,
+                    "state": "open",
+                },
+            ),
+        ):
+            services.store.append_event(
+                handle,
+                Event(
+                    event_type="evidence_collected",
+                    payload={
+                        "artifact": seed.path.name,
+                        "asset": "192.0.2.10",
+                        "adapter": "synthetic_seed",
+                        "source": "synthetic:prior-evidence",
+                        "evidence_type": evidence_type,
+                        "execution_classification": "success",
+                        "sha256": seed.sha256,
+                        "observation_data": observation_data,
+                    },
+                    timestamp=datetime.now(UTC),
+                ),
+            )
+        result = json.loads(
+            await run(
+                {"max_steps": 10},
+                session_id="synthetic-guarded-vertical-session",
+            )
+        )
+        return result, handle
+
+    result, handle = asyncio.run(replay())
+    events = services.store.read_events(handle)
+    serialized_events = json.dumps(events, sort_keys=True)
+
+    assert result["status"] == "complete", result
+    assert [argv[0] for argv in runtime.argv_calls] == [
+        "curl",
+        "curl",
+        "curl",
+        "tshark",
+        "ssh",
+        "ssh",
+        "ssh",
+        "ssh",
+        "nmap",
+    ]
+    assert not any(
+        event["event_type"] == "process_authorization_blocked"
+        for event in events
+    )
+    assert {
+        event["payload"]["objective_kind"]
+        for event in events
+        if event["event_type"] == "objective_completed"
+    } == {"user_flag", "root_flag"}
+    credential = next(
+        event["payload"]["observation_data"]
+        for event in events
+        if event["event_type"] == "evidence_collected"
+        and event["payload"]["evidence_type"] == "credential_material"
+    )
+    assert credential["secret_persisted"] is True
+    assert credential["secret_storage"] == "protected_local_reference"
+    assert "synthetic-credential-never-in-evidence" not in serialized_events
+    assert (handle.path / credential["credential_ref"]).stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.asyncio

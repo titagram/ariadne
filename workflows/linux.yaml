@@ -173,11 +173,45 @@
     - "capability_abuse_vector"
     - "privesc_path_identified"
   next_playbooks:
+    - linux.capability-python-proof.v1
     - linux.scheduled-tasks.v1
     - objective.validation.v1
   report_sections:
     - "privilege_escalation"
     - "linux"
+
+# Evidence-driven Python cap_setuid validation. The adapter emits only an
+# objective hash and effective UID; flag content never reaches evidence.
+- id: linux.capability-python-proof.v1
+  version: 1
+  stage: privilege_escalation
+  triggers:
+    - kind: observation_type
+      types: ["privilege_escalation"]
+  required_evidence_types:
+    - "privilege_escalation"
+  capabilities:
+    - privesc.linux.capabilities
+  actions:
+    - adapter: postex
+      operation: capability_python_proof
+      inputs: {}
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 65536
+  stop_conditions:
+    - "root_objective_proven"
+    - "capability_candidate_not_applicable"
+  success_emits:
+    - "privesc_path_identified"
+  next_playbooks:
+    - objective.validation.v1
+  report_sections:
+    - "privilege_escalation"
+    - "objectives"
 
 # Scheduled tasks / cron jobs
 - id: linux.scheduled-tasks.v1

@@ -525,6 +525,43 @@ class RunStore:
         """Convenience: add an in-memory byte string as an artifact."""
         return self.add_artifact(handle, io.BytesIO(data), metadata)
 
+    def register_downloaded_artifact(
+        self,
+        handle: RunHandle,
+        artifact_name: str,
+        *,
+        maximum_bytes: int,
+        expected_sha256: str | None = None,
+    ) -> str:
+        """Integrity-track one verified guarded download written in-place."""
+        if Path(artifact_name).name != artifact_name:
+            raise ValueError("Artifact name must not contain path components")
+        artifact_root = (handle.path / "artifacts").resolve()
+        candidate = artifact_root / artifact_name
+        path = candidate.resolve()
+        if (
+            not path.is_relative_to(artifact_root)
+            or candidate.is_symlink()
+            or not path.is_file()
+        ):
+            raise ValueError("Artifact is outside the guarded run artifact directory")
+        size = path.stat().st_size
+        if size > maximum_bytes:
+            raise ValueError(
+                f"Artifact exceeds maximum_bytes ({maximum_bytes})"
+            )
+        with path.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        if expected_sha256 is not None and digest != expected_sha256:
+            raise ValueError("Artifact digest differs from parsed evidence")
+        set_strict_permissions(path, 0o600)
+        self._update_manifest(
+            handle.path,
+            f"artifacts/{artifact_name}",
+            digest,
+        )
+        return digest
+
     def has_snapshot(self, engagement_id: UUID) -> bool:
         """Check whether a run directory exists for *engagement_id*."""
         path = self._engagement_path(engagement_id)

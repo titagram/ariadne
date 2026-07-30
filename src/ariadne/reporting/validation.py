@@ -46,11 +46,12 @@ class ValidationResult(NamedTuple):
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+_BASE64_BLOB_RE = re.compile(r"[A-Za-z0-9+/]{40,}(?:[=]{0,2})")
 _SECRET_PATTERNS: list[re.Pattern] = [
     re.compile(r"(?i)(password|passwd|pwd)\s*[:=]\s*\S+"),
     re.compile(r"(?i)(api[_-]?key|apikey)\s*[:=]\s*\S+"),
     re.compile(r"(?i)(secret|token|auth)\s*[:=]\s*\S+"),
-    re.compile(r"[A-Za-z0-9+/]{40,}(?:[=]{0,2})"),  # base64-like blobs
+    _BASE64_BLOB_RE,
 ]
 
 
@@ -62,9 +63,11 @@ def _has_unredacted_secrets(content: bytes) -> list[str]:
     hits: list[str] = []
     text = content.decode("utf-8", errors="replace")
     for pat in _SECRET_PATTERNS:
-        m = pat.search(text)
-        if m:
+        for match in pat.finditer(text):
+            if pat is _BASE64_BLOB_RE and _SHA256_RE.fullmatch(match.group(0)):
+                continue
             hits.append(f"matched pattern: {pat.pattern!r}")
+            break
     return hits
 
 

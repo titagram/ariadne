@@ -14,7 +14,12 @@ import pytest
 
 from ariadne.reporting.models import RenderedReport
 from ariadne.reporting.professional import ProfessionalRenderer
-from ariadne.reporting.validation import ReportOptions, ReportValidator, ValidationResult
+from ariadne.reporting.validation import (
+    ReportOptions,
+    ReportValidator,
+    ValidationResult,
+    _has_unredacted_secrets,
+)
 from ariadne.reporting.walkthrough import WalkthroughRenderer
 from ariadne.store.run_store import RunHandle
 
@@ -109,6 +114,13 @@ def test_validation_result_is_dataclass(default_options: ReportOptions) -> None:
     assert passed.valid
     assert not failed.valid
     assert len(failed.errors) == 1
+
+
+def test_secret_scan_distinguishes_sha256_proofs_from_base64_secrets() -> None:
+    assert _has_unredacted_secrets(
+        json.dumps({"root_flag_sha256": "a" * 64}).encode()
+    ) == []
+    assert _has_unredacted_secrets(("Q" * 48 + "==").encode())
 
 
 def test_every_objective_in_a_multi_objective_contract_needs_its_own_proof(

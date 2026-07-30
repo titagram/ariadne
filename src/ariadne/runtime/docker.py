@@ -291,8 +291,10 @@ class OnDemandKaliRuntime:
             "/workspace",
         ]
         for key, value in sorted(spec.environment.items()):
-            command.extend(["-e", f"{key}={value}"])
-        command.extend(["kali", *spec.argv])
+            command.extend(["-e", f"{key}={self._container_value(value)}"])
+        command.extend(
+            ["kali", *(self._container_value(value) for value in spec.argv)]
+        )
         return await self._command_runtime.run(
             ProcessSpec(
                 argv=tuple(command),
@@ -303,6 +305,31 @@ class OnDemandKaliRuntime:
                 stdin=spec.stdin,
             )
         )
+
+    def _container_value(self, value: str) -> str:
+        """Translate only paths inside this immutable engagement run."""
+        mappings = (
+            (self._run_root / "artifacts", Path("/evidence")),
+            (self._run_root / "workspace", Path("/workspace")),
+            (self._run_root, Path("/engagement")),
+        )
+        prefix = ""
+        candidate_value = value
+        if "=" in value:
+            possible_prefix, possible_path = value.split("=", 1)
+            if possible_path.startswith("/"):
+                prefix = f"{possible_prefix}="
+                candidate_value = possible_path
+        if not candidate_value.startswith("/"):
+            return value
+        candidate = Path(candidate_value).resolve()
+        for host_root, container_root in mappings:
+            try:
+                relative = candidate.relative_to(host_root.resolve())
+            except ValueError:
+                continue
+            return prefix + str(container_root / relative)
+        return value
 
     async def inspect_tool(
         self,

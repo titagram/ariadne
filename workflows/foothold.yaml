@@ -1,0 +1,145 @@
+# Evidence-driven web artifact and credential foothold vertical.
+
+- id: web.object-reference.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["web_paths"]
+  required_evidence_types:
+    - "web_paths"
+  capabilities:
+    - web.object_reference
+  actions:
+    - adapter: curl
+      operation: probe_references
+      inputs:
+        timeout: 20
+        tool_card:
+          title: "curl"
+          official_source_url: "https://curl.se/docs/manpage.html"
+          source_date: "2026-07-30"
+          summary: "Official curl client used for bounded same-target object-reference comparison."
+  limits:
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 180
+    max_output_bytes: 1048576
+  stop_conditions:
+    - "bounded_reference_set_tested"
+    - "no_numeric_reference_observed"
+  success_emits:
+    - "object_reference_candidate"
+  next_playbooks:
+    - web.artifact-download.v1
+    - web.passive-zap.v1
+    - web.nuclei-selected.v1
+  report_sections:
+    - "web"
+    - "validation"
+
+- id: web.artifact-download.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["object_reference_candidate"]
+  required_evidence_types:
+    - "web_object_reference"
+  capabilities:
+    - web.object_reference
+  actions:
+    - adapter: curl
+      operation: download
+      inputs:
+        timeout: 30
+        max_output: 10000000
+        tool_card:
+          title: "curl"
+          official_source_url: "https://curl.se/docs/manpage.html"
+          source_date: "2026-07-30"
+          summary: "Official curl client used to persist one validated target-bound artifact."
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 10000000
+  stop_conditions:
+    - "artifact_downloaded"
+    - "candidate_no_longer_available"
+  success_emits:
+    - "downloaded_artifact"
+  next_playbooks:
+    - artifact.pcap-inspection.v1
+  report_sections:
+    - "web"
+    - "evidence"
+
+- id: artifact.pcap-inspection.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["downloaded_artifact"]
+  required_evidence_types:
+    - "web_artifact"
+  capabilities:
+    - artifact.packet_inspection
+  actions:
+    - adapter: pcap
+      operation: extract_plaintext_credentials
+      inputs:
+        tool_card:
+          title: "Wireshark TShark"
+          official_source_url: "https://www.wireshark.org/docs/man-pages/tshark.html"
+          source_date: "2026-07-30"
+          summary: "Official packet analyzer used locally against one integrity-checked capture."
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 90
+    max_output_bytes: 2097152
+  stop_conditions:
+    - "capture_inspected"
+    - "no_supported_plaintext_authentication"
+  success_emits:
+    - "credential_material"
+  next_playbooks:
+    - foothold.ssh-credentials.v1
+  report_sections:
+    - "evidence"
+    - "initial_access"
+
+- id: foothold.ssh-credentials.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["credential_material"]
+  required_evidence_types:
+    - "credential_material"
+  capabilities:
+    - foothold.ssh
+  actions:
+    - adapter: ssh
+      operation: authenticate
+      inputs: {}
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 60
+    max_output_bytes: 65536
+  stop_conditions:
+    - "ssh_foothold_confirmed"
+    - "credential_rejected"
+  success_emits:
+    - "foothold_established"
+  next_playbooks:
+    - postex.host-enumeration.v1
+    - linux.host-enumeration.v1
+  report_sections:
+    - "initial_access"

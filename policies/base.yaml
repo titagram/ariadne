@@ -303,6 +303,33 @@ capabilities:
       - curl
       - httpx-toolkit
       - katana
+  web.object_reference:
+    allowed: true
+    max_rate: 5
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 10_000_000
+    allowed_tools:
+      - curl
+  artifact.packet_inspection:
+    allowed: true
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 300
+    max_output_bytes: 10_000_000
+    allowed_tools:
+      - tshark
+  foothold.ssh:
+    allowed: true
+    max_rate: 2
+    max_concurrency: 1
+    max_attempts: 3
+    max_duration_seconds: 300
+    max_output_bytes: 10_000_000
+    allowed_tools:
+      - ssh
   web.nuclei_scan:
     <<: *web_workflow
     allowed_tools:

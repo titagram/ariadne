@@ -203,8 +203,10 @@ def test_repository_examples_form_a_valid_canonical_chain() -> None:
         "methodology.lab.discovery",
         "service.http",
         "source.nmap.official",
+        "source.openssh.official",
         "technique.tcp.port-scan",
         "tool.nmap",
+        "tool.ssh",
     }
     assert index.node("technique.tcp.port-scan").next == ("tool.nmap",)
 

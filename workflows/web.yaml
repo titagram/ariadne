@@ -88,6 +88,7 @@
     - "web_paths"
     - "web_parameters"
   next_playbooks:
+    - web.object-reference.v1
     - web.passive-zap.v1
     - web.http-fallback.v1
     - web.nuclei-selected.v1
@@ -131,6 +132,7 @@
     - "web_paths"
     - "web_parameters"
   next_playbooks:
+    - web.object-reference.v1
     - web.passive-zap.v1
     - web.nuclei-selected.v1
   report_sections:
