@@ -1437,15 +1437,28 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
     # 5. Find eligible playbooks and build the first plan
     eligible = catalog.eligible(planning_context)
     provider_fallback_needed = False
+    last_routing_playbook: str | None = None
     for event in reversed(events):
         event_type = event.get("event_type")
         if event_type == "execution_boundary":
+            last_routing_playbook = event.get("payload", {}).get("playbook_id")
             provider_fallback_needed = (
                 event.get("payload", {}).get("boundary")
                 in _RECOVERABLE_PROVIDER_BOUNDARIES
             )
             break
         if event_type == "plan_executed":
+            payload = event.get("payload", {})
+            last_routing_playbook = payload.get("playbook_id")
+            failed_playbook = catalog.playbooks.get(last_routing_playbook or "")
+            provider_fallback_needed = (
+                payload.get("status") not in {"executed", "success"}
+                and failed_playbook is not None
+                and bool(
+                    set(failed_playbook.next_playbooks)
+                    & _PROVIDER_FALLBACK_PLAYBOOKS
+                )
+            )
             break
     unresearched_fingerprint = _latest_service_fingerprint(
         observations,
@@ -1466,17 +1479,8 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             )
         )
     )
-    last_completed_playbook = next(
-        (
-            event.get("payload", {}).get("playbook_id")
-            for event in reversed(events)
-            if event.get("event_type") == "plan_executed"
-            and event.get("payload", {}).get("status") in {"executed", "success"}
-        ),
-        None,
-    )
-    if last_completed_playbook in catalog.playbooks:
-        allowed_next = catalog.playbooks[last_completed_playbook].next_playbooks
+    if last_routing_playbook in catalog.playbooks:
+        allowed_next = catalog.playbooks[last_routing_playbook].next_playbooks
         preferred = tuple(
             playbook for playbook in eligible if playbook.id in allowed_next
         )
@@ -3078,6 +3082,7 @@ async def handle_run_engagement(
 ) -> dict[str, Any]:
     """Advance deterministically until completion or a true boundary."""
     cmd = _get_command(context)
+    catalog = _get_catalog(context)
     session_id = context.get("session_id", "")
     max_steps = args.get("max_steps", 30)
     if not isinstance(max_steps, int) or not 1 <= max_steps <= 100:
@@ -3167,6 +3172,24 @@ async def handle_run_engagement(
         last_provider_boundary = None
         if executed.get("status") != "executed":
             events = cmd.store.read_events(run_handle)
+            last_failed_playbook = next(
+                (
+                    event.get("payload", {}).get("playbook_id")
+                    for event in reversed(events)
+                    if event.get("event_type") == "plan_executed"
+                    and event.get("payload", {}).get("status")
+                    not in {"executed", "success"}
+                ),
+                None,
+            )
+            failed_playbook = catalog.playbooks.get(last_failed_playbook or "")
+            if (
+                failed_playbook is not None
+                and set(failed_playbook.next_playbooks)
+                & _PROVIDER_FALLBACK_PLAYBOOKS
+                and step < max_steps
+            ):
+                continue
             blocked_candidate_ids = {
                 event.get("payload", {}).get("candidate_id")
                 for event in events

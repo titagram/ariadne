@@ -11,6 +11,7 @@ import pytest
 from ariadne.adapters import AdapterRegistry
 from ariadne.adapters.curl import CurlAdapter
 from ariadne.adapters.httpx import HttpxAdapter
+from ariadne.adapters.katana import KatanaAdapter
 from ariadne.adapters.nmap import NmapAdapter
 from ariadne.adapters.nuclei import NucleiAdapter
 from ariadne.adapters.pivot import PivotAdapter
@@ -153,6 +154,28 @@ class ProviderFallbackRuntime(ProcessRunner):
             return ProcessResult(
                 exit_code=0,
                 stdout='<a href="/admin?view=summary">Admin</a>',
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected executable: {spec.argv[0]}")
+
+
+class CrawlerFallbackRuntime(ProcessRunner):
+    def __init__(self) -> None:
+        self.argv_calls: list[tuple[str, ...]] = []
+
+    async def run(self, spec) -> ProcessResult:
+        self.argv_calls.append(tuple(spec.argv))
+        if spec.argv[0] == "katana":
+            return ProcessResult(
+                exit_code=-1,
+                stdout="",
+                stderr="",
+                timed_out=True,
+            )
+        if spec.argv[0] == "curl":
+            return ProcessResult(
+                exit_code=0,
+                stdout='<a href="/capture">Capture</a>',
                 stderr="",
             )
         raise AssertionError(f"Unexpected executable: {spec.argv[0]}")
@@ -968,6 +991,105 @@ async def test_unavailable_web_provider_falls_back_without_ending_engagement(
         for event in events
     )
     assert runtime.argv_calls[0][0] == "curl"
+
+
+@pytest.mark.asyncio
+async def test_failed_crawler_uses_declared_http_fallback_in_same_run(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    primary = Playbook(
+        id="web.content-discovery.v1",
+        version=1,
+        stage="environment_preflight",
+        triggers=(Trigger(kind="engagement_state", types=("snapshot_locked",)),),
+        required_evidence_types=frozenset(),
+        capabilities=frozenset({"web.content_discovery"}),
+        actions=(
+            PlaybookAction(
+                adapter="katana",
+                operation="crawl",
+                inputs={
+                    "urls": ["http://192.0.2.10/"],
+                    "duration_seconds": 30,
+                },
+            ),
+        ),
+        limits=PlaybookLimits(max_attempts=1),
+        stop_conditions=("crawler_complete",),
+        success_emits=("web_paths",),
+        next_playbooks=("web.http-fallback.v1",),
+        report_sections=("web",),
+    )
+    fallback = Playbook(
+        id="web.http-fallback.v1",
+        version=1,
+        stage="environment_preflight",
+        triggers=(Trigger(kind="engagement_state", types=("snapshot_locked",)),),
+        required_evidence_types=frozenset(),
+        capabilities=frozenset({"web.content_discovery"}),
+        actions=(
+            PlaybookAction(
+                adapter="curl",
+                operation="fetch",
+                inputs={"url": "http://192.0.2.10/"},
+            ),
+        ),
+        limits=PlaybookLimits(max_attempts=1),
+        stop_conditions=("fallback_complete",),
+        success_emits=("web_paths",),
+        next_playbooks=(),
+        report_sections=("web",),
+    )
+    registry = AdapterRegistry()
+    registry.register("katana", KatanaAdapter())
+    registry.register("curl", CurlAdapter())
+    runtime = CrawlerFallbackRuntime()
+    registry.default_runtime = runtime
+    services = ServiceContainer(
+        profile_name="crawler-fallback",
+        store=RunStore(base_path=tmp_path),
+        catalog=WorkflowCatalog(
+            playbooks={
+                primary.id: primary,
+                fallback.id: fallback,
+            }
+        ),
+        adapter_registry=registry,
+        consent_gateway=AcceptContract(),
+    )
+    object.__setattr__(services, "tool_card_verifier", None)
+    monkeypatch.setattr(
+        "ariadne.hades_adapter.handlers.shutil.which",
+        lambda executable: f"/fixture/{executable}",
+    )
+    prepare = _handler_for("ariadne_prepare_engagement", services)
+    run = _handler_for("ariadne_run", services)
+    created = json.loads(
+        await prepare(
+            {
+                "profile": "private-lab",
+                "target_host": "192.0.2.10",
+                "objectives": ["proof"],
+                "autonomy": "controlled",
+                "intensity": "normal",
+                "exclusions": ["dos"],
+                "time_window_minutes": 30,
+            },
+            session_id="crawler-fallback-session",
+        )
+    )
+
+    result = json.loads(
+        await run(
+            {"max_steps": 2},
+            session_id="crawler-fallback-session",
+        )
+    )
+
+    assert created["status"] == "active"
+    assert result["boundary"] == "safety_step_limit", result
+    assert [call[0] for call in runtime.argv_calls] == ["katana", "curl"]
 
 
 @pytest.mark.asyncio
