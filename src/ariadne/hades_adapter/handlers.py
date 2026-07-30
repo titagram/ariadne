@@ -665,6 +665,12 @@ def _determine_engagement_state(
         if run_handle.snapshot.targets
         else TargetSpec(host="unknown")
     )
+    # A newly observed service/version must be researched before reusing
+    # candidates produced for an older fingerprint.  Otherwise the presence
+    # of historical candidates incorrectly advances the state to VALIDATION,
+    # making the hypothesis-stage research playbook ineligible.
+    if _latest_service_fingerprint(tuple(observations), target) is not None:
+        return EngagementState.HYPOTHESIS, tuple(observations)
     if _persisted_research_candidates(events, run_handle, target.host):
         return EngagementState.VALIDATION, tuple(observations)
     if "research_complete" in evidence_types:

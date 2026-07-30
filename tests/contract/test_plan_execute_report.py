@@ -15,6 +15,8 @@ Verifies that the handlers enforce all guard conditions:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -275,6 +277,78 @@ async def _bind_engagement(
         consent_gateway=FakeConsentGateway(ConsentDecision.ACCEPT),
     )
     return prepare_result["snapshot_hash"]
+
+
+@pytest.mark.asyncio
+async def test_new_service_fingerprint_precedes_historical_research_candidates(
+    command: AriadneCommand,
+    session_id: str,
+) -> None:
+    """A newly observed version reopens hypothesis-stage research."""
+    await _bind_engagement(command, session_id)
+    binding = command.get_session_binding(session_id)
+    assert binding is not None and binding.engagement_id is not None
+    handle = command.store.open(binding.engagement_id)
+    assert handle is not None
+    target = "10.10.10.10"
+    candidate = {
+        "candidate_id": "candidate-old", "cve_id": "CVE-2099-0001",
+        "product": "OpenSSH", "version": "9.6", "validation_status": "validated",
+        "compatible": True,
+        "sources": ["vendor", "nvd", "cisa-kev", "local-searchsploit", "metasploit"],
+        "source_urls": ["https://example.invalid/CVE-2099-0001"],
+        "evidence": [{"sha256": "b" * 64, "source": "vendor"}],
+        "applicability_evidence": ["version match"],
+    }
+    raw = json.dumps({"candidates": [candidate]}).encode()
+    artifact = command.store.add_bytes(
+        handle, data=raw,
+        metadata=ArtifactInput(
+            media_type="application/json",
+            evidence_type="research_complete",
+            source_name="research",
+            maximum_bytes=4096,
+        ),
+    )
+    digest = hashlib.sha256(raw).hexdigest()
+    now = datetime.now(UTC)
+    def append(data: dict, evidence_type: str, *, research: bool = False) -> None:
+        command.store.append_event(handle, Event(
+            event_type="evidence_collected",
+            payload={
+                "asset": target, "artifact": artifact.path.name if research else "fingerprint.txt",
+                "evidence_id": "research-old" if research else f"obs-{evidence_type}",
+                "sha256": digest if research else "a" * 64,
+                "adapter": "research" if research else "nmap",
+                "source": "research:investigate" if research else "scan",
+                "evidence_type": evidence_type, "execution_classification": "success",
+                "observation_data": data,
+            }, timestamp=now,
+        ))
+    append(
+        {
+            "type": "service_fingerprinted", "service": "ssh", "product": "OpenSSH",
+            "version": "9.6", "port": 22,
+        },
+        "service_fingerprinted",
+    )
+    append(
+        {
+            "candidates": [candidate],
+            "fingerprint": {"product": "OpenSSH", "version": "9.6", "port": 22},
+        },
+        "research_complete",
+        research=True,
+    )
+    append(
+        {
+            "type": "service_fingerprinted", "service": "http", "product": "Craft CMS",
+            "version": "5.6.16", "port": 80,
+        },
+        "service_fingerprinted",
+    )
+    state, _ = _determine_engagement_state(command.store, handle)
+    assert state.value == "hypothesis"
 
 
 @pytest.mark.parametrize(
