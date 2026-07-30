@@ -232,7 +232,10 @@ class RenderReportInput(BaseModel):
 
     style: str = Field(
         default="walkthrough",
-        description="Report style: 'walkthrough' (default) or 'professional'.",
+        description=(
+            "Report style: 'walkthrough' (default), 'professional', or "
+            "'sysreptor' for an offline pushproject export and preview."
+        ),
     )
     include_flags: bool | None = Field(
         default=None,
@@ -251,7 +254,8 @@ RENDER_REPORT_SCHEMA = _build_schema(
     RenderReportInput,
     "Render a walkthrough or professional report for the current engagement. "
     "Use 'walkthrough' for a step-by-step narrative or 'professional' for an "
-    "executive-format report.",
+    "executive-format report. Use 'sysreptor' for an offline pushproject JSON "
+    "and evidence bundle; this never performs a network push.",
 )
 
 

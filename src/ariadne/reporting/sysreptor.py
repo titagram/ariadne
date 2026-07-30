@@ -42,6 +42,24 @@ class SysReptorFinding(BaseModel):
     description: str
     evidence: list[str] = []
     remediation: str | None = None
+    affected_assets: list[str] = []
+    prerequisites: list[str] = []
+    procedure: list[str] = []
+    impact: str | None = None
+    cwe: str | None = None
+    cvss_vector: str | None = None
+    cvss_score: float | None = None
+
+
+class SysReptorEvidence(BaseModel):
+    """A real, hash-addressed dossier artifact available for attachment."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    filename: str
+    path: Path
+    sha256: str
+    size_bytes: int
 
 
 class SysReptorReport(BaseModel):
@@ -58,6 +76,11 @@ class SysReptorReport(BaseModel):
     findings: list[SysReptorFinding]
     profile: str
     snapshot_hash: str
+    generated_at: str | None = None
+    attack_steps: list[dict[str, Any]] = []
+    cleanup: list[str] = []
+    limitations: list[str] = []
+    evidence_assets: list[SysReptorEvidence] = []
 
     @classmethod
     def from_dossier(cls, dossier: ReportModel) -> SysReptorReport:
@@ -89,6 +112,13 @@ class SysReptorReport(BaseModel):
                     if finding.remediation
                     else None
                 ),
+                affected_assets=list(finding.affected_assets),
+                prerequisites=list(finding.prerequisites),
+                procedure=list(finding.procedure),
+                impact=finding.impact,
+                cwe=finding.cwe,
+                cvss_vector=finding.cvss_vector,
+                cvss_score=finding.cvss_score,
             )
             for index, finding in enumerate(dossier.findings, start=1)
         ]
@@ -102,6 +132,22 @@ class SysReptorReport(BaseModel):
             findings=findings,
             profile=dossier.profile,
             snapshot_hash=dossier.snapshot_hash,
+            generated_at=dossier.generated_at,
+            attack_steps=[
+                step.model_dump(mode="json")
+                for step in dossier.attack_steps
+            ],
+            cleanup=list(dossier.cleanup),
+            limitations=list(dossier.exclusions),
+            evidence_assets=[
+                SysReptorEvidence(
+                    filename=item.filename,
+                    path=item.path,
+                    sha256=item.sha256,
+                    size_bytes=item.size_bytes,
+                )
+                for item in dossier.evidence
+            ],
         )
 
 
@@ -135,6 +181,8 @@ class Bundle(BaseModel):
 
     manifest: BundleManifest
     path: Path
+    project_path: Path
+    evidence_dir: Path
 
 
 class Preview(BaseModel):
@@ -226,130 +274,259 @@ class SysReptorExporter:
         report: SysReptorReport,
         output_dir: str | Path | None = None,
     ) -> Bundle:
-        """Create a self-contained offline SysReptor ZIP bundle.
-
-        The bundle contains:
-          - ``manifest.json`` with version, finding count, asset list,
-            and SHA-256 checksums
-          - ``project.json`` with engagement metadata
-          - ``findings/<finding_id>.json`` for each finding
-          - ``evidence/`` with referenced evidence assets (empty placeholder
-            if the source files are not available locally)
-          - ``mapping.yaml`` — the field mapping template
-
-        Args:
-            report: The report model to bundle.
-            output_dir: Directory for the generated ZIP.  Defaults to CWD.
-
-        Returns:
-            A ``Bundle`` with the generated manifest and ZIP path.
-        """
+        """Create an official pushproject JSON plus a real-evidence bundle."""
         if output_dir is None:
             output_dir = Path.cwd()
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        zip_path = output_dir / f"sysreptor-bundle-{report.engagement_id[:8]}.zip"
+        suffix = report.engagement_id.replace("-", "")[:8]
+        zip_path = output_dir / f"sysreptor-bundle-{suffix}.zip"
+        project_path = output_dir / f"sysreptor-pushproject-{suffix}.json"
+        evidence_dir = output_dir / f"sysreptor-evidence-{suffix}"
+        evidence_dir.mkdir(mode=0o700, exist_ok=True)
 
-        # Collect relative asset paths (never absolute)
-        relative_assets: list[str] = []
-        seen_assets: set[str] = set()
-        for finding in report.findings:
-            for evidence_name in finding.evidence:
-                # Normalise to relative path under evidence/
-                clean_name = evidence_name.lstrip("/")
-                relative_path = f"evidence/{clean_name}"
-                if relative_path not in seen_assets:
-                    seen_assets.add(relative_path)
-                    relative_assets.append(relative_path)
-
-        # Build ZIP content blocks and checksums
-        checksums: dict[str, str] = {}
-
-        # 1. project.json
-        project_data = {
-            "engagement_id": report.engagement_id,
-            "profile": report.profile,
-            "snapshot_hash": report.snapshot_hash,
-            "targets": report.targets,
-            "objectives": report.objectives,
-            "finding_count": len(report.findings),
+        real_assets = self._load_real_assets(report)
+        attachment_by_name = {
+            asset.filename: asset
+            for asset, _ in real_assets.values()
         }
-        project_bytes = json.dumps(project_data, sort_keys=True, indent=2).encode("utf-8")
-        checksums["project.json"] = _sha256_bytes(project_bytes)
+        pushproject = self._pushproject_payload(report, attachment_by_name)
+        project_bytes = json.dumps(
+            pushproject,
+            sort_keys=True,
+            indent=2,
+            ensure_ascii=False,
+        ).encode("utf-8")
+        project_path.write_bytes(project_bytes)
+        project_path.chmod(0o600)
 
-        # 2. mapping.yaml
+        relative_assets: list[str] = []
+        checksums: dict[str, str] = {
+            "pushproject.json": _sha256_bytes(project_bytes),
+        }
+        for asset, content in real_assets.values():
+            relative_path = f"evidence/{asset.filename}"
+            relative_assets.append(relative_path)
+            checksums[relative_path] = asset.sha256
+            destination = evidence_dir / asset.filename
+            destination.write_bytes(content)
+            destination.chmod(0o600)
+
+        finding_entries: dict[str, bytes] = {}
+        for finding in pushproject["findings"]:
+            finding_id = str(finding["data"]["finding_id"])
+            entry = f"findings/{finding_id}.json"
+            content = json.dumps(
+                finding,
+                sort_keys=True,
+                indent=2,
+                ensure_ascii=False,
+            ).encode("utf-8")
+            finding_entries[entry] = content
+            checksums[entry] = _sha256_bytes(content)
+
         mapping_bytes = self._read_mapping()
         checksums["mapping.yaml"] = _sha256_bytes(mapping_bytes)
+        manifest = BundleManifest(
+            version="2.0-pushproject",
+            finding_count=len(report.findings),
+            assets=relative_assets,
+            sha256_checksums=checksums,
+        )
 
-        # 3. Findings
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("manifest.json", manifest.model_dump_json(indent=2))
+            archive.writestr("pushproject.json", project_bytes)
+            archive.writestr("project.json", project_bytes)
+            archive.writestr("mapping.yaml", mapping_bytes)
+            for entry, content in finding_entries.items():
+                archive.writestr(entry, content)
+            for asset, content in real_assets.values():
+                archive.writestr(f"evidence/{asset.filename}", content)
+        zip_path.chmod(0o600)
+
+        return Bundle(
+            manifest=manifest,
+            path=zip_path.resolve(),
+            project_path=project_path.resolve(),
+            evidence_dir=evidence_dir.resolve(),
+        )
+
+    @staticmethod
+    def _load_real_assets(
+        report: SysReptorReport,
+    ) -> dict[str, tuple[SysReptorEvidence, bytes]]:
+        """Load and verify real attachments, deduplicated by digest."""
+        assets: dict[str, tuple[SysReptorEvidence, bytes]] = {}
+        for asset in report.evidence_assets:
+            safe_name = Path(asset.filename).name
+            if safe_name != asset.filename or not safe_name:
+                raise ValueError(
+                    f"Unsafe SysReptor evidence filename: {asset.filename!r}"
+                )
+            try:
+                content = asset.path.read_bytes()
+            except (FileNotFoundError, PermissionError, OSError) as exc:
+                raise ValueError(
+                    f"SysReptor evidence is unavailable: {asset.filename!r}"
+                ) from exc
+            if (
+                _sha256_bytes(content) != asset.sha256
+                or len(content) != asset.size_bytes
+            ):
+                raise ValueError(
+                    f"SysReptor evidence integrity mismatch: {asset.filename!r}"
+                )
+            assets.setdefault(asset.sha256, (asset, content))
+        return assets
+
+    @staticmethod
+    def _pushproject_payload(
+        report: SysReptorReport,
+        attachments: dict[str, SysReptorEvidence],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Map Ariadne fields to the documented reptor pushproject envelope."""
+        narrative_lines: list[str] = []
+        for index, step in enumerate(report.attack_steps, start=1):
+            narrative_lines.extend((
+                f"### {index}. {step.get('phase', 'activity')}",
+                f"Action: {step.get('action')}",
+                f"Input: {step.get('input')}",
+            ))
+            prerequisites = step.get("prerequisites") or []
+            if prerequisites:
+                narrative_lines.append(
+                    f"Prerequisites: {'; '.join(prerequisites)}"
+                )
+            commands = step.get("commands") or []
+            if commands:
+                narrative_lines.append(
+                    "Commands / actions:\n"
+                    + "\n".join(
+                        f"```text\n{command}\n```" for command in commands
+                    )
+                )
+            narrative_lines.extend((
+                f"Result: {step.get('result')}",
+                "Evidence: "
+                + ", ".join(
+                    f"`{name}`" for name in (step.get("evidence") or [])
+                ),
+            ))
+
+        objective_lines: list[str] = []
+        for objective in report.objectives:
+            line = (
+                f"- {objective.get('kind', 'objective')}: "
+                f"{objective.get('description', '')}"
+            )
+            if objective.get("flag"):
+                line += f"\n  - Flag: `{objective['flag']}`"
+            elif objective.get("proof_sha256"):
+                line += (
+                    "\n  - Value unavailable from the persisted dossier; "
+                    f"proof SHA-256: `{objective['proof_sha256']}`"
+                )
+            objective_lines.append(line)
+
+        targets = [
+            str(target["host"])
+            for target in report.targets
+            if isinstance(target, dict) and target.get("host")
+        ]
+        section_data: dict[str, Any] = {
+            "title": f"Ariadne {report.profile.upper()} penetration test report",
+            "engagement_id": report.engagement_id,
+            "report_date": report.generated_at or "persisted engagement time",
+            "scope": targets,
+            "objectives": objective_lines,
+            "executive_summary": (
+                f"The evidence-backed engagement produced {len(report.findings)} "
+                "validated technical finding(s)."
+            ),
+            "attack_narrative": "\n\n".join(narrative_lines),
+            "limitations": report.limitations or [
+                "Only persisted evidence was used.",
+                "No screenshots were acquired during this run.",
+            ],
+            "cleanup": report.cleanup,
+            "objective_evidence": "\n".join(objective_lines),
+            "evidence_attachments": [
+                {
+                    "filename": asset.filename,
+                    "sha256": asset.sha256,
+                    "size_bytes": asset.size_bytes,
+                    "bundle_path": f"evidence/{asset.filename}",
+                }
+                for asset in attachments.values()
+            ],
+        }
+        section_data = {
+            key: value
+            for key, value in section_data.items()
+            if value not in (None, "", [], {})
+        }
+
+        findings: list[dict[str, Any]] = []
         for finding in report.findings:
-            finding_data = {
+            attached = [
+                attachments[name]
+                for name in finding.evidence
+                if name in attachments
+            ]
+            evidence_markdown = "\n".join(
+                (
+                    f"- `{name}`"
+                    + (
+                        f" (SHA-256 `{attachments[name].sha256}`)"
+                        if name in attachments
+                        else ""
+                    )
+                )
+                for name in finding.evidence
+            )
+            data: dict[str, Any] = {
                 "finding_id": finding.finding_id,
                 "title": finding.title,
-                "severity": finding.severity,
-                "status": finding.status,
+                "cvss": finding.cvss_vector,
+                "cvss_score": finding.cvss_score,
+                "summary": finding.description,
                 "description": finding.description,
-                "evidence": finding.evidence,
-                "remediation": finding.remediation,
+                "affected_components": finding.affected_assets,
+                "prerequisites": finding.prerequisites,
+                "steps_to_reproduce": finding.procedure,
+                "impact": finding.impact,
+                "cwe": finding.cwe,
+                "evidence": evidence_markdown,
+                "evidence_attachments": [
+                    {
+                        "filename": asset.filename,
+                        "sha256": asset.sha256,
+                        "size_bytes": asset.size_bytes,
+                        "bundle_path": f"evidence/{asset.filename}",
+                    }
+                    for asset in attached
+                ],
+                "recommendation": finding.remediation,
             }
-            finding_bytes = json.dumps(finding_data, sort_keys=True, indent=2).encode(
-                "utf-8"
-            )
-            finding_entry = f"findings/{finding.finding_id}.json"
-            checksums[finding_entry] = _sha256_bytes(finding_bytes)
+            findings.append({
+                "status": (
+                    "finished"
+                    if finding.status == "validated"
+                    else "in-progress"
+                ),
+                "data": {
+                    key: value
+                    for key, value in data.items()
+                    if value not in (None, "", [], {})
+                },
+            })
 
-        # 4. Evidence (placeholder bytes — no real local files assumed available)
-        for asset_rel_path in relative_assets:
-            checksums[asset_rel_path] = _sha256_bytes(b"")
-            # Evidence files will be populated at push time by the caller
-
-        # 5. manifest.json
-        manifest = BundleManifest(
-            version="1.0",
-            finding_count=len(report.findings),
-            assets=relative_assets,
-            sha256_checksums=checksums,
-        )
-        manifest_bytes = json.dumps(
-            manifest.model_dump(mode="json"), sort_keys=True, indent=2
-        ).encode("utf-8")
-        checksums["manifest.json"] = _sha256_bytes(manifest_bytes)
-
-        # Update manifest with the final checksum of itself
-        manifest = BundleManifest(
-            version="1.0",
-            finding_count=len(report.findings),
-            assets=relative_assets,
-            sha256_checksums=checksums,
-        )
-
-        # Write the ZIP
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("manifest.json", manifest.model_dump_json(indent=2))
-            zf.writestr("project.json", json.dumps(project_data, sort_keys=True, indent=2))
-            zf.writestr("mapping.yaml", mapping_bytes.decode("utf-8"))
-
-            for finding in report.findings:
-                finding_entry = f"findings/{finding.finding_id}.json"
-                finding_data = {
-                    "finding_id": finding.finding_id,
-                    "title": finding.title,
-                    "severity": finding.severity,
-                    "status": finding.status,
-                    "description": finding.description,
-                    "evidence": finding.evidence,
-                    "remediation": finding.remediation,
-                }
-                zf.writestr(
-                    finding_entry,
-                    json.dumps(finding_data, sort_keys=True, indent=2),
-                )
-
-            for asset_rel_path in relative_assets:
-                zf.writestr(asset_rel_path, "")
-
-        return Bundle(manifest=manifest, path=zip_path.resolve())
+        return {
+            "sections": [{"status": "finished", "data": section_data}],
+            "findings": findings,
+        }
 
     # ── Preview mode ───────────────────────────────────────────────────────────
 

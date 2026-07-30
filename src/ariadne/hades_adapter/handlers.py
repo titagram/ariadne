@@ -71,6 +71,7 @@ from ariadne.knowledge.runtime import GuidanceSource
 from ariadne.reporting.dossier import DossierBuilder
 from ariadne.reporting.models import RenderedReport
 from ariadne.reporting.professional import ProfessionalRenderer
+from ariadne.reporting.sysreptor import SysReptorExporter, SysReptorReport
 from ariadne.reporting.validation import ReportOptions, ReportValidator
 from ariadne.reporting.walkthrough import WalkthroughRenderer
 from ariadne.runtime.docker import (
@@ -3626,10 +3627,13 @@ async def handle_render_report(args: dict[str, Any], **context: Any) -> dict[str
         }
 
     # 2. Validate style
-    if style not in ("walkthrough", "professional"):
+    if style not in ("walkthrough", "professional", "sysreptor"):
         return {
             "status": "error",
-            "message": f"Unknown report style: {style!r}. Use 'walkthrough' or 'professional'.",
+            "message": (
+                f"Unknown report style: {style!r}. Use 'walkthrough', "
+                "'professional', or 'sysreptor'."
+            ),
             "path": "",
         }
 
@@ -3673,6 +3677,27 @@ async def handle_render_report(args: dict[str, Any], **context: Any) -> dict[str
 
     # 5. Render the report
     try:
+        if style == "sysreptor":
+            dossier = DossierBuilder().build(run_handle, options)
+            report = SysReptorReport.from_dossier(dossier)
+            exporter = SysReptorExporter()
+            bundle = exporter.offline(report, output_dir=run_handle.path)
+            preview = exporter.preview(bundle)
+            return {
+                "status": "report_rendered",
+                "style": style,
+                "path": str(bundle.project_path),
+                "bundle_path": str(bundle.path),
+                "evidence_dir": str(bundle.evidence_dir),
+                "preview": preview.model_dump(mode="json"),
+                "include_flags": include_flags,
+                "include_secrets": options.include_secrets,
+                "message": (
+                    "Offline SysReptor pushproject JSON and evidence bundle "
+                    f"written to {bundle.project_path.name}"
+                ),
+            }
+
         rendered: RenderedReport
         if style == "walkthrough":
             renderer = WalkthroughRenderer()

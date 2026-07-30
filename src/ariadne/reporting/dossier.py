@@ -123,6 +123,8 @@ class DossierBuilder:
             authorization_attested=run.snapshot.authorization_attested,
             profile=run.snapshot.profile.value,
             autonomy=run.snapshot.autonomy.value,
+            intensity=run.snapshot.intensity,
+            exclusions=run.snapshot.exclusions,
             targets=tuple(ReportTarget(host=target.host) for target in run.snapshot.targets),
             objectives=self._build_objectives(run, events, resolved_options),
             evidence=evidence,

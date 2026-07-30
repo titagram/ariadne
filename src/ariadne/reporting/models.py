@@ -107,6 +107,8 @@ class ReportModel(BaseModel):
     authorization_attested: bool
     profile: str
     autonomy: str
+    intensity: str
+    exclusions: tuple[str, ...] = ()
     targets: tuple[ReportTarget, ...]
     objectives: tuple[ReportObjective, ...]
     evidence: tuple[ReportEvidence, ...] = ()

@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
+from zipfile import ZipFile
 
 from ariadne.core.engagement import (
     EngagementConstraints,
@@ -14,6 +15,7 @@ from ariadne.core.engagement import (
 from ariadne.core.enums import AutonomyMode, EnvironmentProfile
 from ariadne.reporting.dossier import DossierBuilder
 from ariadne.reporting.professional import ProfessionalRenderer
+from ariadne.reporting.sysreptor import SysReptorExporter, SysReptorReport
 from ariadne.reporting.validation import ReportOptions, ReportValidator
 from ariadne.reporting.walkthrough import WalkthroughRenderer
 from ariadne.store.run_store import ArtifactInput, Event, RunHandle, RunStore
@@ -161,3 +163,51 @@ def test_semantic_reports_are_reproducible_and_professional_gate_is_fail_closed(
     assert any("zero validated findings" in error for error in shallow_result.errors)
     assert any("zero attack steps" in error for error in shallow_result.errors)
     assert any("zero remediation" in error for error in shallow_result.errors)
+
+
+def test_sysreptor_pushproject_export_has_sections_findings_and_real_evidence(
+    tmp_path: Path,
+) -> None:
+    run = _semantic_run(tmp_path / "run")
+    options = ReportOptions(include_flags=False, include_secrets=False)
+    dossier = DossierBuilder().build(run, options)
+
+    report = SysReptorReport.from_dossier(dossier)
+    bundle = SysReptorExporter().offline(report, tmp_path / "export")
+    project = json.loads(bundle.project_path.read_text(encoding="utf-8"))
+
+    assert set(project) == {"sections", "findings"}
+    assert len(project["sections"]) == 1
+    assert project["sections"][0]["status"] == "finished"
+    assert len(project["findings"]) == 3
+    required = {
+        "finding_id",
+        "title",
+        "cvss",
+        "summary",
+        "affected_components",
+        "prerequisites",
+        "steps_to_reproduce",
+        "impact",
+        "cwe",
+        "evidence",
+        "evidence_attachments",
+        "recommendation",
+    }
+    assert all(
+        finding["status"] == "finished"
+        and required <= set(finding["data"])
+        for finding in project["findings"]
+    )
+    attachment_metadata = project["sections"][0]["data"]["evidence_attachments"]
+    assert len(attachment_metadata) == len(dossier.evidence)
+    assert len({item["sha256"] for item in attachment_metadata}) == len(
+        attachment_metadata,
+    )
+    with ZipFile(bundle.path) as archive:
+        evidence_entries = [
+            name for name in archive.namelist() if name.startswith("evidence/")
+        ]
+        assert evidence_entries
+        assert all(archive.read(name) for name in evidence_entries)
+        assert json.loads(archive.read("pushproject.json")) == project
