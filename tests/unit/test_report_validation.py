@@ -12,6 +12,7 @@ import json
 
 import pytest
 
+from ariadne.reporting.dossier import DossierBuilder
 from ariadne.reporting.models import RenderedReport
 from ariadne.reporting.professional import ProfessionalRenderer
 from ariadne.reporting.validation import (
@@ -104,6 +105,61 @@ def test_walkthrough_report_renders_without_error(
     assert len(rendered.text) > 0, "Walkthrough report is empty"
 
 
+def test_dossier_keeps_sha256_objective_proof_and_execution_boundary(
+    valid_run: RunHandle,
+    default_options: ReportOptions,
+) -> None:
+    events_path = valid_run.path / "events.jsonl"
+    events = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    events[2]["payload"]["proof"] = "a" * 64
+    events.append(
+        {
+            "event_type": "execution_boundary",
+            "payload": {
+                "target": "10.0.0.1",
+                "boundary": "kali_runtime",
+                "reason": "Bounded version/help inspection failed for zaproxy.",
+            },
+        }
+    )
+    events_path.write_text(
+        "\n".join(json.dumps(event, sort_keys=True) for event in events) + "\n",
+        encoding="utf-8",
+    )
+
+    dossier = DossierBuilder().build(valid_run, default_options)
+
+    assert dossier.objectives[0].completion_evidence == "a" * 64
+    assert dossier.lifecycle[-1].event_type == "execution_boundary"
+    assert dossier.lifecycle[-1].summary == (
+        "Bounded version/help inspection failed for zaproxy."
+    )
+
+
+def test_reports_disclose_limitations_and_absent_screenshots(
+    valid_run: RunHandle,
+    default_options: ReportOptions,
+) -> None:
+    run = RunHandle(
+        engagement_id=valid_run.engagement_id,
+        path=valid_run.path,
+        snapshot=valid_run.snapshot.model_copy(
+            update={"exclusions": ("DoS", "resource exhaustion")}
+        ),
+    )
+
+    walkthrough = WalkthroughRenderer().render(run, default_options).text
+    professional = ProfessionalRenderer().render(run, default_options).text
+
+    for rendered in (walkthrough, professional):
+        assert "DoS" in rendered
+        assert "resource exhaustion" in rendered
+        assert "No screenshots were acquired during this run." in rendered
+
+
 # ── Validation edge cases ──────────────────────────────────────────────────────
 
 
@@ -121,6 +177,30 @@ def test_secret_scan_distinguishes_sha256_proofs_from_base64_secrets() -> None:
         json.dumps({"root_flag_sha256": "a" * 64}).encode()
     ) == []
     assert _has_unredacted_secrets(("Q" * 48 + "==").encode())
+
+
+def test_secret_scan_does_not_treat_local_artifact_paths_as_base64() -> None:
+    content = json.dumps(
+        {
+            "filename_effective": (
+                "/Users/operator/.hades/ariadne/runs/"
+                "b95266f7cbad40e9b81c55cb169c921d/probes/"
+                "webref_74374e7442767efde077_0.body"
+            )
+        }
+    ).encode()
+
+    assert _has_unredacted_secrets(content) == []
+
+
+def test_secret_scan_does_not_treat_subresource_integrity_as_secret() -> None:
+    content = (
+        '<script integrity="sha384-'
+        + ("Q" * 64)
+        + '" crossorigin="anonymous"></script>'
+    ).encode()
+
+    assert _has_unredacted_secrets(content) == []
 
 
 def test_every_objective_in_a_multi_objective_contract_needs_its_own_proof(

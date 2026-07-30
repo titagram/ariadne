@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 from typing import NamedTuple
 
-from ariadne.store.run_store import RunHandle
+from ariadne.store.run_store import RunHandle, resolve_objective_flag
 
 # ── Public data types ──────────────────────────────────────────────────────────
 
@@ -46,7 +46,10 @@ class ValidationResult(NamedTuple):
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
-_BASE64_BLOB_RE = re.compile(r"[A-Za-z0-9+/]{40,}(?:[=]{0,2})")
+_BASE64_BLOB_RE = re.compile(
+    r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/]{40,}(?:[=]{0,2})"
+    r"(?![A-Za-z0-9+/=_-])"
+)
 _SECRET_PATTERNS: list[re.Pattern] = [
     re.compile(r"(?i)(password|passwd|pwd)\s*[:=]\s*\S+"),
     re.compile(r"(?i)(api[_-]?key|apikey)\s*[:=]\s*\S+"),
@@ -224,6 +227,7 @@ class ReportValidator:
             if isinstance(e, dict) and e.get("event_type") == "objective_completed"
         ]
         snapshot_objectives = snapshot.get("objectives", [])
+        is_ctf_profile = snapshot.get("profile") in {"htb", "ctf"}
         for objective in (
             snapshot_objectives
             if isinstance(snapshot_objectives, (list, tuple))
@@ -233,21 +237,60 @@ class ReportValidator:
                 continue
             kind = objective.get("kind")
             description = objective.get("description", "")
-            matched = any(
-                isinstance(event.get("payload"), dict)
-                and event["payload"].get("objective_kind") == kind
-                and (
-                    kind != "custom"
-                    or not description
-                    or event["payload"].get("description") == description
-                )
-                for event in obj_events
+            matched_event = next(
+                (
+                    event
+                    for event in obj_events
+                    if isinstance(event.get("payload"), dict)
+                    and event["payload"].get("objective_kind") == kind
+                    and (
+                        kind != "custom"
+                        or not description
+                        or event["payload"].get("description") == description
+                    )
+                ),
+                None,
             )
-            if not matched:
+            if matched_event is None:
                 errors.append(
                     "No objective_completed proof for "
                     f"{kind!r}: {description!r}"
                 )
+                continue
+            if kind not in {"user_flag", "root_flag"}:
+                continue
+            if not is_ctf_profile and not options.include_flags:
+                continue
+
+            payload = matched_event["payload"]
+            proof = payload.get("proof_sha256") or payload.get("proof")
+            if not isinstance(proof, str) or not _SHA256_RE.fullmatch(proof):
+                errors.append(
+                    f"CTF objective {kind!r} has no valid proof_sha256"
+                )
+                continue
+            value_ref = payload.get("value_ref")
+            if value_ref is None:
+                if options.include_flags:
+                    errors.append(
+                        f"CTF objective {kind!r} requires value_ref when "
+                        "include_flags=true"
+                    )
+                continue
+            if payload.get("target") not in in_scope_hosts:
+                errors.append(
+                    f"CTF objective {kind!r} is not bound to a current in-scope target"
+                )
+                continue
+            if not isinstance(payload.get("observation_id"), str):
+                errors.append(
+                    f"CTF objective {kind!r} has no observation_id"
+                )
+                continue
+            try:
+                resolve_objective_flag(run_path, str(kind), value_ref, proof)
+            except ValueError as exc:
+                errors.append(f"CTF objective {kind!r}: {exc}")
 
         # ── 7. Secret scan ────────────────────────────────────────────────────
         if not options.include_secrets:

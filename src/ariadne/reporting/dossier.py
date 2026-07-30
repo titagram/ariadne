@@ -25,10 +25,11 @@ from ariadne.reporting.models import (
     ReportTarget,
 )
 from ariadne.reporting.validation import ReportOptions
-from ariadne.store.run_store import RunHandle
+from ariadne.store.run_store import RunHandle, resolve_objective_flag
 
 _SEVERITIES = ("critical", "high", "medium", "low", "informational")
 _FLAG_RE = re.compile(r"\b(?:HTB|FLAG|CTF)\{[^}]*\}")
+_SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _ACTIVITY_EVENT_TYPES = frozenset({
     "discovery_completed",
     "enumeration_completed",
@@ -46,6 +47,7 @@ _ACTIVITY_EVENT_TYPES = frozenset({
     "plan_executed",
     "objective_completed",
     "cleanup_completed",
+    "execution_boundary",
     "remediation_applied",
 })
 
@@ -281,13 +283,43 @@ class DossierBuilder:
             ]
             if not matching and len(run.snapshot.objectives) == 1 and completions:
                 matching = [completions[0]]
-            proof = _string(matching[0], "description", "proof", "result") if matching else None
+            completion = matching[0] if matching else {}
+            proof = _string(
+                completion,
+                "proof_sha256",
+                "proof",
+                "result",
+                "description",
+            )
+            completion_evidence = (
+                proof
+                if proof and _SHA256_RE.fullmatch(proof)
+                else self._sanitize(proof, options)
+            )
+            flag_value = None
+            if (
+                options.include_flags
+                and objective.kind in {"user_flag", "root_flag"}
+                and matching
+            ):
+                flag_value = resolve_objective_flag(
+                    run.path,
+                    objective.kind,
+                    completion.get("value_ref"),
+                    completion.get("proof_sha256") or completion.get("proof"),
+                )
             objectives.append(
                 ReportObjective(
                     kind=objective.kind,
                     description=self._sanitize(objective.description, options),
                     completed=bool(matching),
-                    completion_evidence=self._sanitize(proof, options) or None,
+                    completion_evidence=completion_evidence or None,
+                    flag_value=flag_value,
+                    flag_value_available=bool(
+                        matching
+                        and isinstance(completion.get("value_ref"), str)
+                        and completion["value_ref"].strip()
+                    ),
                 ),
             )
         return tuple(objectives)
@@ -303,7 +335,14 @@ class DossierBuilder:
             payload = event.get("payload")
             if event_type not in _ACTIVITY_EVENT_TYPES or not isinstance(payload, dict):
                 continue
-            summary = _string(payload, "summary", "description", "finding", "title")
+            summary = _string(
+                payload,
+                "summary",
+                "description",
+                "finding",
+                "title",
+                "reason",
+            )
             if summary is None and event_type == "plan_executed":
                 action = _string(payload, "action")
                 operation = _string(payload, "operation")
@@ -318,7 +357,10 @@ class DossierBuilder:
                     summary=sanitized,
                     timestamp=str(timestamp) if timestamp else None,
                     target=self._optional_sanitized(payload, "target", options),
-                    status=self._optional_sanitized(payload, "status", options),
+                    status=(
+                        self._optional_sanitized(payload, "status", options)
+                        or self._optional_sanitized(payload, "boundary", options)
+                    ),
                 ),
             )
         return tuple(entries)

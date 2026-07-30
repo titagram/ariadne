@@ -238,7 +238,7 @@ def test_pcap_adapter_rejects_untracked_or_tampered_artifacts(
         )
 
 
-def test_ssh_uses_an_opaque_secret_reference_and_emits_hashed_user_proof(
+def test_ssh_uses_an_opaque_credential_and_parses_validated_user_flag(
     tmp_path: Path,
 ) -> None:
     secret = tmp_path / "secrets" / "credential.secret"
@@ -261,12 +261,15 @@ def test_ssh_uses_an_opaque_secret_reference_and_emits_hashed_user_proof(
     assert spec.argv[0] == "ssh"
     assert "not-for-argv" not in json.dumps(spec.model_dump(mode="json"))
     assert spec.environment["ARIADNE_SECRET_FILE"] == str(secret)
+    user_flag = "0123456789abcdef0123456789abcdef"
+    user_proof = hashlib.sha256(user_flag.encode()).hexdigest()
     observations = adapter.parse_for_spec(
         ProcessResult(
             exit_code=0,
             stdout=(
                 '{"uid":1000,"gid":1000,"username":"lab-user",'
-                f'"user_flag_sha256":"{"1" * 64}"}}\n'
+                f'"user_flag":"{user_flag}",'
+                f'"user_flag_sha256":"{user_proof}"}}\n'
             ),
             stderr="",
         ),
@@ -278,7 +281,8 @@ def test_ssh_uses_an_opaque_secret_reference_and_emits_hashed_user_proof(
     assert observations[0].data["objective_proof"] == {
         "kind": "user_flag",
         "description": "Target-local user objective was readable",
-        "proof": "1" * 64,
+        "proof_sha256": user_proof,
+        "value": user_flag,
     }
 
 
@@ -297,7 +301,7 @@ def test_ssh_rejects_a_secret_reference_outside_the_run(tmp_path: Path) -> None:
         )
 
 
-def test_python_setuid_proof_is_evidence_driven_and_never_returns_the_flag(
+def test_python_setuid_proof_parses_a_validated_root_flag(
     tmp_path: Path,
 ) -> None:
     secret = tmp_path / "secrets" / "credential.secret"
@@ -320,13 +324,14 @@ def test_python_setuid_proof_is_evidence_driven_and_never_returns_the_flag(
     )
 
     assert "not-for-output" not in json.dumps(spec.model_dump(mode="json"))
+    root_flag = "fedcba9876543210fedcba9876543210"
+    root_proof = hashlib.sha256(root_flag.encode()).hexdigest()
     observations = adapter.parse_for_target(
         ProcessResult(
             exit_code=0,
             stdout=(
-                '{"euid":0,"root_flag_sha256":"'
-                + "2" * 64
-                + '"}\n'
+                f'{{"euid":0,"root_flag":"{root_flag}",'
+                f'"root_flag_sha256":"{root_proof}"}}\n'
             ),
             stderr="",
         ),
@@ -334,7 +339,8 @@ def test_python_setuid_proof_is_evidence_driven_and_never_returns_the_flag(
     )
 
     assert observations[0].data["objective_proof"]["kind"] == "root_flag"
-    assert observations[0].data["objective_proof"]["proof"] == "2" * 64
+    assert observations[0].data["objective_proof"]["proof_sha256"] == root_proof
+    assert observations[0].data["objective_proof"]["value"] == root_flag
 
 
 def test_python_setuid_proof_rejects_an_unvalidated_interpreter(

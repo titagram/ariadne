@@ -20,9 +20,12 @@ import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict
+
+if TYPE_CHECKING:
+    from ariadne.reporting.models import ReportModel
 
 # ── Domain models ──────────────────────────────────────────────────────────────
 
@@ -55,6 +58,51 @@ class SysReptorReport(BaseModel):
     findings: list[SysReptorFinding]
     profile: str
     snapshot_hash: str
+
+    @classmethod
+    def from_dossier(cls, dossier: ReportModel) -> SysReptorReport:
+        """Map a validated dossier to the existing offline bundle model."""
+        objectives = []
+        for objective in dossier.objectives:
+            mapped: dict[str, Any] = {
+                "kind": objective.kind,
+                "description": objective.description,
+                "completed": objective.completed,
+            }
+            if objective.kind in {"user_flag", "root_flag"}:
+                mapped["proof_sha256"] = objective.completion_evidence
+                if objective.flag_value is not None:
+                    mapped["flag"] = objective.flag_value
+            elif objective.completion_evidence is not None:
+                mapped["completion_evidence"] = objective.completion_evidence
+            objectives.append(mapped)
+        findings = [
+            SysReptorFinding(
+                finding_id=finding.finding_id or f"finding-{index}",
+                title=finding.title,
+                severity=finding.severity or "informational",
+                status=finding.status,
+                description=finding.description or "",
+                evidence=list(finding.evidence),
+                remediation=(
+                    "\n".join(finding.remediation)
+                    if finding.remediation
+                    else None
+                ),
+            )
+            for index, finding in enumerate(dossier.findings, start=1)
+        ]
+        return cls(
+            engagement_id=dossier.engagement_id,
+            targets=[
+                {"host": target.host}
+                for target in dossier.targets
+            ],
+            objectives=objectives,
+            findings=findings,
+            profile=dossier.profile,
+            snapshot_hash=dossier.snapshot_hash,
+        )
 
 
 class BundleManifest(BaseModel):

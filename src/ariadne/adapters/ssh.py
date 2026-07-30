@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import ClassVar
@@ -21,14 +22,16 @@ from ariadne.adapters.base import (
 from ariadne.adapters.ssh_support import ssh_process_spec
 from ariadne.core.engagement import TargetSpec
 from ariadne.core.observations import Observation
+from ariadne.store.run_store import validate_objective_flag_value
 
 SSH_FOOTHOLD_COMMAND = (
     "python3 -c 'import hashlib,json,os,pathlib,pwd;"
     "u=pwd.getpwuid(os.getuid()).pw_name;"
     "p=pathlib.Path.home()/\"user.txt\";"
-    "h=hashlib.sha256(p.read_bytes().strip()).hexdigest() if p.is_file() else \"\";"
+    "v=p.read_text().strip() if p.is_file() else \"\";"
+    "h=hashlib.sha256(v.encode()).hexdigest() if v else \"\";"
     "print(json.dumps({\"uid\":os.getuid(),\"gid\":os.getgid(),"
-    "\"username\":u,\"user_flag_sha256\":h}))'"
+    "\"username\":u,\"user_flag\":v,\"user_flag_sha256\":h}))'"
 )
 
 
@@ -84,12 +87,23 @@ class SshAdapter:
             "method": "ssh_password",
         }
         proof = payload.get("user_flag_sha256")
-        if isinstance(proof, str) and re.fullmatch(r"[0-9a-f]{64}", proof):
-            data["objective_proof"] = {
-                "kind": "user_flag",
-                "description": "Target-local user objective was readable",
-                "proof": proof,
-            }
+        value = payload.get("user_flag")
+        if (
+            isinstance(proof, str)
+            and re.fullmatch(r"[0-9a-f]{64}", proof)
+            and isinstance(value, str)
+        ):
+            try:
+                encoded = validate_objective_flag_value(value)
+            except ValueError:
+                encoded = b""
+            if encoded and hashlib.sha256(encoded).hexdigest() == proof:
+                data["objective_proof"] = {
+                    "kind": "user_flag",
+                    "description": "Target-local user objective was readable",
+                    "proof_sha256": proof,
+                    "value": value,
+                }
         return (
             Observation(
                 observation_id=uuid4(),

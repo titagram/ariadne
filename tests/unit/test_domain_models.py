@@ -27,7 +27,8 @@ def test_autonomy_mode_values() -> None:
 def test_environment_profile_values() -> None:
     assert EnvironmentProfile.PRIVATE_LAB == "private-lab"
     assert EnvironmentProfile.HTB == "htb"
-    assert set(EnvironmentProfile) == {"private-lab", "htb"}
+    assert EnvironmentProfile.CTF == "ctf"
+    assert set(EnvironmentProfile) == {"private-lab", "htb", "ctf"}
 
 
 def test_asset_status_values() -> None:

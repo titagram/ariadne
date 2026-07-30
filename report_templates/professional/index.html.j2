@@ -48,6 +48,18 @@
 </ul>
 <h3>Profile</h3>
 <p>{{ profile }}</p>
+<h3>Intensity</h3>
+<p>{{ intensity }}</p>
+<h3>Limitations</h3>
+{% if exclusions %}
+<ul>
+{% for exclusion in exclusions %}
+<li>{{ exclusion }}</li>
+{% endfor %}
+</ul>
+{% else %}
+<p>No additional exclusions were persisted.</p>
+{% endif %}
 </section>
 
 <section class="methodology">
@@ -189,13 +201,24 @@
 </section>
 
 <section class="objective-evidence">
-<h2>Objective Evidence</h2>
+<h2>Objective Evidence / Flags</h2>
 <ul>
 {% for o in objectives %}
 <li>
   <strong>{{ o.kind }}:</strong> {{ o.description }}
   {% if o.completed %}
   <span class="achieved">&#10003; Achieved</span>
+  {% endif %}
+  {% if o.flag_value %}
+  <span class="flag">{% if o.kind == "user_flag" %}User flag{% elif o.kind == "root_flag" %}Root flag{% else %}Flag{% endif %}: <code>{{ o.flag_value }}</code></span>
+  {% elif o.completion_evidence %}
+  {% if o.kind in ["user_flag", "root_flag"] and not o.flag_value_available %}
+  <span class="proof">Value unavailable: this historical run persisted only the proof hash, so the flag cannot be recovered from the dossier. Proof SHA-256: <code>{{ o.completion_evidence }}</code></span>
+  {% elif o.kind in ["user_flag", "root_flag"] %}
+  <span class="proof">Flag captured; value hidden by report options. Proof SHA-256: <code>{{ o.completion_evidence }}</code></span>
+  {% else %}
+  <span class="proof">Proof SHA-256: <code>{{ o.completion_evidence }}</code></span>
+  {% endif %}
   {% endif %}
 </li>
 {% endfor %}
@@ -212,6 +235,19 @@
 </ul>
 {% else %}
 <p>No cleanup verification was persisted.</p>
+{% endif %}
+</section>
+
+<section class="screenshots">
+<h2>Screenshot Evidence</h2>
+{% if screenshots %}
+<ul>
+{% for screenshot in screenshots %}
+<li><code>{{ screenshot.filename }}</code> — SHA-256 <code>{{ screenshot.sha256 }}</code></li>
+{% endfor %}
+</ul>
+{% else %}
+<p>No screenshots were acquired during this run.</p>
 {% endif %}
 </section>
 

@@ -289,7 +289,8 @@ def build_effective_policy(
         else Path(__file__).resolve().parents[3] / "policies"
     )
     base = load_policy(root / "base.yaml")
-    overlay = load_policy(root / f"{profile.value}.yaml")
+    overlay_name = "htb" if profile is EnvironmentProfile.CTF else profile.value
+    overlay = load_policy(root / f"{overlay_name}.yaml")
     materialized = materialize_profile(base, overlay)
     engagement_rules = {
         capability: CapabilityRule(

@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import ipaddress
+import json
 import re
 import shutil
 from copy import deepcopy
@@ -67,6 +68,7 @@ from ariadne.knowledge import (
     ToolVerificationBlockedError,
 )
 from ariadne.knowledge.runtime import GuidanceSource
+from ariadne.reporting.dossier import DossierBuilder
 from ariadne.reporting.models import RenderedReport
 from ariadne.reporting.professional import ProfessionalRenderer
 from ariadne.reporting.validation import ReportOptions, ReportValidator
@@ -76,7 +78,7 @@ from ariadne.runtime.docker import (
     LocalFirstRuntime,
     OnDemandKaliRuntime,
 )
-from ariadne.runtime.process import ProcessRunner
+from ariadne.runtime.process import ProcessResult, ProcessRunner
 from ariadne.runtime.selection import (
     RuntimeChoice,
     choose_runtime,
@@ -2899,6 +2901,12 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 )
             else:
                 observations = adapter.parse(process_result)
+            observations, process_result = _persist_objective_flag_observations(
+                cmd=cmd,
+                run_handle=run_handle,
+                observations=observations,
+                process_result=process_result,
+            )
             if any(
                 _is_simulated_evidence(
                     observation.source,
@@ -3448,10 +3456,93 @@ def _record_explicit_objective_proof(
                 "objective_kind": objective.kind,
                 "description": objective.description,
                 "observation_id": str(observation.observation_id),
-                "proof": proof_map.get("proof", ""),
+                "value_ref": proof_map.get("value_ref", ""),
+                "proof_sha256": (
+                    proof_map.get("proof_sha256")
+                    or proof_map.get("proof", "")
+                ),
             },
             timestamp=timestamp,
         ),
+    )
+
+
+def _persist_objective_flag_observations(
+    *,
+    cmd: AriadneCommand,
+    run_handle: RunHandle,
+    observations: tuple[Observation, ...],
+    process_result: ProcessResult,
+) -> tuple[tuple[Observation, ...], ProcessResult]:
+    """Move raw CTF flags to protected storage before generic evidence writes."""
+    sanitized: list[Observation] = []
+    captured_fields: set[str] = set()
+    captured_values: list[str] = []
+    for observation in observations:
+        proof = observation.data.get("objective_proof")
+        if not isinstance(proof, dict):
+            sanitized.append(observation)
+            continue
+        proof_map = cast(dict[str, object], proof)
+        kind = proof_map.get("kind")
+        value = proof_map.get("value")
+        proof_sha256 = proof_map.get("proof_sha256") or proof_map.get("proof")
+        if (
+            kind not in {"user_flag", "root_flag"}
+            or not isinstance(value, str)
+        ):
+            sanitized.append(observation)
+            continue
+
+        stored = cmd.store.write_objective_flag(run_handle, str(kind), value)
+        if proof_sha256 != stored.proof_sha256:
+            raise AdapterPolicyError("CTF flag value does not match its objective proof")
+        clean_proof = {
+            key: item
+            for key, item in proof_map.items()
+            if key not in {"value", "proof"}
+        }
+        clean_proof.update(
+            {
+                "proof_sha256": stored.proof_sha256,
+                "value_ref": stored.value_ref,
+            }
+        )
+        sanitized.append(
+            observation.model_copy(
+                update={
+                    "data": {
+                        **observation.data,
+                        "objective_proof": clean_proof,
+                    }
+                }
+            )
+        )
+        captured_fields.add(str(kind))
+        captured_values.append(value)
+
+    if not captured_values:
+        return tuple(sanitized), process_result
+
+    stdout = process_result.stdout
+    try:
+        structured = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        for value in captured_values:
+            stdout = stdout.replace(value, "[CTF_FLAG_CAPTURED]")
+    else:
+        if isinstance(structured, dict):
+            for kind in captured_fields:
+                structured.pop(kind, None)
+            stdout = json.dumps(structured, sort_keys=True)
+        else:
+            for value in captured_values:
+                stdout = stdout.replace(value, "[CTF_FLAG_CAPTURED]")
+    stderr = process_result.stderr
+    for value in captured_values:
+        stderr = stderr.replace(value, "[CTF_FLAG_CAPTURED]")
+    return tuple(sanitized), process_result.model_copy(
+        update={"stdout": stdout, "stderr": stderr}
     )
 
 
@@ -3525,11 +3616,6 @@ async def handle_render_report(args: dict[str, Any], **context: Any) -> dict[str
     session_id = context.get("session_id", "")
     input_session_id = session_id
     style = args.get("style", "walkthrough")
-    options = ReportOptions(
-        include_flags=bool(args.get("include_flags", False)),
-        include_secrets=bool(args.get("include_secrets", False)),
-    )
-
     # 1. Check active engagement
     binding_info = _get_binding(cmd, input_session_id)
     if binding_info is None:
@@ -3564,6 +3650,17 @@ async def handle_render_report(args: dict[str, Any], **context: Any) -> dict[str
             "path": "",
         }
 
+    requested_flags = args.get("include_flags")
+    include_flags = (
+        run_handle.snapshot.profile.value in {"htb", "ctf"}
+        if requested_flags is None
+        else bool(requested_flags)
+    )
+    options = ReportOptions(
+        include_flags=include_flags,
+        include_secrets=bool(args.get("include_secrets", False)),
+    )
+
     # 4. Validate the run
     validator = ReportValidator()
     validation = validator.validate(run_handle, options)
@@ -3597,6 +3694,8 @@ async def handle_render_report(args: dict[str, Any], **context: Any) -> dict[str
             "status": "report_rendered",
             "style": style,
             "path": str(report_path),
+            "include_flags": include_flags,
+            "include_secrets": options.include_secrets,
             "message": f"{style.title()} report written to {report_path.name}",
         }
     except Exception as exc:
@@ -3649,12 +3748,39 @@ async def handle_run_engagement(
                         f"{professional.get('message')}"
                     ),
                 }
+            objective_flags: dict[str, str] = {}
+            if walkthrough.get("include_flags"):
+                dossier = DossierBuilder().build(
+                    run_handle,
+                    ReportOptions(include_flags=True, include_secrets=False),
+                )
+                objective_flags = {
+                    objective.kind: objective.flag_value
+                    for objective in dossier.objectives
+                    if objective.flag_value is not None
+                }
+            flag_summary = ""
+            if objective_flags:
+                flag_summary = "".join(
+                    (
+                        f"\nUser flag: {objective_flags['user_flag']}"
+                        if "user_flag" in objective_flags
+                        else "",
+                        f"\nRoot flag: {objective_flags['root_flag']}"
+                        if "root_flag" in objective_flags
+                        else "",
+                    )
+                )
             return {
                 "status": "complete",
                 "steps": step - 1,
                 "walkthrough_path": walkthrough["path"],
                 "professional_path": professional["path"],
-                "message": "Objectives, cleanup, and both offline reports completed.",
+                "objective_flags": objective_flags,
+                "message": (
+                    "Objectives, cleanup, and both offline reports completed."
+                    + flag_summary
+                ),
             }
 
         proposed = await handle_propose_plan(

@@ -11,6 +11,7 @@ class AutonomyMode(StrEnum):
 class EnvironmentProfile(StrEnum):
     PRIVATE_LAB = "private-lab"
     HTB = "htb"
+    CTF = "ctf"
 
 
 class EngagementState(StrEnum):

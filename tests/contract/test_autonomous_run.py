@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import shutil
 from datetime import UTC, datetime
@@ -267,12 +268,16 @@ class SyntheticGuardedVerticalRuntime:
         if executable == "ssh":
             remote_command = argv[-1]
             if "user_flag_sha256" in remote_command:
+                user_flag = "0123456789abcdef0123456789abcdef"
                 stdout = json.dumps(
                     {
                         "uid": 1000,
                         "gid": 1000,
                         "username": "lab-user",
-                        "user_flag_sha256": "1" * 64,
+                        "user_flag": user_flag,
+                        "user_flag_sha256": hashlib.sha256(
+                            user_flag.encode(),
+                        ).hexdigest(),
                     }
                 )
             elif remote_command == "id":
@@ -280,10 +285,14 @@ class SyntheticGuardedVerticalRuntime:
             elif remote_command.startswith("getcap "):
                 stdout = "/usr/bin/python3.8 = cap_setuid+ep"
             elif "root_flag_sha256" in remote_command:
+                root_flag = "fedcba9876543210fedcba9876543210"
                 stdout = json.dumps(
                     {
                         "euid": 0,
-                        "root_flag_sha256": "2" * 64,
+                        "root_flag": root_flag,
+                        "root_flag_sha256": hashlib.sha256(
+                            root_flag.encode(),
+                        ).hexdigest(),
                     }
                 )
             else:
@@ -671,7 +680,7 @@ def test_evidence_driven_foothold_replay_uses_guarded_runtime_end_to_end(
         created = json.loads(
             await prepare(
                 {
-                    "profile": "private-lab",
+                    "profile": "htb",
                     "target_host": "192.0.2.10",
                     "objectives": ["user_flag", "root_flag"],
                     "autonomy": "controlled",
@@ -748,6 +757,8 @@ def test_evidence_driven_foothold_replay_uses_guarded_runtime_end_to_end(
     result, handle = asyncio.run(replay())
     events = services.store.read_events(handle)
     serialized_events = json.dumps(events, sort_keys=True)
+    user_flag = "0123456789abcdef0123456789abcdef"
+    root_flag = "fedcba9876543210fedcba9876543210"
 
     assert result["status"] == "complete", result
     assert [argv[0] for argv in runtime.argv_calls] == [
@@ -771,6 +782,23 @@ def test_evidence_driven_foothold_replay_uses_guarded_runtime_end_to_end(
         for event in events
         if event["event_type"] == "objective_completed"
     } == {"user_flag", "root_flag"}
+    completed = [
+        event["payload"]
+        for event in events
+        if event["event_type"] == "objective_completed"
+    ]
+    assert all(
+        {
+            "objective_kind",
+            "value_ref",
+            "proof_sha256",
+            "observation_id",
+            "target",
+        } <= payload.keys()
+        for payload in completed
+    )
+    assert "User flag: " + user_flag in result["message"]
+    assert "Root flag: " + root_flag in result["message"]
     credential = next(
         event["payload"]["observation_data"]
         for event in events
@@ -781,6 +809,24 @@ def test_evidence_driven_foothold_replay_uses_guarded_runtime_end_to_end(
     assert credential["secret_storage"] == "protected_local_reference"
     assert "synthetic-credential-never-in-evidence" not in serialized_events
     assert (handle.path / credential["credential_ref"]).stat().st_mode & 0o777 == 0o600
+    assert user_flag not in serialized_events
+    assert root_flag not in serialized_events
+    for objective in ("user_flag", "root_flag"):
+        objective_path = handle.path / f"secrets/objective_{objective}.secret"
+        assert objective_path.stat().st_mode & 0o777 == 0o600
+    generic_files = [
+        handle.path / "events.jsonl",
+        *(
+            path
+            for path in (handle.path / "artifacts").rglob("*")
+            if path.is_file()
+        ),
+    ]
+    generic_content = b"\n".join(path.read_bytes() for path in generic_files)
+    assert user_flag.encode() not in generic_content
+    assert root_flag.encode() not in generic_content
+    assert user_flag in (handle.path / "walkthrough.md").read_text(encoding="utf-8")
+    assert root_flag in (handle.path / "professional.html").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,8 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import io
+import re
+import stat
 from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO
@@ -67,6 +69,15 @@ class StoredArtifact(BaseModel):
     sha256: str
 
 
+class StoredObjectiveFlag(BaseModel):
+    """Protected reference and proof for a persisted CTF objective flag."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    value_ref: str
+    proof_sha256: str
+
+
 class RunHandle:
     """Opaque handle to an active engagement run directory.
 
@@ -82,6 +93,69 @@ class RunHandle:
         self.engagement_id = engagement_id
         self.path = path
         self.snapshot = snapshot
+
+
+_CTF_FLAG_OBJECTIVE_KINDS = frozenset({"user_flag", "root_flag"})
+_CTF_FLAG_VALUE_RE = re.compile(r"^[\x21-\x7e]{1,256}$")
+_SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+
+
+def _objective_flag_reference(objective_kind: str) -> str:
+    if objective_kind not in _CTF_FLAG_OBJECTIVE_KINDS:
+        raise ValueError("Only user_flag and root_flag can store CTF flag values")
+    return f"secrets/objective_{objective_kind}.secret"
+
+
+def validate_objective_flag_value(value: str) -> bytes:
+    """Validate one bounded printable CTF flag and return its encoded bytes."""
+    if not isinstance(value, str) or not _CTF_FLAG_VALUE_RE.fullmatch(value):
+        raise ValueError(
+            "CTF flag must be 1-256 printable non-whitespace ASCII characters"
+        )
+    encoded = value.encode("ascii")
+    if len(encoded) > 256:
+        raise ValueError("CTF flag exceeds the 256-byte limit")
+    return encoded
+
+
+def resolve_objective_flag(
+    run_path: Path,
+    objective_kind: str,
+    value_ref: object,
+    proof_sha256: object,
+) -> str:
+    """Resolve a protected objective flag after path, mode, and digest checks."""
+    expected_ref = _objective_flag_reference(objective_kind)
+    if value_ref != expected_ref:
+        raise ValueError("value_ref is outside the protected objective flag store")
+    if not isinstance(proof_sha256, str) or not _SHA256_RE.fullmatch(proof_sha256):
+        raise ValueError("proof_sha256 is not a valid SHA-256 digest")
+
+    secrets_dir = run_path / "secrets"
+    if secrets_dir.is_symlink():
+        raise ValueError("value_ref is outside the protected objective flag store")
+    secret_root = secrets_dir.resolve()
+    candidate = run_path / expected_ref
+    resolved = candidate.resolve()
+    if (
+        not resolved.is_relative_to(secret_root)
+        or candidate.is_symlink()
+        or not resolved.is_file()
+    ):
+        raise ValueError("value_ref is outside the protected objective flag store")
+    if stat.S_IMODE(resolved.stat().st_mode) != 0o600:
+        raise ValueError("objective flag file permissions must be 0600")
+
+    content = resolved.read_bytes()
+    actual = hashlib.sha256(content).hexdigest()
+    if actual != proof_sha256:
+        raise ValueError("objective flag digest does not match proof_sha256")
+    try:
+        value = content.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ValueError("objective flag is not valid ASCII") from exc
+    validate_objective_flag_value(value)
+    return value
 
 
 # ── Integrity result model ────────────────────────────────────────────────────
@@ -265,6 +339,41 @@ class RunStore:
             hashlib.sha256(content).hexdigest(),
         )
         return output_path
+
+    def write_objective_flag(
+        self,
+        handle: RunHandle,
+        objective_kind: str,
+        value: str,
+    ) -> StoredObjectiveFlag:
+        """Atomically persist one bounded CTF flag outside generic artifacts."""
+        import os
+        import tempfile
+
+        value_ref = _objective_flag_reference(objective_kind)
+        content = validate_objective_flag_value(value)
+        secrets_dir = handle.path / "secrets"
+        secrets_dir.mkdir(parents=True, exist_ok=True)
+        if secrets_dir.is_symlink():
+            raise ValueError("Protected objective flag store must not be a symlink")
+        set_strict_permissions(secrets_dir, 0o700)
+        output_path = handle.path / value_ref
+
+        fd, tmp = tempfile.mkstemp(dir=str(secrets_dir), prefix=".objective_tmp_")
+        try:
+            os.write(fd, content)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, output_path)
+        set_strict_permissions(output_path, 0o600)
+
+        proof_sha256 = hashlib.sha256(content).hexdigest()
+        self._update_manifest(handle.path, value_ref, proof_sha256)
+        return StoredObjectiveFlag(
+            value_ref=value_ref,
+            proof_sha256=proof_sha256,
+        )
 
     def amend_snapshot(
         self,

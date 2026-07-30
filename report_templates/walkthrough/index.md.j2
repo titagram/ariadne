@@ -4,6 +4,16 @@
 - **Targets:** {% for t in targets %}{{ t.host }}{% if not loop.last %}, {% endif %}{% endfor %}
 - **Profile:** {{ profile }}
 - **Autonomy:** {{ autonomy }}
+- **Intensity:** {{ intensity }}
+
+## Limitations
+{% if exclusions %}
+{% for exclusion in exclusions %}
+- {{ exclusion }}
+{% endfor %}
+{% else %}
+*No additional exclusions were persisted.*
+{% endif %}
 
 ## Environment
 - **Engagement ID:** `{{ engagement_id }}`
@@ -112,7 +122,19 @@
 ## Objectives and Flags
 {% if objectives %}
 {% for o in objectives %}
-- [{% if o.completed %}x{% else %} {% endif %}] **{{ o.kind }}**: {{ o.description }}
+- [{% if o.completed %}x{% else %} {% endif %}] **{{ o.kind }}**{% if o.description %}: {{ o.description }}{% endif %}
+{% if o.flag_value %}
+  - {% if o.kind == "user_flag" %}User flag{% elif o.kind == "root_flag" %}Root flag{% else %}Flag{% endif %}: `{{ o.flag_value }}`
+{% elif o.completion_evidence %}
+{% if o.kind in ["user_flag", "root_flag"] and not o.flag_value_available %}
+  - Value unavailable: this historical run persisted only the proof hash, so the flag cannot be recovered from the dossier.
+  - Proof SHA-256 `{{ o.completion_evidence }}`
+{% elif o.kind in ["user_flag", "root_flag"] %}
+  - Flag captured; value hidden by report options. Proof SHA-256 `{{ o.completion_evidence }}`
+{% else %}
+  - Acquired; proof SHA-256 `{{ o.completion_evidence }}`
+{% endif %}
+{% endif %}
 {% endfor %}
 {% else %}
 *No objectives recorded.*
@@ -134,6 +156,15 @@
 {% endfor %}
 {% else %}
 *No reportable lifecycle activity was persisted.*
+{% endif %}
+
+## Screenshots
+{% if screenshots %}
+{% for screenshot in screenshots %}
+- `{{ screenshot.filename }}` — SHA-256 `{{ screenshot.sha256 }}`
+{% endfor %}
+{% else %}
+*No screenshots were acquired during this run.*
 {% endif %}
 
 ## Lessons Learned

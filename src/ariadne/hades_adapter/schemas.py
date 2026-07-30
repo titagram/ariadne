@@ -64,9 +64,11 @@ class PrepareEngagementInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    profile: Literal["private-lab", "htb"] = Field(
+    profile: Literal["private-lab", "htb", "ctf"] = Field(
         ...,
-        description="Environment profile. Must be one of: 'private-lab' or 'htb'.",
+        description=(
+            "Environment profile. Must be one of: 'private-lab', 'htb', or 'ctf'."
+        ),
     )
     target_host: str = Field(
         ...,
@@ -232,9 +234,12 @@ class RenderReportInput(BaseModel):
         default="walkthrough",
         description="Report style: 'walkthrough' (default) or 'professional'.",
     )
-    include_flags: bool = Field(
-        default=False,
-        description="Include captured CTF flags. Defaults to redacted.",
+    include_flags: bool | None = Field(
+        default=None,
+        description=(
+            "Include captured CTF flags. Defaults to true for HTB/CTF "
+            "engagements and false for other profiles."
+        ),
     )
     include_secrets: bool = Field(
         default=False,

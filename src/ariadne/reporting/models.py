@@ -25,6 +25,8 @@ class ReportObjective(BaseModel):
     description: str
     completed: bool = False
     completion_evidence: str | None = None
+    flag_value: str | None = None
+    flag_value_available: bool = False
 
 
 class ReportEvidence(BaseModel):

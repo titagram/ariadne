@@ -16,6 +16,7 @@ and record cleanup records for partially failed uploads.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import ClassVar
@@ -35,6 +36,7 @@ from ariadne.adapters.base import (
 from ariadne.adapters.ssh_support import ssh_process_spec
 from ariadne.core.errors import AdapterPolicyError
 from ariadne.core.observations import Observation
+from ariadne.store.run_store import validate_objective_flag_value
 
 # ── Operation catalogs ────────────────────────────────────────────────────────
 
@@ -76,10 +78,10 @@ def python_capability_proof_command(interpreter: str) -> str:
     return (
         f"{interpreter} -c 'import hashlib,json,os,pathlib;"
         "os.setuid(0);p=pathlib.Path(\"/root/root.txt\");"
-        "h=hashlib.sha256(p.read_bytes().strip()).hexdigest() "
-        "if p.is_file() else \"\";"
+        "v=p.read_text().strip() if p.is_file() else \"\";"
+        "h=hashlib.sha256(v.encode()).hexdigest() if v else \"\";"
         "print(json.dumps({\"euid\":os.geteuid(),"
-        "\"root_flag_sha256\":h}))'"
+        "\"root_flag\":v,\"root_flag_sha256\":h}))'"
     )
 
 # ── Curated binary metadata ──────────────────────────────────────────────────
@@ -690,7 +692,20 @@ class PostExAdapter:
             and structured.get("euid") == 0
             and isinstance(structured.get("root_flag_sha256"), str)
             and re.fullmatch(r"[0-9a-f]{64}", structured["root_flag_sha256"])
+            and isinstance(structured.get("root_flag"), str)
         ):
+            try:
+                encoded_flag = validate_objective_flag_value(
+                    structured["root_flag"]
+                )
+            except ValueError:
+                encoded_flag = b""
+            if (
+                not encoded_flag
+                or hashlib.sha256(encoded_flag).hexdigest()
+                != structured["root_flag_sha256"]
+            ):
+                return ()
             observations.append(self._make_observation({
                 "tool": "python_cap_setuid",
                 "type": "privesc_path_identified",
@@ -698,7 +713,8 @@ class PostExAdapter:
                 "objective_proof": {
                     "kind": "root_flag",
                     "description": "Target-local root objective was readable",
-                    "proof": structured["root_flag_sha256"],
+                    "proof_sha256": structured["root_flag_sha256"],
+                    "value": structured["root_flag"],
                 },
             }))
             return tuple(observations)

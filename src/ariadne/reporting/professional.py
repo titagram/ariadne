@@ -101,6 +101,8 @@ class ProfessionalRenderer:
             targets=dossier.targets,
             objectives=dossier.objectives,
             profile=dossier.profile,
+            intensity=run.snapshot.intensity,
+            exclusions=run.snapshot.exclusions,
             risk_counts=dossier.risk_counts,
             findings=dossier.findings,
             validated_findings=validated_findings,
@@ -110,6 +112,15 @@ class ProfessionalRenderer:
             remediation=dossier.remediation,
             compromised=dossier.compromised,
             cleanup=dossier.cleanup,
+            screenshots=tuple(
+                evidence
+                for evidence in dossier.evidence
+                if (
+                    str(evidence.evidence_type or "").casefold() == "screenshot"
+                    or evidence.path.suffix.casefold()
+                    in {".png", ".jpg", ".jpeg", ".webp"}
+                )
+            ),
             scoring_notes=(
                 "Risk counts include only separately validated findings with "
                 "an explicitly persisted severity. Candidate alerts remain "

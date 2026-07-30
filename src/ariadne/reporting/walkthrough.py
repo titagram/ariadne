@@ -72,6 +72,8 @@ class WalkthroughRenderer:
             targets=dossier.targets,
             profile=dossier.profile,
             autonomy=dossier.autonomy,
+            intensity=run.snapshot.intensity,
+            exclusions=run.snapshot.exclusions,
             engagement_id=dossier.engagement_id,
             snapshot_hash=dossier.snapshot_hash,
             generated_at=dossier.generated_at,
@@ -99,6 +101,15 @@ class WalkthroughRenderer:
             candidate_findings=tuple(
                 finding for finding in dossier.findings
                 if finding.status == "candidate"
+            ),
+            screenshots=tuple(
+                evidence
+                for evidence in dossier.evidence
+                if (
+                    str(evidence.evidence_type or "").casefold() == "screenshot"
+                    or evidence.path.suffix.casefold()
+                    in {".png", ".jpg", ".jpeg", ".webp"}
+                )
             ),
         )
 
