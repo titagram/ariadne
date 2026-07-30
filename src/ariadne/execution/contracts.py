@@ -224,6 +224,12 @@ class ExecutionContractRegistry:
                 frozenset({"zaproxy"}),
                 "ariadne.adapters.zap.ZapAdapter",
                 allow_stdin=True,
+                allowed_environment_keys=frozenset(
+                    {
+                        "ARIADNE_ZAP_HTTP_HOST",
+                        "ARIADNE_ZAP_NETWORK_TARGET",
+                    }
+                ),
             ),
             *bounded(
                 "nuclei",
@@ -988,7 +994,11 @@ class GuardedRuntime:
         return rate
 
     def _validate_zap(self, spec: ProcessSpec) -> None:
-        if spec.argv != ("zaproxy", "-cmd", "-autorun", "/dev/stdin") or spec.stdin is None:
+        if (
+            spec.argv
+            != ("zaproxy", "-cmd", "-silent", "-autorun", "/dev/stdin")
+            or spec.stdin is None
+        ):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         try:
             automation = yaml.safe_load(spec.stdin)
@@ -1029,6 +1039,16 @@ class GuardedRuntime:
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         operation = self._contract.operation
         http_host = self._envelope.action_inputs.get("http_host")
+        expected_environment = (
+            {
+                "ARIADNE_ZAP_HTTP_HOST": http_host,
+                "ARIADNE_ZAP_NETWORK_TARGET": self._envelope.exact_target.host,
+            }
+            if isinstance(http_host, str)
+            else {}
+        )
+        if dict(spec.environment) != expected_environment:
+            self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
         scan_jobs = jobs
         if http_host is not None:
             expected_replacer = {

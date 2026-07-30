@@ -630,6 +630,17 @@ def test_zap_contract_accepts_only_the_exact_operation_yaml_shape(
     )
 
     guard.authorize_initial(spec)
+    with pytest.raises(ProcessAuthorizationError, match="target|environment"):
+        guard.authorize_initial(
+            spec.model_copy(
+                update={
+                    "environment": {
+                        "ARIADNE_ZAP_HTTP_HOST": "orion.test",
+                        "ARIADNE_ZAP_NETWORK_TARGET": "10.10.10.11",
+                    }
+                }
+            )
+        )
     automation = yaml.safe_load(spec.stdin)
     automation["env"]["contexts"][0]["urls"].append("https://10.10.10.11")
     automation["jobs"].append({"type": "requestor", "parameters": {}})

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import os
 import platform
 import re
@@ -29,7 +30,7 @@ from typing import Final
 import yaml
 
 from ariadne.adapters.base import Runtime
-from ariadne.core.engagement import EngagementSnapshot
+from ariadne.core.engagement import EngagementSnapshot, TargetSpec
 
 # ── Canonical types (re-exported from Task 13's process module) ──────────
 # These were forward references before Task 13.  Now they're defined in
@@ -312,6 +313,7 @@ class OnDemandKaliRuntime:
         )
 
     async def run(self, spec: ProcessSpec) -> ProcessResult:
+        container_environment = self._container_environment(spec)
         self._bind_planned_ports(spec)
         await self._ensure_started()
         if spec.argv[0] == "nuclei":
@@ -323,7 +325,7 @@ class OnDemandKaliRuntime:
             "--workdir",
             "/workspace",
         ]
-        for key, value in sorted(spec.environment.items()):
+        for key, value in sorted(container_environment.items()):
             command.extend(["-e", f"{key}={self._container_value(value)}"])
         command.extend(["kali", *(self._container_value(value) for value in spec.argv)])
         return await self._command_runtime.run(
@@ -336,6 +338,51 @@ class OnDemandKaliRuntime:
                 stdin=spec.stdin,
             )
         )
+
+    def _container_environment(self, spec: ProcessSpec) -> dict[str, str]:
+        """Resolve a guarded ZAP vhost binding without consulting DNS."""
+        environment = dict(spec.environment)
+        if spec.argv[0] != "zaproxy":
+            return environment
+        alias = environment.pop("ARIADNE_ZAP_HTTP_HOST", None)
+        network_target = environment.pop("ARIADNE_ZAP_NETWORK_TARGET", None)
+        if (alias is None) != (network_target is None):
+            raise KaliRuntimeUnavailableError("Incomplete guarded ZAP host binding.")
+        java_options = "-Duser.home=/workspace/home"
+        if alias is not None and network_target is not None:
+            allowed_targets = {target.host for target in self._snapshot.targets}
+            if network_target not in allowed_targets:
+                raise KaliRuntimeUnavailableError(
+                    "ZAP network target does not match the immutable snapshot target."
+                )
+            try:
+                ipaddress.ip_address(network_target)
+            except ValueError as exc:
+                raise KaliRuntimeUnavailableError(
+                    "ZAP network target must be the authorized IP address."
+                ) from exc
+            normalized_alias = TargetSpec(host=alias).host
+            try:
+                ipaddress.ip_address(normalized_alias)
+            except ValueError:
+                pass
+            else:
+                raise KaliRuntimeUnavailableError("ZAP HTTP alias must be a non-IP hostname.")
+            if normalized_alias != alias or normalized_alias in allowed_targets:
+                raise KaliRuntimeUnavailableError("Invalid guarded ZAP HTTP alias.")
+            workspace = self._run_root / "workspace"
+            binding_dir = workspace / ".ariadne"
+            binding_dir.mkdir(parents=True, exist_ok=True)
+            if binding_dir.resolve().parent != workspace.resolve():
+                raise KaliRuntimeUnavailableError("ZAP host binding escaped the run workspace.")
+            hosts_file = binding_dir / "zap-hosts"
+            if hosts_file.is_symlink():
+                raise KaliRuntimeUnavailableError("ZAP host binding cannot be a symlink.")
+            hosts_file.write_text(f"{network_target} {normalized_alias}\n", encoding="utf-8")
+            hosts_file.chmod(0o644)
+            java_options += " -Djdk.net.hosts.file=/workspace/.ariadne/zap-hosts"
+        environment["JAVA_TOOL_OPTIONS"] = java_options
+        return environment
 
     def _container_value(self, value: str) -> str:
         """Translate only paths inside this immutable engagement run."""

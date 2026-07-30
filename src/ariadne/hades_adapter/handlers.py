@@ -128,6 +128,32 @@ def _recoverable_provider_boundary(
     )
 
 
+def _optional_provider_playbook(
+    catalog: WorkflowCatalog,
+    playbook_id: str,
+) -> bool:
+    playbook = catalog.playbooks.get(playbook_id)
+    return bool(
+        playbook is not None
+        and any(
+            action.adapter == "zap" and action.operation == "passive_scan"
+            for action in playbook.actions
+        )
+    )
+
+
+def _resolved_scope_candidate_ids(events: list[dict[str, Any]]) -> set[object]:
+    return {
+        event.get("payload", {}).get("candidate_id")
+        for event in events
+        if event.get("event_type")
+        in {
+            "scope_alias_approved",
+            "scope_candidate_blocked",
+        }
+    }
+
+
 def _tool_id_for_executable(executable: str) -> str:
     """Derive a stable knowledge id from the authorized ProcessSpec."""
     slug = re.sub(
@@ -1819,7 +1845,16 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             provider_fallback_needed = (
                 payload.get("status") not in {"executed", "success"}
                 and failed_playbook is not None
-                and bool(set(failed_playbook.next_playbooks) & _PROVIDER_FALLBACK_PLAYBOOKS)
+                and (
+                    _optional_provider_playbook(
+                        catalog,
+                        str(last_routing_playbook or ""),
+                    )
+                    or bool(
+                        set(failed_playbook.next_playbooks)
+                        & _PROVIDER_FALLBACK_PLAYBOOKS
+                    )
+                )
             )
             break
     unresearched_fingerprint = _latest_service_fingerprint(
@@ -2849,6 +2884,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                     record.plan.capabilities,
                     local_tool_available=shutil.which(executable) is not None,
                     kali_tool_available=(executable in curated_kali_executables()),
+                    requires_isolation=action.adapter == "zap",
                     requires_compatibility=action.adapter == "nuclei",
                 )
                 if runtime_choice is RuntimeChoice.BLOCKED:
@@ -3982,21 +4018,25 @@ async def handle_run_engagement(
             failed_playbook = catalog.playbooks.get(last_failed_playbook or "")
             if (
                 failed_playbook is not None
-                and set(failed_playbook.next_playbooks) & _PROVIDER_FALLBACK_PLAYBOOKS
+                and (
+                    _optional_provider_playbook(
+                        catalog,
+                        str(last_failed_playbook or ""),
+                    )
+                    or set(failed_playbook.next_playbooks)
+                    & _PROVIDER_FALLBACK_PLAYBOOKS
+                )
                 and step < max_steps
             ):
                 continue
-            blocked_candidate_ids = {
-                event.get("payload", {}).get("candidate_id")
-                for event in events
-                if event.get("event_type") == "scope_candidate_blocked"
-            }
+            resolved_candidate_ids = _resolved_scope_candidate_ids(events)
             candidate = next(
                 (
                     event.get("payload", {})
                     for event in reversed(events)
                     if event.get("event_type") == "scope_candidate_discovered"
-                    and event.get("payload", {}).get("candidate_id") not in blocked_candidate_ids
+                    and event.get("payload", {}).get("candidate_id")
+                    not in resolved_candidate_ids
                 ),
                 None,
             )

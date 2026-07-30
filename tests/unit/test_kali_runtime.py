@@ -263,6 +263,104 @@ def test_kali_zap_probe_uses_package_metadata_within_total_budget(
     )
 
 
+def test_kali_pins_approved_zap_alias_to_snapshot_target_without_external_dns(
+    tmp_path,
+) -> None:
+    snapshot = EngagementSnapshot(
+        engagement_id=uuid4(),
+        revision=1,
+        previous_snapshot_hash=None,
+        snapshot_hash="0" * 64,
+        confirmed_at=datetime.now(UTC),
+        authorization_attested=True,
+        disclaimer_version="1.0",
+        profile=EnvironmentProfile.PRIVATE_LAB,
+        autonomy=AutonomyMode.CONTROLLED,
+        targets=(TargetSpec(host="192.0.2.10"),),
+        objectives=(Objective(kind="proof"),),
+    )
+    command_runtime = _PinnedImageCommandRuntime()
+    runtime = OnDemandKaliRuntime(
+        snapshot=snapshot,
+        run_root=tmp_path,
+        command_runtime=command_runtime,
+        docker_locator=lambda _: "/usr/local/bin/docker",
+        kali_image_ref=_PINNED_KALI_REF,
+        netguard_image_ref=_PINNED_NETGUARD_REF,
+    )
+    spec = ProcessSpec(
+        argv=("zaproxy", "-cmd", "-silent", "-autorun", "/dev/stdin"),
+        environment={
+            "ARIADNE_ZAP_HTTP_HOST": "vhost.example",
+            "ARIADNE_ZAP_NETWORK_TARGET": "192.0.2.10",
+        },
+        stdin=b"env: {}\njobs: []\n",
+        timeout_seconds=30,
+        max_output_bytes=4096,
+    )
+
+    asyncio.run(runtime.run(spec))
+
+    hosts_file = tmp_path / "workspace" / ".ariadne" / "zap-hosts"
+    assert hosts_file.read_text() == "192.0.2.10 vhost.example\n"
+    zap_call = next(call for call in command_runtime.calls if "zaproxy" in call.argv)
+    java_options = next(
+        value.removeprefix("JAVA_TOOL_OPTIONS=")
+        for value in zap_call.argv
+        if value.startswith("JAVA_TOOL_OPTIONS=")
+    )
+    assert "-Djdk.net.hosts.file=/workspace/.ariadne/zap-hosts" in java_options
+    assert not any("ARIADNE_ZAP_HTTP_HOST=" in value for value in zap_call.argv)
+    assert not any("ARIADNE_ZAP_NETWORK_TARGET=" in value for value in zap_call.argv)
+    assert zap_call.environment["ARIADNE_ALLOW_TARGETS"].split() == [
+        "192.0.2.10:22",
+        "192.0.2.10:443",
+        "192.0.2.10:80",
+        "192.0.2.10:8080",
+        "192.0.2.10:8443",
+    ]
+
+
+def test_kali_rejects_zap_alias_binding_to_non_snapshot_ip(tmp_path) -> None:
+    snapshot = EngagementSnapshot(
+        engagement_id=uuid4(),
+        revision=1,
+        previous_snapshot_hash=None,
+        snapshot_hash="0" * 64,
+        confirmed_at=datetime.now(UTC),
+        authorization_attested=True,
+        disclaimer_version="1.0",
+        profile=EnvironmentProfile.PRIVATE_LAB,
+        autonomy=AutonomyMode.CONTROLLED,
+        targets=(TargetSpec(host="192.0.2.10"),),
+        objectives=(Objective(kind="proof"),),
+    )
+    command_runtime = _PinnedImageCommandRuntime()
+    runtime = OnDemandKaliRuntime(
+        snapshot=snapshot,
+        run_root=tmp_path,
+        command_runtime=command_runtime,
+        docker_locator=lambda _: "/usr/local/bin/docker",
+        kali_image_ref=_PINNED_KALI_REF,
+        netguard_image_ref=_PINNED_NETGUARD_REF,
+    )
+    spec = ProcessSpec(
+        argv=("zaproxy", "-cmd", "-silent", "-autorun", "/dev/stdin"),
+        environment={
+            "ARIADNE_ZAP_HTTP_HOST": "vhost.example",
+            "ARIADNE_ZAP_NETWORK_TARGET": "192.0.2.11",
+        },
+        stdin=b"env: {}\njobs: []\n",
+        timeout_seconds=30,
+        max_output_bytes=4096,
+    )
+
+    with pytest.raises(KaliRuntimeUnavailableError, match="snapshot target"):
+        asyncio.run(runtime.run(spec))
+
+    assert command_runtime.calls == []
+
+
 def test_kali_startup_error_includes_compose_stdout(tmp_path) -> None:
     snapshot = EngagementSnapshot(
         engagement_id=uuid4(),

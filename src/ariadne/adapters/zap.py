@@ -210,8 +210,17 @@ class ZapAdapter:
             argv=(
                 "zaproxy",
                 "-cmd",
+                "-silent",
                 "-autorun",
                 "/dev/stdin",
+            ),
+            environment=(
+                {
+                    "ARIADNE_ZAP_HTTP_HOST": http_host,
+                    "ARIADNE_ZAP_NETWORK_TARGET": str(context.target.host),
+                }
+                if http_host is not None
+                else {}
             ),
             stdin=yaml_bytes,
             timeout_seconds=timeout,

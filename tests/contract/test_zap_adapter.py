@@ -100,9 +100,14 @@ class TestZapPlan:
         assert spec.argv == (
             "zaproxy",
             "-cmd",
+            "-silent",
             "-autorun",
             "/dev/stdin",
         )
+        assert spec.environment == {
+            "ARIADNE_ZAP_HTTP_HOST": "orion.test",
+            "ARIADNE_ZAP_NETWORK_TARGET": "10.10.10.10",
+        }
         assert spec.stdin is not None
         stdin_text = spec.stdin.decode("utf-8")
         parsed = yaml.safe_load(stdin_text)

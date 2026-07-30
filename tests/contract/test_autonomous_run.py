@@ -107,6 +107,23 @@ class RedirectAliasRuntime(DryRunRuntime):
         raise AssertionError(f"Unexpected executable: {spec.argv[0]}")
 
 
+class ApprovedAliasZapFailureRuntime(RedirectAliasRuntime, ProcessRunner):
+    async def run(self, spec) -> ProcessResult:
+        if spec.argv[0] == "zaproxy":
+            self.calls += 1
+            self.specs.append(spec)
+            return ProcessResult(
+                exit_code=1,
+                stdout=(
+                    "Automation plan failures:\n"
+                    "Job spider failed to access URL http://192.0.2.10:80: "
+                    "orion.test: Name or service not known\n"
+                ),
+                stderr="orion.test: Name or service not known",
+            )
+        return await super().run(spec)
+
+
 class NucleiRuntime(DryRunRuntime):
     async def run(self, spec) -> ProcessResult:
         self.calls += 1
@@ -1220,6 +1237,176 @@ async def test_approved_http_alias_uses_host_header_with_original_network_target
 
 
 @pytest.mark.asyncio
+async def test_approved_alias_is_not_reprompted_when_optional_zap_fails(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    fingerprint = Playbook(
+        id="scope.redirect.v1",
+        version=1,
+        stage="environment_preflight",
+        triggers=(Trigger(kind="engagement_state", types=("snapshot_locked",)),),
+        required_evidence_types=frozenset(),
+        capabilities=frozenset({"web.fingerprint"}),
+        actions=(
+            PlaybookAction(
+                adapter="httpx",
+                operation="scan",
+                inputs={"ports": [80], "timeout": 10, "max_output": 4096},
+            ),
+        ),
+        limits=PlaybookLimits(max_attempts=1, max_duration_seconds=30),
+        stop_conditions=(),
+        success_emits=("web_technologies",),
+        next_playbooks=("web.optional-zap.v1",),
+        report_sections=(),
+    )
+    zap = Playbook(
+        id="web.optional-zap.v1",
+        version=1,
+        stage="environment_preflight",
+        triggers=(Trigger(kind="observation_type", types=("web_technologies",)),),
+        required_evidence_types=frozenset({"web_technologies"}),
+        capabilities=frozenset({"web.passive_scan"}),
+        actions=(
+            PlaybookAction(
+                adapter="zap",
+                operation="passive_scan",
+                inputs={"scan_type": "passive", "timeout": 30, "max_output": 4096},
+            ),
+        ),
+        limits=PlaybookLimits(max_attempts=1, max_duration_seconds=30),
+        stop_conditions=("provider_complete",),
+        success_emits=("zap_passive_alerts",),
+        next_playbooks=(),
+        report_sections=("web",),
+    )
+    fallback = Playbook(
+        id="web.http-fallback.v1",
+        version=1,
+        stage="environment_preflight",
+        triggers=(Trigger(kind="observation_type", types=("web_technologies",)),),
+        required_evidence_types=frozenset({"web_technologies"}),
+        capabilities=frozenset({"web.content_discovery"}),
+        actions=(
+            PlaybookAction(
+                adapter="curl",
+                operation="fetch",
+                inputs={"timeout": 10, "max_output": 4096},
+            ),
+        ),
+        limits=PlaybookLimits(max_attempts=1, max_duration_seconds=30),
+        stop_conditions=("fallback_complete",),
+        success_emits=("web_paths",),
+        next_playbooks=(),
+        report_sections=("web",),
+    )
+    registry = AdapterRegistry()
+    registry.register("httpx", HttpxAdapter())
+    registry.register("zap", ZapAdapter())
+    registry.register("curl", CurlAdapter())
+    runtime = ApprovedAliasZapFailureRuntime()
+    kali_factory_calls: list[tuple[object, Path]] = []
+
+    def kali_factory(snapshot, run_root):
+        kali_factory_calls.append((snapshot, run_root))
+        return runtime
+
+    registry.default_runtime = runtime
+    services = ServiceContainer(
+        profile_name="approved-alias-zap-failure",
+        store=RunStore(base_path=tmp_path),
+        catalog=WorkflowCatalog(
+            playbooks={
+                fingerprint.id: fingerprint,
+                zap.id: zap,
+                fallback.id: fallback,
+            }
+        ),
+        adapter_registry=registry,
+        consent_gateway=AcceptContractAndAmendment(),
+        kali_runtime_factory=kali_factory,
+    )
+    monkeypatch.setattr(
+        "ariadne.hades_adapter.handlers.shutil.which",
+        lambda executable: f"/fixture/{executable}",
+    )
+    object.__setattr__(services, "tool_card_verifier", None)
+    prepare = _handler_for("ariadne_prepare_engagement", services)
+    amend = _handler_for("ariadne_amend_engagement", services)
+    run = _handler_for("ariadne_run", services)
+    created = json.loads(
+        await prepare(
+            {
+                "profile": "private-lab",
+                "target_host": "192.0.2.10",
+                "objectives": ["proof"],
+                "autonomy": "controlled",
+                "intensity": "normal",
+                "exclusions": ["dos"],
+                "time_window_minutes": 30,
+            },
+            session_id="approved-alias-zap-failure-session",
+        )
+    )
+    boundary = json.loads(
+        await run(
+            {"max_steps": 1},
+            session_id="approved-alias-zap-failure-session",
+        )
+    )
+    approved = json.loads(
+        await amend(
+            {
+                "add_targets": ["orion.test"],
+                "candidate_id": boundary["candidate"]["candidate_id"],
+                "reason": "Approve the observed HTTP virtual-host alias.",
+            },
+            session_id="approved-alias-zap-failure-session",
+        )
+    )
+
+    resumed = json.loads(
+        await run(
+            {"max_steps": 3},
+            session_id="approved-alias-zap-failure-session",
+        )
+    )
+
+    assert created["status"] == approved["status"] == "active"
+    assert boundary["boundary"] == "scope_amendment"
+    assert resumed["boundary"] == "safety_step_limit", resumed
+    assert [spec.argv[0] for spec in runtime.specs] == [
+        "httpx-toolkit",
+        "httpx-toolkit",
+        "zaproxy",
+        "curl",
+    ]
+    assert runtime.specs[2].environment == {
+        "ARIADNE_ZAP_HTTP_HOST": "orion.test",
+        "ARIADNE_ZAP_NETWORK_TARGET": "192.0.2.10",
+    }
+    assert len(kali_factory_calls) == 1
+    binding = services.command.get_session_binding("approved-alias-zap-failure-session")
+    assert binding is not None and binding.engagement_id is not None
+    handle = services.store.open(binding.engagement_id)
+    assert handle is not None
+    events = services.store.read_events(handle)
+    assert any(
+        event["event_type"] == "plan_executed"
+        and event["payload"]["playbook_id"] == zap.id
+        and event["payload"]["status"] == "failure"
+        for event in events
+    )
+    assert any(
+        event["event_type"] == "plan_executed"
+        and event["payload"]["playbook_id"] == fallback.id
+        and event["payload"]["status"] == "executed"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
 async def test_persisted_validated_research_injects_target_bound_nuclei_candidate(
     tmp_path,
 ) -> None:
@@ -1608,6 +1795,7 @@ async def test_unavailable_web_provider_falls_back_without_ending_engagement(
         adapter_registry=registry,
         consent_gateway=AcceptContract(),
         tool_card_verifier=_zap_blocked_tool_verifier(tmp_path),
+        kali_runtime_factory=lambda snapshot, run_root: runtime,
     )
     monkeypatch.setattr(
         "ariadne.hades_adapter.handlers.shutil.which",
