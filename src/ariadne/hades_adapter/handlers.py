@@ -1504,19 +1504,6 @@ async def handle_amend_engagement(
     changes = validated.model_dump()
     candidate_id = changes.get("candidate_id", "")
     existing_events = cmd.store.read_events(handle)
-    if candidate_id and any(
-        event.get("event_type") == "scope_candidate_blocked"
-        and event.get("payload", {}).get("candidate_id") == candidate_id
-        for event in existing_events
-    ):
-        return {
-            "status": "blocked",
-            "boundary": "scope_candidate_declined",
-            "message": (
-                "This scope candidate was already declined. Continue with "
-                "alternative in-scope branches."
-            ),
-        }
     candidate_payload = next(
         (
             event.get("payload", {})

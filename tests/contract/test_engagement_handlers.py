@@ -358,7 +358,7 @@ async def test_amendment_freezes_current_policy_provenance(
 
 
 @pytest.mark.asyncio
-async def test_declined_scope_candidate_is_recorded_and_not_reprompted(
+async def test_declined_scope_candidate_can_be_reopened_by_explicit_amendment(
     command: AriadneCommand,
     valid_answers: dict,
 ) -> None:
@@ -368,9 +368,28 @@ async def test_declined_scope_candidate_is_recorded_and_not_reprompted(
         ariadne_command=command,
         consent_gateway=ContractConsent(),
     )
+    binding = command.get_session_binding("decline-session")
+    assert binding is not None and binding.engagement_id is not None
+    handle = command.store.open(binding.engagement_id)
+    assert handle is not None
+    from datetime import UTC, datetime
+
+    command.store.append_event(
+        handle,
+        Event(
+            event_type="scope_candidate_discovered",
+            payload={
+                "candidate_id": "candidate-declined",
+                "target": "orion.test",
+                "source_target": "192.168.2.148",
+                "relation": "redirect",
+            },
+            timestamp=datetime.now(UTC),
+        ),
+    )
     payload = {
-        "add_targets": ["192.168.2.149"],
-        "reason": "Container discovered locally.",
+        "add_targets": ["orion.test"],
+        "reason": "Approve the observed HTTP virtual-host alias.",
         "candidate_id": "candidate-declined",
     }
     declined = await handle_amend_engagement(
@@ -379,7 +398,7 @@ async def test_declined_scope_candidate_is_recorded_and_not_reprompted(
         ariadne_command=command,
         consent_gateway=ContractConsent(ConsentDecision.DECLINE),
     )
-    repeated = await handle_amend_engagement(
+    reopened = await handle_amend_engagement(
         payload,
         session_id="decline-session",
         ariadne_command=command,
@@ -387,7 +406,25 @@ async def test_declined_scope_candidate_is_recorded_and_not_reprompted(
     )
 
     assert declined["boundary"] == "amendment_declined"
-    assert repeated["boundary"] == "scope_candidate_declined"
+    assert reopened["status"] == "active"
+    binding = command.get_session_binding("decline-session")
+    assert binding is not None and binding.engagement_id is not None
+    handle = command.store.open(binding.engagement_id)
+    assert handle is not None
+    events = command.store.read_events(handle)
+    assert any(
+        event["event_type"] == "scope_candidate_blocked"
+        and event["payload"]["candidate_id"] == "candidate-declined"
+        for event in events
+    )
+    assert any(
+        event["event_type"] == "scope_alias_approved"
+        and event["payload"]["candidate_id"] == "candidate-declined"
+        and event["payload"]["network_target"] == "192.168.2.148"
+        and event["payload"]["http_host"] == "orion.test"
+        for event in events
+    )
+    assert [target.host for target in handle.snapshot.targets] == ["192.168.2.148"]
 
 
 class FailSecondEventStore(RunStore):
