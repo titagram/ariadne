@@ -202,6 +202,40 @@ class BuiltinProgressionRuntime(DryRunRuntime):
         raise AssertionError(f"Unexpected executable: {spec.argv[0]}")
 
 
+class FilteredDiscoveryRuntime(DryRunRuntime):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.argv_calls: list[tuple[str, ...]] = []
+
+    async def run(self, spec) -> ProcessResult:
+        self.calls += 1
+        self.argv_calls.append(tuple(spec.argv))
+        if spec.argv[0] == "ping":
+            return ProcessResult(
+                exit_code=1,
+                stdout=(
+                    "PING 192.0.2.10: 56 data bytes\n"
+                    "1 packets transmitted, 0 packets received, "
+                    "100.0% packet loss"
+                ),
+                stderr="",
+            )
+        if spec.argv[0] == "nmap":
+            return ProcessResult(
+                exit_code=0,
+                stdout=(
+                    '<?xml version="1.0"?><nmaprun><host>'
+                    '<address addr="192.0.2.10" addrtype="ipv4"/>'
+                    '<ports><extraports state="filtered" count="200">'
+                    '<extrareasons reason="no-response" count="200" '
+                    'proto="tcp" ports="1-200"/>'
+                    "</extraports></ports></host></nmaprun>"
+                ),
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected executable: {spec.argv[0]}")
+
+
 class ProviderFallbackRuntime(ProcessRunner):
     def __init__(self) -> None:
         self.argv_calls: list[tuple[str, ...]] = []
@@ -523,6 +557,76 @@ def test_common_exclusion_aliases_block_the_matching_workflow_branch(
     )
 
     assert _exclusion_conflict(playbook, (exclusion,)) == exclusion
+
+
+@pytest.mark.asyncio
+async def test_filtered_tcp_discovery_stops_without_repeating_the_playbook(
+    tmp_path: Path,
+) -> None:
+    runtime = FilteredDiscoveryRuntime()
+    registry = AdapterRegistry()
+    registry.register("research", ResearchAdapter())
+    registry.register("nmap", NmapAdapter())
+    registry.default_runtime = runtime
+    services = ServiceContainer(
+        profile_name="filtered-discovery",
+        store=RunStore(base_path=tmp_path),
+        catalog=WorkflowCatalog.load(Path(__file__).parents[2] / "workflows"),
+        adapter_registry=registry,
+        consent_gateway=AcceptContract(),
+    )
+    object.__setattr__(services, "tool_card_verifier", None)
+    prepare = _handler_for("ariadne_prepare_engagement", services)
+    run = _handler_for("ariadne_run", services)
+
+    created = json.loads(
+        await prepare(
+            {
+                "profile": "htb",
+                "target_host": "192.0.2.10",
+                "objectives": ["user_flag", "root_flag"],
+                "autonomy": "full",
+                "intensity": "normal",
+                "exclusions": ["dos", "resource exhaustion"],
+                "time_window_minutes": 30,
+            },
+            session_id="filtered-discovery-session",
+        )
+    )
+    result = json.loads(
+        await run(
+            {"max_steps": 3},
+            session_id="filtered-discovery-session",
+        )
+    )
+    binding = services.command.get_session_binding("filtered-discovery-session")
+    assert binding is not None and binding.engagement_id is not None
+    handle = services.store.open(binding.engagement_id)
+    assert handle is not None
+    events = services.store.read_events(handle)
+    event_summary = [
+        (
+            event["event_type"],
+            event["payload"].get("playbook_id"),
+            event["payload"].get("status"),
+            event["payload"].get("evidence_type"),
+            event["payload"].get("execution_classification"),
+        )
+        for event in events
+        if event["event_type"] in {"plan_executed", "evidence_collected"}
+    ]
+
+    assert created["status"] == "active"
+    assert result["status"] == "blocked"
+    assert result["boundary"] == "target_unreachable", repr(event_summary)
+    assert "No eligible playbooks" not in result["message"]
+    assert sum(call[0] == "nmap" for call in runtime.argv_calls) == 1
+    assert any(
+        event["event_type"] == "evidence_collected"
+        and event["payload"]["evidence_type"] == "port_filtered"
+        and event["payload"]["observation_data"]["filtered_count"] == 200
+        for event in events
+    )
 
 
 @pytest.mark.asyncio

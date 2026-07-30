@@ -1925,6 +1925,20 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 ),
                 "plan_id": "",
             }
+        if (
+            last_routing_playbook == "network.tcp-discovery.v1"
+            and any(observation.source == "port_filtered" for observation in observations)
+            and not any(observation.source == "port_open" for observation in observations)
+        ):
+            return {
+                "status": "blocked",
+                "boundary": "target_unreachable",
+                "message": (
+                    "TCP discovery completed with no open ports; the target "
+                    "is unreachable or filtering the authorized probes."
+                ),
+                "plan_id": "",
+            }
         if last_routing_playbook is not None and provider_fallback_needed:
             return {
                 "status": "blocked",

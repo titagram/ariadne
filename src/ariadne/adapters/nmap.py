@@ -83,6 +83,38 @@ def _parse_nmap_xml(stdout: str, source: str = "nmap") -> list[Observation]:
         if ports_elem is None:
             continue
 
+        if source == "port_open":
+            for extraports_elem in ports_elem.findall("extraports"):
+                if extraports_elem.get("state") != "filtered":
+                    continue
+                try:
+                    filtered_count = int(extraports_elem.get("count", "0"))
+                except (TypeError, ValueError):
+                    continue
+                if filtered_count <= 0:
+                    continue
+                reason_elem = extraports_elem.find("extrareasons")
+                data: dict[str, object] = {
+                    "state": "filtered",
+                    "filtered_count": filtered_count,
+                }
+                if reason_elem is not None:
+                    for key in ("reason", "proto", "ports"):
+                        value = reason_elem.get(key)
+                        if value:
+                            data[key] = value
+
+                from ariadne.core.engagement import TargetSpec
+
+                observations.append(
+                    Observation(
+                        observation_id=uuid4(),
+                        target=TargetSpec(host=host_str),
+                        source="port_filtered",
+                        data=data,
+                    )
+                )
+
         for port_elem in ports_elem.findall("port"):
             protocol = port_elem.get("protocol", "")
             port_id_str = port_elem.get("portid", "")
@@ -278,10 +310,28 @@ class NmapAdapter:
                 summary=f"Nmap exited with code {result.exit_code}",
             )
         if len(observations) > 0:
+            open_ports = sum(
+                observation.data.get("state") == "open"
+                for observation in observations
+            )
+            if open_ports == 0:
+                filtered_ports = sum(
+                    int(observation.data.get("filtered_count", 0))
+                    for observation in observations
+                    if observation.source == "port_filtered"
+                )
+                return ExecutionClassification(
+                    kind="success",
+                    confidence=0.9,
+                    summary=(
+                        "Nmap completed with no open ports; "
+                        f"{filtered_ports} ports were filtered"
+                    ),
+                )
             return ExecutionClassification(
                 kind="success",
                 confidence=0.9,
-                summary=f"Discovered {len(observations)} open ports",
+                summary=f"Discovered {open_ports} open ports",
             )
         return ExecutionClassification(
             kind="unknown",
