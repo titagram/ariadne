@@ -1183,6 +1183,43 @@ def _observed_fetched_web_asset(
     )
 
 
+def _observed_unfetched_web_endpoint(
+    observations: tuple[Observation, ...],
+    target: TargetSpec,
+) -> str | None:
+    """Return one observed, same-host endpoint not fetched yet.
+
+    Static assets are handled by ``web.asset-analysis.v1``.  This helper
+    keeps the next request evidence-derived and bounded to a route already
+    observed by a successful target-bound response.
+    """
+    candidates: list[str] = []
+    for observation in reversed(observations):
+        if observation.target != target or observation.data.get("fetched") is not False:
+            continue
+        value = observation.data.get("url")
+        path = observation.data.get("path")
+        if not isinstance(value, str) or not isinstance(path, str):
+            continue
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.hostname.casefold() != target.host.casefold()
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or path == "/"
+            or path.casefold().endswith((".js", ".json", ".map", ".xml"))
+        ):
+            continue
+        if value not in candidates:
+            candidates.append(value)
+        if len(candidates) == 4:
+            break
+    return candidates[0] if candidates else None
+
+
 def _observed_object_reference_urls(
     observations: tuple[Observation, ...],
     target: TargetSpec,
@@ -1899,6 +1936,10 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         observations,
         first_target,
     )
+    unfetched_web_endpoint = _observed_unfetched_web_endpoint(
+        observations,
+        first_target,
+    )
     pending_capture_url = _observed_unfetched_capture_url(
         observations,
         first_target,
@@ -1920,11 +1961,19 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             or (playbook.id == "web.http-fallback.v1" and pending_capture_url is not None)
             or (playbook.id == "web.object-reference.v1" and bool(object_reference_urls))
             or (
+                playbook.id == "web.observed-endpoint.v1"
+                and unfetched_web_endpoint is not None
+            )
+            or (
                 playbook.id == "web.asset-analysis.v1"
                 and not _observed_fetched_web_asset(observations, first_target)
             )
         )
         and (playbook.id != "web.object-reference.v1" or bool(object_reference_urls))
+        and (
+            playbook.id != "web.observed-endpoint.v1"
+            or unfetched_web_endpoint is not None
+        )
         and (
             playbook.id != "foothold.ssh-credentials.v1"
             or _observed_ssh_port(observations, first_target) is not None
@@ -2075,6 +2124,47 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             "message": "Static asset analysis requires an observed same-host asset URL.",
             "plan_id": "",
         }
+
+    if any(
+        action.adapter == "curl"
+        and action.operation == "fetch"
+        and action.inputs.get("path_from_evidence") == "observed_endpoint"
+        and not action.inputs.get("url")
+        for action in plan.actions
+    ):
+        if unfetched_web_endpoint is None:
+            return {
+                "status": "blocked",
+                "boundary": "missing_evidence",
+                "message": (
+                    "Observed endpoint probing requires a same-host route "
+                    "that has not already been fetched."
+                ),
+                "plan_id": "",
+            }
+        plan = plan.model_copy(
+            update={
+                "actions": tuple(
+                    action.model_copy(
+                        update={
+                            "inputs": {
+                                **action.inputs,
+                                "url": unfetched_web_endpoint,
+                            },
+                        }
+                    )
+                    if (
+                        action.adapter == "curl"
+                        and action.operation == "fetch"
+                        and action.inputs.get("path_from_evidence")
+                        == "observed_endpoint"
+                        and not action.inputs.get("url")
+                    )
+                    else action
+                    for action in plan.actions
+                ),
+            }
+        )
 
     if any(
         action.adapter == "research"

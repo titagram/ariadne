@@ -253,6 +253,7 @@
   next_playbooks:
     - web.object-reference.v1
     - web.asset-analysis.v1
+    - web.observed-endpoint.v1
     - web.nuclei-selected.v1
   report_sections:
     - "web"
@@ -295,6 +296,51 @@
     - "web_parameters"
   next_playbooks:
     - web.asset-analysis.v1
+    - web.observed-endpoint.v1
+    - web.object-reference.v1
+    - web.nuclei-selected.v1
+  report_sections:
+    - "web"
+
+# Fetch one non-static endpoint already observed in a target-bound response.
+# This is deliberately narrower than directory fuzzing: no new path is
+# invented, and each route is requested at most once while it is pending.
+- id: web.observed-endpoint.v1
+  version: 1
+  stage: enumeration
+  triggers:
+    - kind: observation_type
+      types: ["web_paths"]
+  required_evidence_types:
+    - "web_paths"
+  capabilities:
+    - web.content_discovery
+  actions:
+    - adapter: curl
+      operation: fetch
+      inputs:
+        path_from_evidence: "observed_endpoint"
+        timeout: 15
+        max_output: 1048576
+        tool_card:
+          title: "curl"
+          official_source_url: "https://curl.se/docs/manpage.html"
+          source_date: "2026-07-30"
+          summary: "Official curl client used to inspect one observed endpoint."
+  limits:
+    max_rate: 1
+    max_concurrency: 1
+    max_attempts: 1
+    max_duration_seconds: 30
+    max_output_bytes: 1048576
+  stop_conditions:
+    - "observed_endpoint_checked"
+    - "target_unreachable"
+  success_emits:
+    - "web_paths"
+    - "web_parameters"
+  next_playbooks:
+    - web.observed-endpoint.v1
     - web.object-reference.v1
     - web.nuclei-selected.v1
   report_sections:
