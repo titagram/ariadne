@@ -150,7 +150,7 @@ class KatanaAdapter:
             "-cs",
             scope_regex,
             "-kf",
-            "robotstxt,sitemapxml",
+            "all",
             "-jc",
             "-fx",
             "-xhr",

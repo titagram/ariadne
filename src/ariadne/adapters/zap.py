@@ -165,6 +165,11 @@ class ZapAdapter:
 
         # Serialize to YAML for stdin
         yaml_bytes = yaml.dump(plan, default_flow_style=False).encode("utf-8")
+        requested_timeout = int(inputs.get("timeout", 600))  # type: ignore[arg-type]
+        timeout = min(
+            requested_timeout,
+            context.limits.max_duration_seconds or requested_timeout,
+        )
 
         return ProcessSpec(
             argv=(
@@ -174,7 +179,7 @@ class ZapAdapter:
                 "/dev/stdin",
             ),
             stdin=yaml_bytes,
-            timeout_seconds=int(inputs.get("timeout", 600)),  # type: ignore[arg-type]
+            timeout_seconds=timeout,
             max_output_bytes=int(inputs.get("max_output", 10 * 1024 * 1024)),  # type: ignore[arg-type]
         )
 

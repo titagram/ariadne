@@ -762,7 +762,7 @@ class GuardedRuntime:
             or not 1 <= timeout <= 30
             or retries != 1
             or parsed["-cs"] != expected_scope
-            or parsed["-kf"] != "robotstxt,sitemapxml"
+            or parsed["-kf"] != "all"
         ):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         return rate, concurrency

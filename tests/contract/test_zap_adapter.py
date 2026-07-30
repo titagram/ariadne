@@ -19,6 +19,7 @@ from ariadne.adapters.base import (
 from ariadne.adapters.zap import ZapAdapter
 from ariadne.core.engagement import TargetSpec
 from ariadne.core.errors import AdapterError
+from ariadne.core.workflow import PlaybookLimits
 from ariadne.runtime.process import ProcessResult
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -119,8 +120,11 @@ class TestZapPlan:
     def test_sets_bounded_timeout_and_output(
         self, context: AdapterContext
     ) -> None:
-        spec = ZapAdapter().plan(action("passive_scan"), context)
-        assert 1 <= spec.timeout_seconds <= 3600
+        bounded_context = context.model_copy(
+            update={"limits": PlaybookLimits(max_duration_seconds=180)}
+        )
+        spec = ZapAdapter().plan(action("passive_scan"), bounded_context)
+        assert spec.timeout_seconds == 180
         assert spec.max_output_bytes >= 1024
 
     def test_active_scan_rejects_random_paths_without_policy(

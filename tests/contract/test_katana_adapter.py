@@ -43,6 +43,7 @@ def test_katana_builds_a_bounded_target_scoped_crawl_and_parses_endpoints() -> N
     assert spec.argv[spec.argv.index("-d") + 1] == "3"
     assert spec.argv[spec.argv.index("-ct") + 1] == "60s"
     assert spec.argv[spec.argv.index("-mdp") + 1] == "100"
+    assert spec.argv[spec.argv.index("-kf") + 1] == "all"
     assert "-jsonl" in spec.argv
     assert "-duc" in spec.argv
     assert spec.timeout_seconds == 75
