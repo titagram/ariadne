@@ -143,10 +143,10 @@ class DossierBuilder:
                 ("remediation", "description", "summary"),
                 resolved_options,
             ),
-            compromised=self._event_texts(
+            compromised=self._build_compromised(
                 events,
-                {"initial_access", "access_validated", "host_compromised"},
-                ("description", "summary", "target", "asset", "user"),
+                attack_steps,
+                target_hosts,
                 resolved_options,
             ),
             lessons=self._event_texts(
@@ -218,6 +218,8 @@ class DossierBuilder:
                         payload, "evidence_type", options,
                     ),
                     finding_id=self._optional_sanitized(payload, "finding_id", options),
+                    caption=self._evidence_caption(payload),
+                    excerpt=self._evidence_excerpt(content, options),
             )
         return tuple(collected.values())
 
@@ -339,6 +341,8 @@ class DossierBuilder:
                 sanitized = self._sanitize(command, options)
                 if sanitized and sanitized not in values:
                     values.append(sanitized)
+            if len(values) > 2:
+                return (values[0], values[-1])
             return tuple(values)
 
         ports = observations("port_open")
@@ -602,6 +606,48 @@ class DossierBuilder:
                 "evidence": (),
             })
 
+        artifact_timestamps: dict[str, str] = {}
+        for event in event_list:
+            payload = event.get("payload")
+            timestamp = event.get("timestamp")
+            if (
+                event.get("event_type") == "evidence_collected"
+                and isinstance(payload, dict)
+                and isinstance(payload.get("artifact"), str)
+                and isinstance(timestamp, str)
+            ):
+                artifact_timestamps.setdefault(payload["artifact"], timestamp)
+        cleanup_timestamp = next(
+            (
+                str(event["timestamp"])
+                for event in reversed(event_list)
+                if event.get("event_type") == "cleanup_completed"
+                and event.get("timestamp")
+            ),
+            "",
+        )
+        fallback_timestamp = next(
+            (
+                str(event["timestamp"])
+                for event in event_list
+                if event.get("timestamp")
+            ),
+            "persisted-order",
+        )
+        for draft in drafts:
+            draft["timestamp"] = next(
+                (
+                    artifact_timestamps[name]
+                    for name in draft["evidence"]
+                    if name in artifact_timestamps
+                ),
+                cleanup_timestamp or fallback_timestamp,
+            )
+            draft["interpretation"] = self._attack_step_interpretation(
+                str(draft["phase"]),
+                str(draft["action"]),
+            )
+
         return tuple(
             AttackStep(
                 step_id=f"step-{index:02d}",
@@ -775,7 +821,14 @@ class DossierBuilder:
                     "Authenticated unprivileged local access.",
                     "Execution permission on the capability-enabled interpreter.",
                 ),
-                procedure=step_ids("enumeration", "privilege_escalation"),
+                procedure=tuple(
+                    step.step_id
+                    for step in attack_steps
+                    if (
+                        "capabilities" in step.action.casefold()
+                        or step.phase == "privilege_escalation"
+                    )
+                ),
                 impact=(
                     "Any local user able to execute the interpreter can obtain root "
                     "privileges and access root-owned data."
@@ -792,6 +845,150 @@ class DossierBuilder:
             ))
 
         return tuple(findings)
+
+    @staticmethod
+    def _evidence_caption(payload: dict[str, Any]) -> str:
+        """Return a concise human label without inventing artifact content."""
+        evidence_type = str(payload.get("evidence_type") or "evidence")
+        observation = payload.get("observation_data")
+        observation_type = (
+            str(observation.get("type") or "")
+            if isinstance(observation, dict)
+            else ""
+        )
+        artifact = str(payload.get("artifact") or "")
+        if artifact.endswith(".download"):
+            return "Verified packet-capture artifact"
+        if observation_type in {"linux_host_info", "host_info_collected"}:
+            return "Foothold identity enumeration"
+        if observation_type == "privilege_escalation":
+            return "Linux file-capability enumeration"
+        if observation_type == "privesc_path_identified":
+            return "EUID 0 privilege proof"
+        labels = {
+            "preflight_passed": "Preflight and authorization boundary evidence",
+            "port_open": "TCP service discovery transcript",
+            "service_fingerprinted": "Service fingerprint transcript",
+            "protocol_routed": "Protocol routing decision",
+            "research_complete": "Version-bound vulnerability research",
+            "exploit_candidate": "Exploit candidate research",
+            "httpx": "HTTP endpoint probe",
+            "web_technologies": "Web technology fingerprint",
+            "web_title": "HTTP title observation",
+            "curl": "Bounded HTTP request transcript",
+            "web_paths": "Same-host web path enumeration",
+            "web_object_reference": "Numeric object-reference validation",
+            "web_artifact": "Verified packet-capture download metadata",
+            "credential_material": "PCAP credential analysis (values redacted)",
+            "foothold_established": "Authenticated SSH foothold verification",
+            "linux_host_info": "Foothold identity enumeration",
+            "host_info_collected": "Host identity evidence",
+            "postex": "Local privilege-escalation evidence",
+        }
+        return labels.get(
+            evidence_type,
+            evidence_type.replace("_", " ").strip().title() or "Evidence artifact",
+        )
+
+    def _evidence_excerpt(
+        self,
+        content: bytes,
+        options: ReportOptions,
+    ) -> str | None:
+        """Return a bounded, redacted text preview for a report caption."""
+        if not content or b"\x00" in content[:2048]:
+            return None
+        try:
+            decoded = content.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        compact = "\n".join(
+            line.rstrip()
+            for line in decoded.splitlines()
+            if line.strip()
+        ).strip()
+        if not compact:
+            return None
+        sanitized = self._sanitize(compact, options)
+        if len(sanitized) > 480:
+            return sanitized[:477].rstrip() + "..."
+        return sanitized
+
+    @staticmethod
+    def _attack_step_interpretation(phase: str, action: str) -> str:
+        """Explain why an observed step justified the next evidence-driven step."""
+        normalized = action.casefold()
+        if phase == "discovery":
+            return (
+                "The reachable services established the bounded attack surface and "
+                "justified protocol-specific enumeration."
+            )
+        if "fingerprint" in normalized:
+            return (
+                "The observed HTTP stack made same-host content enumeration the "
+                "next proportionate action."
+            )
+        if "web content" in normalized:
+            return (
+                "Crawler outcomes were kept distinct from findings; the bounded "
+                "fallback preserved coverage without changing scope."
+            )
+        if "object reference" in normalized:
+            return (
+                "Successful retrieval linked predictable object access to a real "
+                "sensitive artifact, supporting a validated data-exposure finding."
+            )
+        if "pcap" in normalized:
+            return (
+                "Plaintext authentication material converted the exposed capture "
+                "from passive disclosure into a target-bound access hypothesis."
+            )
+        if "authenticate to ssh" in normalized:
+            return (
+                "Successful authentication proved credential reuse and established "
+                "the unprivileged foothold required for local enumeration."
+            )
+        if "capabilities" in normalized:
+            return (
+                "A general-purpose cap_setuid interpreter crossed a local privilege "
+                "boundary and justified a minimal EUID verification."
+            )
+        if phase == "privilege_escalation":
+            return (
+                "Observed EUID 0 and the root-objective proof established full target "
+                "compromise without requiring persistence."
+            )
+        if phase == "cleanup":
+            return (
+                "The run retained only local evidence and recorded the final cleanup "
+                "state after both objectives were addressed."
+            )
+        return "This persisted result determined the next evidence-driven action."
+
+    def _build_compromised(
+        self,
+        events: Iterable[dict[str, Any]],
+        attack_steps: tuple[AttackStep, ...],
+        target_hosts: tuple[str, ...],
+        options: ReportOptions,
+    ) -> tuple[str, ...]:
+        """Summarize proven access from lifecycle events and semantic steps."""
+        values = list(self._event_texts(
+            events,
+            {"initial_access", "access_validated", "host_compromised"},
+            ("description", "summary", "target", "asset", "user"),
+            options,
+        ))
+        target = target_hosts[0] if target_hosts else "in-scope target"
+        if any("ssh foothold" in step.result.casefold() for step in attack_steps):
+            values.append(f"{target}: authenticated SSH foothold (unprivileged).")
+        if any(
+            step.phase == "privilege_escalation"
+            and "euid 0" in step.result.casefold()
+            for step in attack_steps
+        ):
+            values.append(f"{target}: root control proven by observed EUID 0.")
+        return tuple(dict.fromkeys(values))
 
     def _build_objectives(
         self,

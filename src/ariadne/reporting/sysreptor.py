@@ -60,6 +60,8 @@ class SysReptorEvidence(BaseModel):
     path: Path
     sha256: str
     size_bytes: int
+    caption: str
+    evidence_type: str | None = None
 
 
 class SysReptorReport(BaseModel):
@@ -145,6 +147,8 @@ class SysReptorReport(BaseModel):
                     path=item.path,
                     sha256=item.sha256,
                     size_bytes=item.size_bytes,
+                    caption=item.caption,
+                    evidence_type=item.evidence_type,
                 )
                 for item in dossier.evidence
             ],
@@ -297,7 +301,7 @@ class SysReptorExporter:
             sort_keys=True,
             indent=2,
             ensure_ascii=False,
-        ).encode("utf-8")
+        ).encode()
         project_path.write_bytes(project_bytes)
         project_path.chmod(0o600)
 
@@ -314,8 +318,8 @@ class SysReptorExporter:
             destination.chmod(0o600)
 
         finding_entries: dict[str, bytes] = {}
-        for finding in pushproject["findings"]:
-            finding_id = str(finding["data"]["finding_id"])
+        for index, finding in enumerate(pushproject["findings"]):
+            finding_id = report.findings[index].finding_id
             entry = f"findings/{finding_id}.json"
             content = json.dumps(
                 finding,
@@ -328,6 +332,84 @@ class SysReptorExporter:
 
         mapping_bytes = self._read_mapping()
         checksums["mapping.yaml"] = _sha256_bytes(mapping_bytes)
+        evidence_manifest_bytes = json.dumps(
+            {
+                "attachments": [
+                    {
+                        "filename": asset.filename,
+                        "bundle_path": f"evidence/{asset.filename}",
+                        "caption": asset.caption,
+                        "evidence_type": asset.evidence_type,
+                        "sha256": asset.sha256,
+                        "size_bytes": asset.size_bytes,
+                    }
+                    for asset, _ in real_assets.values()
+                ],
+            },
+            sort_keys=True,
+            indent=2,
+            ensure_ascii=False,
+        ).encode("utf-8")
+        design_contract_bytes = json.dumps(
+            {
+                "format": "reptor-pushproject",
+                "design": "SysReptor Demo Calzone v1.2 field contract",
+                "documentation": (
+                    "https://docs.sysreptor.com/cli/projects-and-templates/"
+                    "pushproject"
+                ),
+                "report_fields": {
+                    f"{section['id']}.{key}": (
+                        "date" if key == "report_date" else "string"
+                    )
+                    for section in pushproject["sections"]
+                    for key in sorted(section["data"])
+                },
+                "finding_fields": {
+                    key: (
+                        "list[string]"
+                        if key == "affected_components"
+                        else "cvss"
+                        if key == "cvss"
+                        else "number"
+                        if key == "cvss_score"
+                        else "string"
+                    )
+                    for key in sorted({
+                        key
+                        for finding in pushproject["findings"]
+                        for key in finding["data"]
+                    })
+                },
+                "attachment_import": "reptor file",
+            },
+            sort_keys=True,
+            indent=2,
+            ensure_ascii=False,
+        ).encode("utf-8")
+        import_instructions_text = (
+            "# Ariadne SysReptor offline import\n\n"
+            "This bundle contains a `reptor pushproject` document and the real, "
+            "hash-verified dossier artifacts. It performs no network push.\n\n"
+            "1. Select or create a SysReptor project whose design exposes the "
+            "field IDs in `design-contract.json`.\n"
+            "2. Configure `reptor` with that project ID.\n"
+            "3. Import report sections and findings:\n\n"
+            "   `cat pushproject.json | reptor pushproject`\n\n"
+            "4. Upload the real evidence files to an Evidence note:\n\n"
+            "   `reptor file evidence/*`\n\n"
+            "5. Verify uploaded files against `evidence-manifest.json` and "
+            "`manifest.json`. The pushproject step does not upload attachments; "
+            "the separate file step is required.\n\n"
+            "No SysReptor PDF is present unless an actual instance imported the "
+            "project and rendered it.\n"
+        )
+        import_instructions = import_instructions_text.encode()
+        checksums.update({
+            "evidence-manifest.json": _sha256_bytes(evidence_manifest_bytes),
+            "design-contract.json": _sha256_bytes(design_contract_bytes),
+            "IMPORT.md": _sha256_bytes(import_instructions),
+        })
         manifest = BundleManifest(
             version="2.0-pushproject",
             finding_count=len(report.findings),
@@ -340,6 +422,9 @@ class SysReptorExporter:
             archive.writestr("pushproject.json", project_bytes)
             archive.writestr("project.json", project_bytes)
             archive.writestr("mapping.yaml", mapping_bytes)
+            archive.writestr("evidence-manifest.json", evidence_manifest_bytes)
+            archive.writestr("design-contract.json", design_contract_bytes)
+            archive.writestr("IMPORT.md", import_instructions)
             for entry, content in finding_entries.items():
                 archive.writestr(entry, content)
             for asset, content in real_assets.values():
@@ -390,7 +475,10 @@ class SysReptorExporter:
         narrative_lines: list[str] = []
         for index, step in enumerate(report.attack_steps, start=1):
             narrative_lines.extend((
-                f"### {index}. {step.get('phase', 'activity')}",
+                (
+                    f"### {index}. {step.get('phase', 'activity')} "
+                    f"({step.get('timestamp', 'persisted order')})"
+                ),
                 f"Action: {step.get('action')}",
                 f"Input: {step.get('input')}",
             ))
@@ -409,6 +497,7 @@ class SysReptorExporter:
                 )
             narrative_lines.extend((
                 f"Result: {step.get('result')}",
+                f"Interpretation: {step.get('interpretation')}",
                 "Evidence: "
                 + ", ".join(
                     f"`{name}`" for name in (step.get("evidence") or [])
@@ -435,79 +524,173 @@ class SysReptorExporter:
             for target in report.targets
             if isinstance(target, dict) and target.get("host")
         ]
+        completed_kinds = {
+            str(objective.get("kind"))
+            for objective in report.objectives
+            if objective.get("completed")
+        }
+        full_ctf_compromise = (
+            report.profile in {"htb", "ctf"}
+            and {"user_flag", "root_flag"} <= completed_kinds
+        )
+        executive_summary = (
+            (
+                f"The authorized {report.profile.upper()} assessment of "
+                f"{', '.join(targets)} achieved both persisted CTF objectives: "
+                "user-level access and root-level control. The evidence-backed "
+                "path progressed through exposed packet-capture data, plaintext "
+                "credential recovery, SSH access, and capability-based local "
+                "privilege escalation. "
+            )
+            if full_ctf_compromise
+            else (
+                f"The authorized assessment of {', '.join(targets)} produced "
+                "the evidence-backed results below. "
+            )
+        ) + f"{len(report.findings)} validated technical finding(s) were recorded."
         section_data: dict[str, Any] = {
             "title": f"Ariadne {report.profile.upper()} penetration test report",
             "engagement_id": report.engagement_id,
             "report_date": report.generated_at or "persisted engagement time",
-            "scope": targets,
-            "objectives": objective_lines,
-            "executive_summary": (
-                f"The evidence-backed engagement produced {len(report.findings)} "
-                "validated technical finding(s)."
-            ),
+            "scope": "\n".join(f"- `{target}`" for target in targets),
+            "objectives": "\n".join(objective_lines),
+            "executive_summary": executive_summary,
             "attack_narrative": "\n\n".join(narrative_lines),
-            "limitations": report.limitations or [
-                "Only persisted evidence was used.",
-                "No screenshots were acquired during this run.",
-            ],
-            "cleanup": report.cleanup,
+            "limitations": "\n".join(
+                f"- {item}"
+                for item in (
+                    report.limitations or [
+                        "Only persisted evidence was used.",
+                        "No screenshots were acquired during this run.",
+                    ]
+                )
+            ),
+            "cleanup": "\n".join(f"- {item}" for item in report.cleanup),
             "objective_evidence": "\n".join(objective_lines),
-            "evidence_attachments": [
-                {
-                    "filename": asset.filename,
-                    "sha256": asset.sha256,
-                    "size_bytes": asset.size_bytes,
-                    "bundle_path": f"evidence/{asset.filename}",
-                }
+            "evidence_attachments": "\n".join(
+                f"- `{asset.filename}` — {asset.caption}; "
+                f"SHA-256 `{asset.sha256}`"
                 for asset in attachments.values()
-            ],
+            ),
         }
         section_data = {
             key: value
             for key, value in section_data.items()
             if value not in (None, "", [], {})
         }
+        executive_markdown = "\n\n".join((
+            section_data["executive_summary"],
+            "## Methodology\n"
+            "Evidence-driven reconnaissance, enumeration, controlled "
+            "exploitation, foothold validation, local enumeration, privilege "
+            "escalation, objective proof, and cleanup.",
+            "## Objectives\n" + section_data.get("objective_evidence", ""),
+            "## Attack path\n" + section_data.get("attack_narrative", ""),
+            "## Limitations\n" + section_data.get("limitations", ""),
+            "## Cleanup\n" + (
+                section_data.get("cleanup")
+                or "No cleanup statement was persisted."
+            ),
+            "## Evidence attachments\n"
+            + section_data.get("evidence_attachments", ""),
+        ))
+        sections = [
+            {
+                "id": "executive_summary",
+                "status": "finished",
+                "data": {"executive_summary": executive_markdown},
+            },
+            {
+                "id": "scope",
+                "status": "finished",
+                "data": {"scope": section_data["scope"]},
+            },
+            {
+                "id": "other",
+                "status": "finished",
+                "data": {
+                    "title": section_data["title"],
+                    "report_date": str(section_data["report_date"])[:10],
+                    "report_version": "1.0",
+                },
+            },
+        ]
 
         findings: list[dict[str, Any]] = []
         for finding in report.findings:
-            attached = [
-                attachments[name]
-                for name in finding.evidence
-                if name in attachments
-            ]
             evidence_markdown = "\n".join(
                 (
                     f"- `{name}`"
                     + (
-                        f" (SHA-256 `{attachments[name].sha256}`)"
+                        f" — {attachments[name].caption} "
+                        f"(SHA-256 `{attachments[name].sha256}`)"
                         if name in attachments
                         else ""
                     )
                 )
                 for name in finding.evidence
             )
+            reproduction_steps = [
+                "\n".join(
+                    value
+                    for value in (
+                        str(step.get("action") or ""),
+                        (
+                            "Prerequisite: "
+                            + "; ".join(step.get("prerequisites") or [])
+                            if step.get("prerequisites")
+                            else ""
+                        ),
+                        f"Input: {step.get('input')}",
+                        (
+                            "Command / action: "
+                            + " ; ".join(step.get("commands") or [])
+                            if step.get("commands")
+                            else "Command / action: persisted transition"
+                        ),
+                        f"Result: {step.get('result')}",
+                        f"Interpretation: {step.get('interpretation')}",
+                    )
+                    if value
+                )
+                for step_id in finding.procedure
+                for step in report.attack_steps
+                if step.get("step_id") == step_id
+            ]
+            detail_markdown = "\n\n".join((
+                f"**Finding ID:** `{finding.finding_id}`",
+                "## Prerequisites\n" + (
+                    "\n".join(f"- {item}" for item in finding.prerequisites)
+                    or "No additional prerequisites were persisted."
+                ),
+                "## Reproduction\n" + (
+                    "\n\n".join(
+                        f"{index}. {step}"
+                        for index, step in enumerate(reproduction_steps, start=1)
+                    )
+                    or "No reproducible procedure was persisted."
+                ),
+                "## Evidence\n" + (
+                    evidence_markdown or "No separate artifact was linked."
+                ),
+                "## Impact\n" + (
+                    finding.impact or "No additional impact was persisted."
+                ),
+                f"## Classification\n{finding.cwe or 'CWE not assigned.'}",
+            ))
             data: dict[str, Any] = {
-                "finding_id": finding.finding_id,
                 "title": finding.title,
                 "cvss": finding.cvss_vector,
-                "cvss_score": finding.cvss_score,
-                "summary": finding.description,
-                "description": finding.description,
+                "summary": "\n\n".join(
+                    item
+                    for item in (
+                        finding.description,
+                        f"**Impact:** {finding.impact}" if finding.impact else None,
+                    )
+                    if item
+                ),
+                "description": detail_markdown,
                 "affected_components": finding.affected_assets,
-                "prerequisites": finding.prerequisites,
-                "steps_to_reproduce": finding.procedure,
-                "impact": finding.impact,
-                "cwe": finding.cwe,
-                "evidence": evidence_markdown,
-                "evidence_attachments": [
-                    {
-                        "filename": asset.filename,
-                        "sha256": asset.sha256,
-                        "size_bytes": asset.size_bytes,
-                        "bundle_path": f"evidence/{asset.filename}",
-                    }
-                    for asset in attached
-                ],
                 "recommendation": finding.remediation,
             }
             findings.append({
@@ -524,7 +707,7 @@ class SysReptorExporter:
             })
 
         return {
-            "sections": [{"status": "finished", "data": section_data}],
+            "sections": sections,
             "findings": findings,
         }
 

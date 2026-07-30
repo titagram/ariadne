@@ -252,9 +252,10 @@ def test_sysreptor_htb_objectives_include_flags_not_findings(tmp_path: Path) -> 
         project = json.loads(archive.read("project.json"))
 
     assert set(project) == {"sections", "findings"}
-    objective_evidence = project["sections"][0]["data"]["objective_evidence"]
-    assert f"Flag: `{_USER_FLAG}`" in objective_evidence
-    assert f"Flag: `{_ROOT_FLAG}`" in objective_evidence
+    executive_summary = project["sections"][0]["data"]["executive_summary"]
+    assert "## Objectives" in executive_summary
+    assert f"Flag: `{_USER_FLAG}`" in executive_summary
+    assert f"Flag: `{_ROOT_FLAG}`" in executive_summary
     assert project["findings"] == []
 
 

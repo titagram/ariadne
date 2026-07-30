@@ -1,64 +1,62 @@
-# SysReptor field mapping for Ariadne penetration test reports.
-#
-# Maps Ariadne report model fields to SysReptor project fields.
-# Used by SysReptorExporter.preview() to validate field mapping before push.
+# Concrete field contract validated through reptor 0.36 against the
+# "SysReptor Demo Calzone v1.2" design.  The pushproject document imports
+# sections/findings; evidence files are uploaded separately with `reptor file`.
 
-mapping_version: "1.0"
-project_type: "pentest"
+mapping_version: "2.0"
+format: "reptor-pushproject"
+validated_design: "SysReptor Demo Calzone v1.2"
 
-fields:
-  # Project-level fields
-  project_name:
-    source: "engagement_id"
-    format: "Ariadne-{engagement_id[:8]}"
-  project_overview:
-    source: "objectives"
-    template: "Penetration test against {target_count} target(s): {targets_text}"
+sections:
+  executive_summary:
+    status: "finished"
+    fields:
+      executive_summary:
+        type: "markdown"
+        source: "semantic executive summary, methodology, objectives, attack path, limitations, cleanup and evidence references"
+  scope:
+    status: "finished"
+    fields:
+      scope:
+        type: "markdown"
+        source: "targets"
+  other:
+    status: "finished"
+    fields:
+      title:
+        type: "string"
+        source: "profile"
+      report_date:
+        type: "date"
+        source: "generated_at"
+      report_version:
+        type: "string"
+        value: "1.0"
 
-  # Report-level fields
-  report_title:
-    source: "profile"
-    template: "Ariadne Penetration Test Report — {profile}"
-  report_date:
-    source: "generated_at"
+findings:
+  status:
+    validated: "finished"
+    other: "in-progress"
+  fields:
+    title:
+      type: "string"
+      source: "finding.title"
+    cvss:
+      type: "cvss"
+      source: "finding.cvss_vector"
+    affected_components:
+      type: "list[string]"
+      source: "finding.affected_assets"
+    summary:
+      type: "markdown"
+      source: "finding.description and finding.impact"
+    description:
+      type: "markdown"
+      source: "finding prerequisites, reproduction, evidence, impact and CWE"
+    recommendation:
+      type: "markdown"
+      source: "finding.remediation"
 
-  # Finding-level fields
-  finding_id:
-    source: "finding.finding_id"
-  finding_title:
-    source: "finding.title"
-  finding_severity:
-    source: "finding.severity"
-    mapping:
-      critical: "critical"
-      high: "high"
-      medium: "medium"
-      low: "low"
-      informational: "info"
-  finding_status:
-    source: "finding.status"
-    mapping:
-      candidate: "draft"
-      validated: "confirmed"
-      exploited: "confirmed"
-      false_positive: "false_positive"
-      informational: "info"
-      not_tested_due_to_policy: "out_of_scope"
-  finding_description:
-    source: "finding.description"
-  finding_evidence:
-    source: "finding.evidence"
-  finding_remediation:
-    source: "finding.remediation"
-
-  # Asset fields
-  asset_host:
-    source: "target.host"
-  asset_service:
-    source: "finding.service"  # optional, populated by target context
-
-  # Attachment mapping for evidence files
-  evidence_attachments:
-    source: "evidence_assets"
-    type: "file"
-    base_path: "evidence/"
+evidence:
+  bundle_path: "evidence/"
+  manifest: "evidence-manifest.json"
+  import_command: "reptor file evidence/*"

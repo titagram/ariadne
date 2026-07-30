@@ -108,7 +108,12 @@ class WalkthroughRenderer:
             lifecycle=dossier.lifecycle,
             attack_steps=dossier.attack_steps,
             evidence=dossier.evidence,
+            evidence_by_name={
+                item.filename: item
+                for item in dossier.evidence
+            },
             findings=dossier.findings,
+            compromised=dossier.compromised,
             validated_findings=tuple(
                 finding for finding in dossier.findings
                 if finding.status == "validated"

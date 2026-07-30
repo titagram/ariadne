@@ -2,7 +2,7 @@
   "target": "192.0.2.10",
   "artifacts": {
     "ports": "21/tcp ftp open\n22/tcp ssh open\n80/tcp http open\n",
-    "web": "HTTP 200 Security Dashboard\n",
+    "web": "<title>Security Dashboard</title>\n",
     "references": "/download/0 application/vnd.tcpdump.pcap 200\n",
     "capture": "sanitized-pcap-fixture",
     "credentials": "protocol=ftp credential_ref=protected:test\n",

@@ -42,6 +42,8 @@ class ReportEvidence(BaseModel):
     asset: str | None = None
     evidence_type: str | None = None
     finding_id: str | None = None
+    caption: str
+    excerpt: str | None = None
 
 
 class ReportFinding(BaseModel):
@@ -76,6 +78,8 @@ class AttackStep(BaseModel):
     action: str
     input: str
     result: str
+    interpretation: str
+    timestamp: str
     target: str | None = None
     prerequisites: tuple[str, ...] = ()
     commands: tuple[str, ...] = ()

@@ -99,6 +99,7 @@ def test_semantic_dossier_builds_chain_findings_and_deduplicates_evidence(
         "cleanup",
     }
     assert all(step.action and step.input and step.result for step in dossier.attack_steps)
+    assert all(step.interpretation and step.timestamp for step in dossier.attack_steps)
     assert all(
         step.next_step_id == dossier.attack_steps[index + 1].step_id
         for index, step in enumerate(dossier.attack_steps[:-1])
@@ -106,6 +107,10 @@ def test_semantic_dossier_builds_chain_findings_and_deduplicates_evidence(
     assert dossier.attack_steps[-1].next_step_id is None
     assert len(dossier.evidence) == len({item.sha256 for item in dossier.evidence})
     assert len(dossier.evidence) < 15
+    assert all(item.caption for item in dossier.evidence)
+    assert any(item.excerpt for item in dossier.evidence)
+    assert any("SSH foothold" in item for item in dossier.compromised)
+    assert any("EUID 0" in item for item in dossier.compromised)
     assert all(
         finding.affected_assets
         and finding.prerequisites
@@ -115,6 +120,11 @@ def test_semantic_dossier_builds_chain_findings_and_deduplicates_evidence(
         and finding.cvss_vector
         and finding.remediation
         for finding in dossier.findings
+    )
+    privilege_finding = dossier.findings[-1]
+    assert privilege_finding.procedure == (
+        dossier.attack_steps[-3].step_id,
+        dossier.attack_steps[-2].step_id,
     )
 
 
@@ -129,6 +139,16 @@ def test_semantic_reports_are_reproducible_and_professional_gate_is_fail_closed(
     professional = ProfessionalRenderer().render(run, options).text
 
     assert validation.valid, validation.errors
+    assert "<style>" in professional
+    assert 'href="styles.css"' not in professional
+    assert "both persisted CTF objectives" in professional
+    assert "Table of Contents" in professional
+    assert "Interpretation" in professional
+    assert "Evidence Register" in professional
+    assert "Conclusions" in professional
+    assert "No compromised host or user records were persisted." not in professional
+    assert "&lt;title&gt;Security Dashboard&lt;/title&gt;" in professional
+    assert "<title>Security Dashboard</title>" not in professional
     for expected in (
         "Attack Chain",
         "Affected asset",
@@ -177,37 +197,64 @@ def test_sysreptor_pushproject_export_has_sections_findings_and_real_evidence(
     project = json.loads(bundle.project_path.read_text(encoding="utf-8"))
 
     assert set(project) == {"sections", "findings"}
-    assert len(project["sections"]) == 1
-    assert project["sections"][0]["status"] == "finished"
+    assert {section["id"] for section in project["sections"]} == {
+        "executive_summary",
+        "scope",
+        "other",
+    }
+    assert all(section["status"] == "finished" for section in project["sections"])
+    scope = next(section for section in project["sections"] if section["id"] == "scope")
+    assert scope["data"]["scope"] == "- `192.0.2.10`"
     assert len(project["findings"]) == 3
     required = {
-        "finding_id",
         "title",
         "cvss",
         "summary",
         "affected_components",
-        "prerequisites",
-        "steps_to_reproduce",
-        "impact",
-        "cwe",
-        "evidence",
-        "evidence_attachments",
+        "description",
         "recommendation",
     }
     assert all(
         finding["status"] == "finished"
         and required <= set(finding["data"])
+        and "## Reproduction" in finding["data"]["description"]
+        and "## Evidence" in finding["data"]["description"]
         for finding in project["findings"]
     )
-    attachment_metadata = project["sections"][0]["data"]["evidence_attachments"]
-    assert len(attachment_metadata) == len(dossier.evidence)
-    assert len({item["sha256"] for item in attachment_metadata}) == len(
-        attachment_metadata,
+    executive = next(
+        section
+        for section in project["sections"]
+        if section["id"] == "executive_summary"
     )
+    attachment_metadata = executive["data"]["executive_summary"]
+    assert all(item.sha256 in attachment_metadata for item in dossier.evidence)
     with ZipFile(bundle.path) as archive:
+        assert {
+            "IMPORT.md",
+            "design-contract.json",
+            "evidence-manifest.json",
+        } <= set(archive.namelist())
         evidence_entries = [
             name for name in archive.namelist() if name.startswith("evidence/")
         ]
         assert evidence_entries
         assert all(archive.read(name) for name in evidence_entries)
         assert json.loads(archive.read("pushproject.json")) == project
+        design = json.loads(archive.read("design-contract.json"))
+        assert design["format"] == "reptor-pushproject"
+        assert {
+            "title",
+            "cvss",
+            "summary",
+            "affected_components",
+            "recommendation",
+        } <= set(design["finding_fields"])
+        evidence_manifest = json.loads(archive.read("evidence-manifest.json"))
+        assert len(evidence_manifest["attachments"]) == len(dossier.evidence)
+        assert all(
+            attachment["caption"] and attachment["sha256"]
+            for attachment in evidence_manifest["attachments"]
+        )
+        instructions = archive.read("IMPORT.md").decode()
+        assert "reptor pushproject" in instructions
+        assert "reptor file evidence/" in instructions

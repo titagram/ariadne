@@ -20,11 +20,18 @@
 - **Snapshot Hash:** `{{ snapshot_hash }}`
 - **Report generated:** {{ generated_at }}
 
+## Methodology
+The walkthrough follows the persisted evidence chain from discovery and
+enumeration through controlled exploitation, foothold, local enumeration,
+privilege escalation, objective proof, and cleanup. A failed tool execution is
+kept distinct from a successful execution with no finding.
+
 ## Attack Chain
 {% if attack_steps %}
 {% for step in attack_steps %}
 ### {{ step.step_id }} — {{ step.phase }}
 
+- **Timestamp:** {{ step.timestamp }}
 - **Action:** {{ step.action }}
 - **Input:** {{ step.input }}
 {% if step.prerequisites %}
@@ -41,30 +48,13 @@
 - **Command / action:** No target-facing command was required for this persisted transition.
 {% endif %}
 - **Result:** {{ step.result }}
-- **Evidence:** {% if step.evidence %}{% for name in step.evidence %}`{{ name }}`{% if not loop.last %}, {% endif %}{% endfor %}{% else %}persisted lifecycle event{% endif %}
+- **Interpretation:** {{ step.interpretation }}
+- **Evidence:** {% if step.evidence %}{% for name in step.evidence %}`{{ name }}`{% if evidence_by_name.get(name) %} ({{ evidence_by_name[name].caption }}){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}persisted lifecycle event{% endif %}
 - **Next:** {% if step.next_step_id %}`{{ step.next_step_id }}`{% else %}engagement complete{% endif %}
 
 {% endfor %}
 {% else %}
 *No evidence-derived attack chain could be reconstructed.*
-{% endif %}
-
-## Discovery
-{% if discoveries %}
-{% for d in discoveries %}
-- {{ d }}
-{% endfor %}
-{% else %}
-*No discovery events recorded.*
-{% endif %}
-
-## Enumeration
-{% if enumeration %}
-{% for e in enumeration %}
-- {{ e }}
-{% endfor %}
-{% else %}
-*No enumeration events recorded.*
 {% endif %}
 
 ## Validated Findings
@@ -109,10 +99,13 @@
 *No candidate findings were persisted.*
 {% endif %}
 
-## Evidence
+## Evidence Register
 {% if evidence %}
 {% for e in evidence %}
-- `{{ e.filename }}` — SHA-256 `{{ e.sha256 }}`{% if e.finding %}: {{ e.finding }}{% endif %}
+- `{{ e.filename }}` — {{ e.caption }} — {{ e.size_bytes }} bytes — SHA-256 `{{ e.sha256 }}`{% if e.finding %}: {{ e.finding }}{% endif %}
+{% if e.excerpt %}
+  - Bounded, redacted excerpt: `{{ e.excerpt | replace("\n", " ") }}`
+{% endif %}
 {% endfor %}
 {% else %}
 *No event-backed evidence artifacts were persisted.*
@@ -136,42 +129,6 @@
 *No discarded alternatives recorded.*
 {% endif %}
 
-## Initial Access
-{% if initial_access %}
-{% for i in initial_access %}
-- {{ i }}
-{% endfor %}
-{% else %}
-*No initial access events recorded.*
-{% endif %}
-
-## Post-Exploitation
-{% if post_exploitation %}
-{% for p in post_exploitation %}
-- {{ p }}
-{% endfor %}
-{% else %}
-*No post-exploitation events recorded.*
-{% endif %}
-
-## Privilege Escalation
-{% if privilege_escalation %}
-{% for p in privilege_escalation %}
-- {{ p }}
-{% endfor %}
-{% else %}
-*No privilege escalation events recorded.*
-{% endif %}
-
-## Active Directory / Pivoting
-{% if ad_pivoting %}
-{% for a in ad_pivoting %}
-- {{ a }}
-{% endfor %}
-{% else %}
-*No AD or pivoting events recorded.*
-{% endif %}
-
 ## Objectives and Flags
 {% if objectives %}
 {% for o in objectives %}
@@ -193,6 +150,15 @@
 *No objectives recorded.*
 {% endif %}
 
+## Proven Access
+{% if compromised %}
+{% for item in compromised %}
+- {{ item }}
+{% endfor %}
+{% else %}
+*No access state was proven by the persisted dossier.*
+{% endif %}
+
 ## Cleanup
 {% if cleanup %}
 {% for c in cleanup %}
@@ -200,15 +166,6 @@
 {% endfor %}
 {% else %}
 *No cleanup events recorded.*
-{% endif %}
-
-## Persisted Activity
-{% if lifecycle %}
-{% for entry in lifecycle %}
-- **{{ entry.event_type }}**{% if entry.target %} (`{{ entry.target }}`){% endif %}: {{ entry.summary }}{% if entry.status %} — {{ entry.status }}{% endif %}
-{% endfor %}
-{% else %}
-*No reportable lifecycle activity was persisted.*
 {% endif %}
 
 ## Screenshots
@@ -227,17 +184,6 @@
 {% endfor %}
 {% else %}
 *No lessons recorded.*
-{% endif %}
-
-## Reproducible Commands
-{% if commands %}
-{% for cmd in commands %}
-```bash
-{{ cmd }}
-```
-{% endfor %}
-{% else %}
-*No reproducible commands recorded.*
 {% endif %}
 
 ---
