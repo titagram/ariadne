@@ -309,6 +309,23 @@ class TestResearchOrderAndPrivacy:
         assert dossier.candidates[0].validation_status == "candidate"
         assert dossier.candidates[0].applicability_evidence == ()
 
+    def test_metasploit_info_version_range_is_applicability_evidence(self) -> None:
+        metadata = (
+            "Description:\n"
+            "This module exploits Craft CMS versions 3.x, 4.x, and 5.x < 5.6.17.\n"
+            "References: CVE-2025-32432\n"
+        )
+        fingerprint = ServiceFingerprint(
+            product="Craft CMS",
+            version="5.6.16",
+            protocol="http",
+            port=80,
+            target_host="10.10.10.10",
+        )
+        assert ResearchPipeline._metasploit_applicability(fingerprint, metadata) == (
+            "metasploit-info:version<5.6.17",
+        )
+
     def test_observed_cpe_must_match_the_affected_nvd_range(self) -> None:
         cve = {
             "configurations": [

@@ -324,6 +324,10 @@ class ResearchPipeline:
                     )
                     continue
                 info_cves = {value.upper() for value in _CVE_RE.findall(info.stdout)}
+                applicability = self._metasploit_applicability(
+                    fingerprint,
+                    info.stdout,
+                )
                 for candidate_cve in candidate_cves:
                     if candidate_cve.upper() not in info_cves:
                         continue
@@ -343,6 +347,7 @@ class ResearchPipeline:
                                     re.IGNORECASE | re.MULTILINE,
                                 )
                             ),
+                            applicability_evidence=applicability,
                         )
                     )
         limitation = "metasploit: " + " | ".join(limitations) if limitations else ""
@@ -699,6 +704,49 @@ class ResearchPipeline:
             check_supported = bool(re.search(r"\bYes\b", line))
             rows.append((module, check_supported, line.strip(), cves))
         return tuple(rows)
+
+    @staticmethod
+    def _metasploit_applicability(
+        fingerprint: ServiceFingerprint,
+        metadata: str,
+    ) -> tuple[str, ...]:
+        """Extract explicit product/version applicability from ``msf info``."""
+        version = fingerprint.version
+        if not isinstance(version, str) or not version.strip():
+            return ()
+        tokens = {
+            token
+            for token in re.findall(r"[a-z0-9]+", fingerprint.product.casefold())
+            if token not in {"http", "https", "server", "service"}
+        }
+        text = metadata.casefold()
+        if tokens and not tokens.intersection(re.findall(r"[a-z0-9]+", text)):
+            return ()
+        evidence: list[str] = []
+        exact = re.search(
+            rf"(?<![a-z0-9.]){re.escape(version.casefold())}(?![a-z0-9.])",
+            text,
+        )
+        if exact is not None:
+            evidence.append(f"metasploit-info:version={version}")
+        observed = ResearchPipeline._version_in_parts(version)
+        if observed:
+            for match in re.finditer(
+                r"(?P<major>\d+)\.x\s*<\s*(?P<upper>\d+(?:\.\d+)+)",
+                text,
+            ):
+                if int(match.group("major")) != observed[0]:
+                    continue
+                upper = ResearchPipeline._version_in_parts(match.group("upper"))
+                if upper and observed < upper:
+                    evidence.append(
+                        "metasploit-info:version<" + match.group("upper")
+                    )
+        return tuple(dict.fromkeys(evidence))
+
+    @staticmethod
+    def _version_in_parts(value: str) -> tuple[int, ...]:
+        return tuple(int(part) for part in re.findall(r"\d+", value)[:4])
 
     @staticmethod
     def _deduplicate_candidates(
