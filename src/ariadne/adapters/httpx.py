@@ -17,6 +17,7 @@ Safety invariants
 
 from __future__ import annotations
 
+import ipaddress
 import json
 from typing import ClassVar
 from uuid import uuid4
@@ -32,6 +33,7 @@ from ariadne.adapters.base import (
     Runtime,
     ToolProbe,
 )
+from ariadne.core.engagement import TargetSpec
 from ariadne.core.observations import Observation
 
 
@@ -94,12 +96,21 @@ def _parse_httpx_jsonl(stdout: str) -> list[Observation]:
         # If this record is a redirect to an external host, emit a
         # synthetic scope-candidate observation. Downstream enforcement records
         # local evidence and rejects active probing until an amendment.
-        is_redirect = record.get("redirect", False)
+        status_code = record.get("status_code")
+        is_redirect = record.get("redirect") is True or (
+            isinstance(status_code, int)
+            and not isinstance(status_code, bool)
+            and 300 <= status_code < 400
+        )
         location = record.get("location", "")
         if is_redirect and location and isinstance(location, str):
             loc_parsed = urlparse(location)
             loc_host = loc_parsed.hostname or ""
-            if loc_host and loc_host != host:
+            if (
+                loc_parsed.scheme in {"http", "https"}
+                and loc_host
+                and loc_host.casefold() != host.casefold()
+            ):
                 ext_obs = Observation(
                     observation_id=uuid4(),
                     target=TargetSpec(host=loc_host),
@@ -136,16 +147,26 @@ class HttpxAdapter:
     ) -> ProcessSpec:
         op = action.operation
         if op != "scan":
-            raise AdapterError(
-                f"Unknown httpx operation: {op!r}. "
-                f"Supported: scan"
-            )
+            raise AdapterError(f"Unknown httpx operation: {op!r}. Supported: scan")
 
         inputs = action.inputs
         ports = inputs.get("ports", ())
         if not ports or not isinstance(ports, (list, tuple)):
             raise AdapterError("ports must be a non-empty list or tuple")
         request_timeout = int(inputs.get("timeout", 10))
+        http_host = inputs.get("http_host")
+        if http_host is not None:
+            if not isinstance(http_host, str):
+                raise AdapterError("http_host must be a hostname")
+            alias = TargetSpec(host=http_host).host
+            if alias == context.target.host:
+                raise AdapterError("http_host must be distinct from the network target")
+            try:
+                ipaddress.ip_address(alias)
+            except ValueError:
+                http_host = alias
+            else:
+                raise AdapterError("http_host must be an approved FQDN alias")
 
         port_str = ",".join(str(p) for p in ports)
         target = str(context.target.host)
@@ -157,12 +178,17 @@ class HttpxAdapter:
         # - limited threads
         argv = [
             "httpx-toolkit",
-            "-p", port_str,
+            "-p",
+            port_str,
             "-json",
-            "-no-fallback", # don't fall back to unrelated hostnames
-            "-t", "10",    # 10 threads max
-            "-timeout", str(request_timeout),
+            "-no-fallback",  # don't fall back to unrelated hostnames
+            "-t",
+            "10",  # 10 threads max
+            "-timeout",
+            str(request_timeout),
         ]
+        if http_host is not None:
+            argv.extend(("-H", f"Host: {http_host}"))
 
         # Target IP goes into stdin
         stdin_input = f"https://{target}\nhttp://{target}\n".encode()
@@ -170,9 +196,7 @@ class HttpxAdapter:
         return ProcessSpec(
             argv=tuple(argv),
             stdin=stdin_input,
-            timeout_seconds=int(
-                inputs.get("process_timeout", max(30, request_timeout * 2 + 5))
-            ),  # type: ignore[arg-type]
+            timeout_seconds=int(inputs.get("process_timeout", max(30, request_timeout * 2 + 5))),  # type: ignore[arg-type]
             max_output_bytes=int(inputs.get("max_output", 10 * 1024 * 1024)),  # type: ignore[arg-type]
         )
 

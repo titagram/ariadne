@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 from typing import ClassVar
@@ -35,9 +36,7 @@ def _bounded_integer(
     except (TypeError, ValueError) as exc:
         raise AdapterError(f"{name} must be an integer") from exc
     if not minimum <= parsed <= maximum:
-        raise AdapterError(
-            f"{name} must be between {minimum} and {maximum}"
-        )
+        raise AdapterError(f"{name} must be between {minimum} and {maximum}")
     return parsed
 
 
@@ -67,10 +66,7 @@ class KatanaAdapter:
         context: AdapterContext,
     ) -> ProcessSpec:
         if action.operation != "crawl":
-            raise AdapterError(
-                f"Unknown Katana operation: {action.operation!r}. "
-                "Supported: crawl"
-            )
+            raise AdapterError(f"Unknown Katana operation: {action.operation!r}. Supported: crawl")
         raw_urls = action.inputs.get("urls")
         if not isinstance(raw_urls, (list, tuple)) or not raw_urls:
             raise AdapterError("urls must be a non-empty list or tuple")
@@ -89,9 +85,7 @@ class KatanaAdapter:
                 or parsed.password is not None
                 or parsed.fragment
             ):
-                raise AdapterError(
-                    f"crawler seed {raw_url!r} is outside the exact target scope"
-                )
+                raise AdapterError(f"crawler seed {raw_url!r} is outside the exact target scope")
             if raw_url not in seeds:
                 seeds.append(raw_url)
         if len(seeds) > 10:
@@ -123,11 +117,24 @@ class KatanaAdapter:
         )
         rate = min(context.limits.max_rate or 10, 20)
         concurrency = min(context.limits.max_concurrency or 2, 4)
+        http_host = action.inputs.get("http_host")
+        if http_host is not None:
+            if not isinstance(http_host, str):
+                raise AdapterError("http_host must be a hostname")
+            alias = TargetSpec(host=http_host).host
+            if alias == context.target.host:
+                raise AdapterError("http_host must be distinct from the network target")
+            try:
+                ipaddress.ip_address(alias)
+            except ValueError:
+                http_host = alias
+            else:
+                raise AdapterError("http_host must be an approved FQDN alias")
         scope_regex = (
             rf"^https?://{re.escape(context.target.host)}"
             r"(?::[0-9]+)?(?:/|$)"
         )
-        argv = (
+        argv = [
             "katana",
             "-u",
             ",".join(seeds),
@@ -151,18 +158,24 @@ class KatanaAdapter:
             scope_regex,
             "-kf",
             "all",
-            "-jc",
-            "-fx",
-            "-xhr",
-            "-iqp",
-            "-jsonl",
-            "-omit-raw",
-            "-omit-body",
-            "-silent",
-            "-duc",
+        ]
+        if http_host is not None:
+            argv.extend(("-H", f"Host: {http_host}"))
+        argv.extend(
+            (
+                "-jc",
+                "-fx",
+                "-xhr",
+                "-iqp",
+                "-jsonl",
+                "-omit-raw",
+                "-omit-body",
+                "-silent",
+                "-duc",
+            )
         )
         return ProcessSpec(
-            argv=argv,
+            argv=tuple(argv),
             timeout_seconds=duration + 15,
             max_output_bytes=min(
                 context.limits.max_output_bytes or 10 * 1024 * 1024,
@@ -212,19 +225,12 @@ class KatanaAdapter:
             if (
                 parsed.scheme not in {"http", "https"}
                 or parsed.hostname is None
-                or (
-                    target is not None
-                    and parsed.hostname.casefold() != target.host.casefold()
-                )
+                or (target is not None and parsed.hostname.casefold() != target.host.casefold())
             ):
                 continue
             request = record.get("request")
             response = record.get("response")
-            method = (
-                request.get("method", "GET")
-                if isinstance(request, dict)
-                else "GET"
-            )
+            method = request.get("method", "GET") if isinstance(request, dict) else "GET"
             status_code = (
                 response.get("status_code", 0)
                 if isinstance(response, dict)

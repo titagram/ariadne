@@ -110,6 +110,24 @@ _RECOVERABLE_PROVIDER_BOUNDARIES = frozenset({"kali_runtime"})
 _PROVIDER_FALLBACK_PLAYBOOKS = frozenset({"web.http-fallback.v1"})
 
 
+def _recoverable_provider_boundary(
+    catalog: WorkflowCatalog,
+    playbook_id: str,
+    boundary: object,
+) -> bool:
+    if boundary in _RECOVERABLE_PROVIDER_BOUNDARIES:
+        return True
+    playbook = catalog.playbooks.get(playbook_id)
+    return bool(
+        boundary == "tool_documentation"
+        and playbook is not None
+        and any(
+            action.adapter == "zap" and action.operation == "passive_scan"
+            for action in playbook.actions
+        )
+    )
+
+
 def _tool_id_for_executable(executable: str) -> str:
     """Derive a stable knowledge id from the authorized ProcessSpec."""
     slug = re.sub(
@@ -131,9 +149,7 @@ def _declared_tool_probe_args(
     if declaration is None:
         return ("--version",), ("--help",)
     if not isinstance(declaration, dict):
-        raise ToolVerificationBlockedError(
-            "playbook tool_card metadata must be a mapping"
-        )
+        raise ToolVerificationBlockedError("playbook tool_card metadata must be a mapping")
     version_args = declaration.get("version_args", ("--version",))
     help_args = declaration.get("help_args", ("--help",))
     if (
@@ -441,9 +457,7 @@ def _determine_engagement_state(
             kind = payload.get("objective_kind")
             description = payload.get("description", "")
             if isinstance(kind, str) and isinstance(description, str):
-                completed_objectives.add(
-                    (kind, description if kind == "custom" else "")
-                )
+                completed_objectives.add((kind, description if kind == "custom" else ""))
             continue
         if event_type == "cleanup_completed":
             evidence_types.add("cleanup_complete")
@@ -493,9 +507,7 @@ def _determine_engagement_state(
         )
         for objective in run_handle.snapshot.objectives
     }
-    if required_objectives and required_objectives.issubset(
-        completed_objectives
-    ):
+    if required_objectives and required_objectives.issubset(completed_objectives):
         evidence_types.add("objective_proven")
         observations.append(
             Observation(
@@ -508,9 +520,7 @@ def _determine_engagement_state(
                 source="objective_proven",
                 data={
                     "type": "objective_proven",
-                    "completed_objectives": sorted(
-                        kind for kind, _ in completed_objectives
-                    ),
+                    "completed_objectives": sorted(kind for kind, _ in completed_objectives),
                 },
             )
         )
@@ -598,7 +608,8 @@ def _typed_progression_observations(
 
     def add(kind: str, observation: Observation) -> None:
         if any(
-            existing.source == kind and existing.target == observation.target
+            existing.source == kind
+            and existing.target == observation.target
             and (
                 kind not in {"protocol_routed", "web_paths", "web_parameters"}
                 or (
@@ -1045,14 +1056,29 @@ def _observed_web_ports(
                 port
                 for observation in observations
                 if observation.target == target
-                and str(observation.data.get("service", "")).casefold()
-                in web_services
+                and str(observation.data.get("service", "")).casefold() in web_services
                 and isinstance((port := observation.data.get("port")), int)
                 and not isinstance(port, bool)
                 and 0 < port <= 65535
             }
         )
     )
+
+
+def _approved_http_alias(
+    events: list[dict[str, Any]],
+    target: TargetSpec,
+) -> str | None:
+    """Return the latest approved vhost alias for one network target."""
+    for event in reversed(events):
+        if event.get("event_type") != "scope_alias_approved":
+            continue
+        payload = event.get("payload", {})
+        if payload.get("network_target") == target.host and isinstance(
+            payload.get("http_host"), str
+        ):
+            return str(payload["http_host"])
+    return None
 
 
 def _observed_web_urls(
@@ -1100,10 +1126,7 @@ def _observed_object_reference_urls(
         )
     }
     for observation in reversed(observations):
-        if (
-            observation.target != target
-            or observation.source == "web_object_reference"
-        ):
+        if observation.target != target or observation.source == "web_object_reference":
             continue
         value = observation.data.get("url")
         if not isinstance(value, str):
@@ -1454,10 +1477,11 @@ async def handle_amend_engagement(
         return {"status": "error", "message": "Active engagement is unavailable."}
     changes = validated.model_dump()
     candidate_id = changes.get("candidate_id", "")
+    existing_events = cmd.store.read_events(handle)
     if candidate_id and any(
         event.get("event_type") == "scope_candidate_blocked"
         and event.get("payload", {}).get("candidate_id") == candidate_id
-        for event in cmd.store.read_events(handle)
+        for event in existing_events
     ):
         return {
             "status": "blocked",
@@ -1467,6 +1491,42 @@ async def handle_amend_engagement(
                 "alternative in-scope branches."
             ),
         }
+    candidate_payload = next(
+        (
+            event.get("payload", {})
+            for event in reversed(existing_events)
+            if event.get("event_type") == "scope_candidate_discovered"
+            and event.get("payload", {}).get("candidate_id") == candidate_id
+        ),
+        None,
+    )
+    http_alias = None
+    if isinstance(candidate_payload, dict):
+        candidate_target = candidate_payload.get("target")
+        source_target = candidate_payload.get("source_target")
+        if (
+            candidate_payload.get("relation") == "redirect"
+            and isinstance(candidate_target, str)
+            and candidate_target in changes["add_targets"]
+            and isinstance(source_target, str)
+        ):
+            try:
+                ipaddress.ip_address(source_target)
+            except ValueError:
+                pass
+            else:
+                try:
+                    ipaddress.ip_address(candidate_target)
+                except ValueError:
+                    try:
+                        normalized_alias = TargetSpec(host=candidate_target).host
+                    except ValueError:
+                        pass
+                    else:
+                        http_alias = {
+                            "network_target": source_target,
+                            "http_host": normalized_alias,
+                        }
     summary = {
         "base_snapshot_hash": handle.snapshot.snapshot_hash,
         "base_revision": handle.snapshot.revision,
@@ -1494,8 +1554,6 @@ async def handle_amend_engagement(
         decision = ConsentDecision.UNAVAILABLE
     if decision is not ConsentDecision.ACCEPT:
         if candidate_id:
-            from ariadne.store.run_store import Event
-
             cmd.store.append_event(
                 handle,
                 Event(
@@ -1522,9 +1580,20 @@ async def handle_amend_engagement(
             ),
         }
     digest = canonical_digest({"trusted_session_id": session_id, "amendment": summary})
+    command_changes = changes
+    if http_alias is not None:
+        # A vhost alias changes the HTTP authority, not the authorized network
+        # destination. The immutable revision is linked by the audit event
+        # below while the original IP remains the sole traffic destination.
+        command_changes = {
+            **changes,
+            "add_targets": [
+                target for target in changes["add_targets"] if target != http_alias["http_host"]
+            ],
+        }
     try:
         result = cmd.amend(
-            changes,
+            command_changes,
             session_id=session_id,
             trusted_confirmation_digest=digest,
             expected_snapshot_hash=summary["base_snapshot_hash"],
@@ -1532,6 +1601,26 @@ async def handle_amend_engagement(
         )
     except (OSError, PolicyConfigurationError, ValueError, TypeError) as exc:
         return {"status": "error", "message": f"Amendment failed: {exc}"}
+    if http_alias is not None and result.engagement_id is not None:
+        amended_handle = _get_run_handle(cmd.store, str(result.engagement_id))
+        if amended_handle is None:
+            return {
+                "status": "error",
+                "message": "Amended engagement is unavailable for alias audit.",
+            }
+        cmd.store.append_event(
+            amended_handle,
+            Event(
+                event_type="scope_alias_approved",
+                payload={
+                    **http_alias,
+                    "candidate_id": candidate_id,
+                    "snapshot_hash": result.snapshot_hash or "",
+                    "reason": changes["reason"],
+                },
+                timestamp=datetime.now(UTC),
+            ),
+        )
     return {
         "status": result.status,
         "engagement_id": str(result.engagement_id or ""),
@@ -1655,9 +1744,10 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 pb_id = payload.get("playbook_id", "")
                 if pb_id:
                     executed_playbooks.add(pb_id)
-        elif (
-            evt.get("event_type") == "execution_boundary"
-            and payload.get("boundary") in _RECOVERABLE_PROVIDER_BOUNDARIES
+        elif evt.get("event_type") == "execution_boundary" and _recoverable_provider_boundary(
+            catalog,
+            str(payload.get("playbook_id", "")),
+            payload.get("boundary"),
         ):
             pb_id = payload.get("playbook_id", "")
             if pb_id:
@@ -1716,9 +1806,10 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         event_type = event.get("event_type")
         if event_type == "execution_boundary":
             last_routing_playbook = event.get("payload", {}).get("playbook_id")
-            provider_fallback_needed = (
-                event.get("payload", {}).get("boundary")
-                in _RECOVERABLE_PROVIDER_BOUNDARIES
+            provider_fallback_needed = _recoverable_provider_boundary(
+                catalog,
+                str(last_routing_playbook or ""),
+                event.get("payload", {}).get("boundary"),
             )
             break
         if event_type == "plan_executed":
@@ -1728,10 +1819,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             provider_fallback_needed = (
                 payload.get("status") not in {"executed", "success"}
                 and failed_playbook is not None
-                and bool(
-                    set(failed_playbook.next_playbooks)
-                    & _PROVIDER_FALLBACK_PLAYBOOKS
-                )
+                and bool(set(failed_playbook.next_playbooks) & _PROVIDER_FALLBACK_PLAYBOOKS)
             )
             break
     unresearched_fingerprint = _latest_service_fingerprint(
@@ -1752,10 +1840,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         if (
             playbook.id not in _PROVIDER_FALLBACK_PLAYBOOKS
             or provider_fallback_needed
-            or (
-                playbook.id == "web.http-fallback.v1"
-                and pending_capture_url is not None
-            )
+            or (playbook.id == "web.http-fallback.v1" and pending_capture_url is not None)
         )
         and (
             playbook.id not in executed_playbooks
@@ -1763,40 +1848,24 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 playbook.id == "research.service-vulnerability.v1"
                 and unresearched_fingerprint is not None
             )
-            or (
-                playbook.id == "web.http-fallback.v1"
-                and pending_capture_url is not None
-            )
-            or (
-                playbook.id == "web.object-reference.v1"
-                and bool(object_reference_urls)
-            )
+            or (playbook.id == "web.http-fallback.v1" and pending_capture_url is not None)
+            or (playbook.id == "web.object-reference.v1" and bool(object_reference_urls))
         )
-        and (
-            playbook.id != "web.object-reference.v1"
-            or bool(object_reference_urls)
-        )
+        and (playbook.id != "web.object-reference.v1" or bool(object_reference_urls))
         and (
             playbook.id != "foothold.ssh-credentials.v1"
             or _observed_ssh_port(observations, first_target) is not None
         )
     )
-    if (
-        "web.object-reference.v1" in executed_playbooks
-        and object_reference_urls
-    ):
+    if "web.object-reference.v1" in executed_playbooks and object_reference_urls:
         repeated_reference_probe = tuple(
-            playbook
-            for playbook in eligible
-            if playbook.id == "web.object-reference.v1"
+            playbook for playbook in eligible if playbook.id == "web.object-reference.v1"
         )
         if repeated_reference_probe:
             eligible = repeated_reference_probe
     elif last_routing_playbook in catalog.playbooks:
         allowed_next = catalog.playbooks[last_routing_playbook].next_playbooks
-        preferred = tuple(
-            playbook for playbook in eligible if playbook.id in allowed_next
-        )
+        preferred = tuple(playbook for playbook in eligible if playbook.id in allowed_next)
         if preferred:
             eligible = preferred
     excluded = tuple(
@@ -1818,6 +1887,16 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                     "Eligible work conflicts with an explicit contract "
                     f"exclusion: {excluded[0][1]!r}. An amendment is required "
                     "to change that exclusion."
+                ),
+                "plan_id": "",
+            }
+        if last_routing_playbook is not None and provider_fallback_needed:
+            return {
+                "status": "blocked",
+                "boundary": "optional_provider_complete",
+                "message": (
+                    "The optional provider attempt is terminal and no further "
+                    "evidence-backed branch is currently eligible."
                 ),
                 "plan_id": "",
             }
@@ -1875,6 +1954,26 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             "plan_id": "",
         }
 
+    http_host = _approved_http_alias(events, plan.target)
+    if http_host is not None:
+        plan = plan.model_copy(
+            update={
+                "actions": tuple(
+                    action.model_copy(
+                        update={
+                            "inputs": {
+                                **action.inputs,
+                                "http_host": http_host,
+                            }
+                        }
+                    )
+                    if action.adapter in {"httpx", "katana", "curl", "zap", "nuclei"}
+                    else action
+                    for action in plan.actions
+                ),
+            }
+        )
+
     if any(
         action.adapter == "research"
         and action.operation == "investigate"
@@ -1914,9 +2013,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         )
 
     if any(
-        action.adapter == "httpx"
-        and action.operation == "scan"
-        and not action.inputs.get("ports")
+        action.adapter == "httpx" and action.operation == "scan" and not action.inputs.get("ports")
         for action in plan.actions
     ):
         web_ports = _observed_web_ports(observations, plan.target)
@@ -1925,8 +2022,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 "status": "blocked",
                 "boundary": "missing_evidence",
                 "message": (
-                    "HTTP probing requires a target-bound port observed as an "
-                    "HTTP service."
+                    "HTTP probing requires a target-bound port observed as an HTTP service."
                 ),
                 "plan_id": "",
             }
@@ -2047,9 +2143,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         )
 
     if any(
-        action.adapter == "curl"
-        and action.operation == "download"
-        and not action.inputs.get("url")
+        action.adapter == "curl" and action.operation == "download" and not action.inputs.get("url")
         for action in plan.actions
     ):
         candidate = _validated_object_reference_candidate(
@@ -2061,8 +2155,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 "status": "blocked",
                 "boundary": "missing_validated_object_reference",
                 "message": (
-                    "Artifact download requires a successful, same-target "
-                    "object-reference probe."
+                    "Artifact download requires a successful, same-target object-reference probe."
                 ),
                 "plan_id": "",
             }
@@ -2114,9 +2207,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         plan = plan.model_copy(
             update={
                 "actions": tuple(
-                    action.model_copy(
-                        update={"inputs": {**action.inputs, **artifact}}
-                    )
+                    action.model_copy(update={"inputs": {**action.inputs, **artifact}})
                     if action.adapter == "pcap"
                     and action.operation == "extract_plaintext_credentials"
                     and not action.inputs.get("artifact")
@@ -2127,8 +2218,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         )
 
     if any(
-        action.adapter in {"ssh", "postex"}
-        and not action.inputs.get("credential_ref")
+        action.adapter in {"ssh", "postex"} and not action.inputs.get("credential_ref")
         for action in plan.actions
     ):
         credential = _protected_credential(
@@ -2849,9 +2939,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                             raise ToolVerificationBlockedError(
                                 "Kali runtime cannot inspect the planned tool"
                             )
-                        version_args, help_args = _declared_tool_probe_args(
-                            action.inputs
-                        )
+                        version_args, help_args = _declared_tool_probe_args(action.inputs)
                         runtime_inspection = await inspect_tool(
                             process_spec.argv[0],
                             version_args=version_args,
@@ -2877,6 +2965,22 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                                 "adapter": action.adapter,
                                 "reason": str(exc),
                                 "next_boundary": "kali_or_tool_availability",
+                            },
+                            timestamp=datetime.now(UTC),
+                        ),
+                    )
+                    cmd.store.append_event(
+                        run_handle,
+                        Event(
+                            event_type="execution_boundary",
+                            payload={
+                                "plan_id": plan_id,
+                                "playbook_id": record.plan.playbook_id,
+                                "adapter": action.adapter,
+                                "operation": action.operation,
+                                "target": record.plan.target.host,
+                                "boundary": "tool_documentation",
+                                "reason": str(exc),
                             },
                             timestamp=datetime.now(UTC),
                         ),
@@ -3100,12 +3204,9 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                         run_handle,
                         str(artifact_name),
                         maximum_bytes=(
-                            record.plan.limits.max_output_bytes
-                            or process_spec.max_output_bytes
+                            record.plan.limits.max_output_bytes or process_spec.max_output_bytes
                         ),
-                        expected_sha256=observation_artifact_digests.get(
-                            str(artifact_name)
-                        ),
+                        expected_sha256=observation_artifact_digests.get(str(artifact_name)),
                     )
             transcript = process_result.stdout.encode("utf-8", errors="replace")
             if process_result.stderr:
@@ -3480,10 +3581,7 @@ def _record_explicit_objective_proof(
                 "description": objective.description,
                 "observation_id": str(observation.observation_id),
                 "value_ref": proof_map.get("value_ref", ""),
-                "proof_sha256": (
-                    proof_map.get("proof_sha256")
-                    or proof_map.get("proof", "")
-                ),
+                "proof_sha256": (proof_map.get("proof_sha256") or proof_map.get("proof", "")),
             },
             timestamp=timestamp,
         ),
@@ -3510,10 +3608,7 @@ def _persist_objective_flag_observations(
         kind = proof_map.get("kind")
         value = proof_map.get("value")
         proof_sha256 = proof_map.get("proof_sha256") or proof_map.get("proof")
-        if (
-            kind not in {"user_flag", "root_flag"}
-            or not isinstance(value, str)
-        ):
+        if kind not in {"user_flag", "root_flag"} or not isinstance(value, str):
             sanitized.append(observation)
             continue
 
@@ -3521,9 +3616,7 @@ def _persist_objective_flag_observations(
         if proof_sha256 != stored.proof_sha256:
             raise AdapterPolicyError("CTF flag value does not match its objective proof")
         clean_proof = {
-            key: item
-            for key, item in proof_map.items()
-            if key not in {"value", "proof"}
+            key: item for key, item in proof_map.items() if key not in {"value", "proof"}
         }
         clean_proof.update(
             {
@@ -3564,9 +3657,7 @@ def _persist_objective_flag_observations(
     stderr = process_result.stderr
     for value in captured_values:
         stderr = stderr.replace(value, "[CTF_FLAG_CAPTURED]")
-    return tuple(sanitized), process_result.model_copy(
-        update={"stdout": stdout, "stderr": stderr}
-    )
+    return tuple(sanitized), process_result.model_copy(update={"stdout": stdout, "stderr": stderr})
 
 
 def _finding_candidate_from_observation(
@@ -3825,8 +3916,7 @@ async def handle_run_engagement(
                 "professional_path": professional["path"],
                 "objective_flags": objective_flags,
                 "message": (
-                    "Objectives, cleanup, and both offline reports completed."
-                    + flag_summary
+                    "Objectives, cleanup, and both offline reports completed." + flag_summary
                 ),
             }
 
@@ -3863,7 +3953,11 @@ async def handle_run_engagement(
         )
         if executed.get("status") == "blocked":
             if (
-                executed.get("boundary") in _RECOVERABLE_PROVIDER_BOUNDARIES
+                _recoverable_provider_boundary(
+                    catalog,
+                    str(proposed.get("playbook_id", "")),
+                    executed.get("boundary"),
+                )
                 and step < max_steps
             ):
                 last_provider_boundary = executed
@@ -3881,16 +3975,14 @@ async def handle_run_engagement(
                     event.get("payload", {}).get("playbook_id")
                     for event in reversed(events)
                     if event.get("event_type") == "plan_executed"
-                    and event.get("payload", {}).get("status")
-                    not in {"executed", "success"}
+                    and event.get("payload", {}).get("status") not in {"executed", "success"}
                 ),
                 None,
             )
             failed_playbook = catalog.playbooks.get(last_failed_playbook or "")
             if (
                 failed_playbook is not None
-                and set(failed_playbook.next_playbooks)
-                & _PROVIDER_FALLBACK_PLAYBOOKS
+                and set(failed_playbook.next_playbooks) & _PROVIDER_FALLBACK_PLAYBOOKS
                 and step < max_steps
             ):
                 continue

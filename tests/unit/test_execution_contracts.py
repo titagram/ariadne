@@ -32,9 +32,7 @@ from ariadne.runtime.process import ProcessResult, ProcessSpec
 class RecordingRuntime:
     def __init__(self, results: list[ProcessResult] | None = None) -> None:
         self.calls: list[ProcessSpec] = []
-        self._results = list(results or [
-            ProcessResult(exit_code=0, stdout="", stderr="")
-        ])
+        self._results = list(results or [ProcessResult(exit_code=0, stdout="", stderr="")])
 
     async def run(self, spec: ProcessSpec) -> ProcessResult:
         self.calls.append(spec)
@@ -44,9 +42,7 @@ class RecordingRuntime:
 class ScreenshotRuntime(RecordingRuntime):
     async def run(self, spec: ProcessSpec) -> ProcessResult:
         self.calls.append(spec)
-        screenshot_arg = next(
-            item for item in spec.argv if item.startswith("--screenshot=")
-        )
+        screenshot_arg = next(item for item in spec.argv if item.startswith("--screenshot="))
         output = Path(screenshot_arg.removeprefix("--screenshot="))
         assert output.parent.is_dir()
         output.write_bytes(b"PNG")
@@ -212,14 +208,12 @@ def test_builtin_workflow_actions_have_curated_contracts_and_explicit_tools() ->
                 continue
             contract = registry.get(action.adapter, action.operation)
             assert contract is not None, (
-                f"{playbook.id} has no curated contract for "
-                f"{action.adapter}:{action.operation}"
+                f"{playbook.id} has no curated contract for {action.adapter}:{action.operation}"
             )
             for capability in playbook.capabilities:
                 allowed_tools = policy.capabilities[capability].allowed_tools
                 assert allowed_tools, (
-                    f"{playbook.id} capability {capability} has no explicit "
-                    "allowed_tools"
+                    f"{playbook.id} capability {capability} has no explicit allowed_tools"
                 )
                 assert contract.executable_ids & allowed_tools, (
                     f"{playbook.id} capability {capability} cannot authorize "
@@ -286,9 +280,7 @@ def test_contract_registry_is_immutable_and_binds_exact_adapter_type() -> None:
 def test_envelope_is_bound_to_canonical_action_digest(tmp_path: Path) -> None:
     plan = _plan()
     envelope = _envelope(tmp_path, plan)
-    mutated = plan.actions[0].model_copy(
-        update={"inputs": {"ports": (443,)}}
-    )
+    mutated = plan.actions[0].model_copy(update={"inputs": {"ports": (443,)}})
 
     with pytest.raises(ProcessAuthorizationError, match="digest"):
         envelope.verify_action(mutated)
@@ -316,12 +308,33 @@ async def test_malicious_tool_and_other_target_are_denied_before_runtime(
     "argv",
     [
         (
-            "nmap", "-n", "-Pn", "-sS", "--max-rate", "10",
-            "-p", "22,80", "-oX", "-", "--", "10.10.10.11",
+            "nmap",
+            "-n",
+            "-Pn",
+            "-sS",
+            "--max-rate",
+            "10",
+            "-p",
+            "22,80",
+            "-oX",
+            "-",
+            "--",
+            "10.10.10.11",
         ),
         (
-            "nmap", "-n", "-Pn", "-sS", "--max-rate", "10",
-            "-p", "22,80", "-oX", "-", "10.10.10.11", "--", "10.10.10.10",
+            "nmap",
+            "-n",
+            "-Pn",
+            "-sS",
+            "--max-rate",
+            "10",
+            "-p",
+            "22,80",
+            "-oX",
+            "-",
+            "10.10.10.11",
+            "--",
+            "10.10.10.10",
         ),
     ],
 )
@@ -345,22 +358,65 @@ def test_nmap_target_swap_or_extra_destination_is_denied(
     "argv",
     [
         (
-            "nmap", "-n", "-Pn", "-sT", "--max-rate", "10",
-            "--max-rate", "10", "-p", "22,80", "-oX", "-",
-            "--", "10.10.10.10",
+            "nmap",
+            "-n",
+            "-Pn",
+            "-sT",
+            "--max-rate",
+            "10",
+            "--max-rate",
+            "10",
+            "-p",
+            "22,80",
+            "-oX",
+            "-",
+            "--",
+            "10.10.10.10",
         ),
         (
-            "nmap", "-n", "-Pn", "-sT", "--max-rate", "10",
-            "-p", "22,80", "-p", "22,80", "-oX", "-",
-            "--", "10.10.10.10",
+            "nmap",
+            "-n",
+            "-Pn",
+            "-sT",
+            "--max-rate",
+            "10",
+            "-p",
+            "22,80",
+            "-p",
+            "22,80",
+            "-oX",
+            "-",
+            "--",
+            "10.10.10.10",
         ),
         (
-            "nmap", "-n", "-Pn", "-sT", "-sT", "--max-rate", "10",
-            "-p", "22,80", "-oX", "-", "--", "10.10.10.10",
+            "nmap",
+            "-n",
+            "-Pn",
+            "-sT",
+            "-sT",
+            "--max-rate",
+            "10",
+            "-p",
+            "22,80",
+            "-oX",
+            "-",
+            "--",
+            "10.10.10.10",
         ),
         (
-            "nmap", "-n", "-Pn", "-sT", "--max-rate", "10",
-            "-p", "443", "-oX", "-", "--", "10.10.10.10",
+            "nmap",
+            "-n",
+            "-Pn",
+            "-sT",
+            "--max-rate",
+            "10",
+            "-p",
+            "443",
+            "-oX",
+            "-",
+            "--",
+            "10.10.10.10",
         ),
     ],
 )
@@ -435,8 +491,15 @@ def test_generic_curated_contract_accepts_target_bound_httpx_and_denies_shell_to
     )
     spec = ProcessSpec(
         argv=(
-            "httpx-toolkit", "-p", "80", "-json", "-no-fallback",
-            "-t", "10", "-timeout", "10",
+            "httpx-toolkit",
+            "-p",
+            "80",
+            "-json",
+            "-no-fallback",
+            "-t",
+            "10",
+            "-timeout",
+            "10",
         ),
         stdin=b"https://10.10.10.10\nhttp://10.10.10.10\n",
         timeout_seconds=30,
@@ -445,9 +508,7 @@ def test_generic_curated_contract_accepts_target_bound_httpx_and_denies_shell_to
 
     guard.authorize_initial(spec)
     with pytest.raises(ProcessAuthorizationError, match="template|token"):
-        guard.authorize_initial(
-            spec.model_copy(update={"argv": spec.argv + ("&&", "curl")})
-        )
+        guard.authorize_initial(spec.model_copy(update={"argv": spec.argv + ("&&", "curl")}))
 
 
 @pytest.mark.parametrize(
@@ -542,7 +603,7 @@ def test_zap_contract_accepts_only_the_exact_operation_yaml_shape(
         adapter="zap",
         operation="passive_scan",
         capability=capability,
-        inputs={},
+        inputs={"http_host": "orion.test"},
     )
     guard = _guard(
         tmp_path,
@@ -559,7 +620,11 @@ def test_zap_contract_accepts_only_the_exact_operation_yaml_shape(
     spec = ZapAdapter().plan(
         AdapterPlannedAction(
             operation="passive_scan",
-            inputs={"timeout": 30, "max_output": 4096},
+            inputs={
+                "timeout": 30,
+                "max_output": 4096,
+                "http_host": "orion.test",
+            },
         ),
         context,
     )
@@ -621,9 +686,7 @@ def test_katana_contract_rejects_a_seed_outside_the_exact_target(
     mutated = spec.model_copy(
         update={
             "argv": tuple(
-                "http://10.10.10.11/"
-                if item == "http://10.10.10.10/"
-                else item
+                "http://10.10.10.11/" if item == "http://10.10.10.10/" else item
                 for item in spec.argv
             )
         }
@@ -687,14 +750,16 @@ async def test_nmap_fallback_consumes_second_attempt_and_honours_budget(
             max_output_bytes=4096,
         )
     )
-    runtime = RecordingRuntime([
-        ProcessResult(
-            exit_code=1,
-            stdout="",
-            stderr="TCP/IP fingerprinting requires root privileges",
-        ),
-        ProcessResult(exit_code=0, stdout="", stderr=""),
-    ])
+    runtime = RecordingRuntime(
+        [
+            ProcessResult(
+                exit_code=1,
+                stdout="",
+                stderr="TCP/IP fingerprinting requires root privileges",
+            ),
+            ProcessResult(exit_code=0, stdout="", stderr=""),
+        ]
+    )
     guard = _guard(tmp_path, runtime, plan=plan)
     spec = _nmap_spec()
     guard.authorize_initial(spec)
@@ -709,19 +774,27 @@ async def test_nmap_fallback_consumes_second_attempt_and_honours_budget(
 async def test_nested_results_consume_combined_output_budget(
     tmp_path: Path,
 ) -> None:
-    runtime = RecordingRuntime([
-        ProcessResult(exit_code=0, stdout="a" * 3000, stderr="b" * 500),
-        ProcessResult(exit_code=0, stdout="c" * 700, stderr="",),
-    ])
+    runtime = RecordingRuntime(
+        [
+            ProcessResult(exit_code=0, stdout="a" * 3000, stderr="b" * 500),
+            ProcessResult(
+                exit_code=0,
+                stdout="c" * 700,
+                stderr="",
+            ),
+        ]
+    )
     guard = _guard(tmp_path, runtime)
     spec = _nmap_spec()
     guard.authorize_initial(spec)
 
     await guard.run(spec)
     with pytest.raises(ProcessAuthorizationError, match="output"):
-        await guard.run(spec.model_copy(update={"argv": tuple(
-            "-sT" if value == "-sS" else value for value in spec.argv
-        )}))
+        await guard.run(
+            spec.model_copy(
+                update={"argv": tuple("-sT" if value == "-sS" else value for value in spec.argv)}
+            )
+        )
 
     assert len(runtime.calls) == 1
 
@@ -731,9 +804,11 @@ async def test_elapsed_time_reduces_nested_timeout_budget(
     tmp_path: Path,
 ) -> None:
     now = [0.0]
-    runtime = RecordingRuntime([
-        ProcessResult(exit_code=0, stdout="", stderr=""),
-    ])
+    runtime = RecordingRuntime(
+        [
+            ProcessResult(exit_code=0, stdout="", stderr=""),
+        ]
+    )
     envelope = _envelope(tmp_path)
     contract = ExecutionContractRegistry.curated().require(
         envelope.adapter,

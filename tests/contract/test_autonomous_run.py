@@ -41,6 +41,7 @@ from ariadne.knowledge import (
     LocalToolProbe,
     RuntimeVerificationStore,
     ToolCardVerifier,
+    ToolVerificationBlockedError,
 )
 from ariadne.runtime.docker import LocalFirstRuntime
 from ariadne.runtime.process import ProcessResult, ProcessRunner
@@ -65,11 +66,45 @@ class RedirectRuntime(DryRunRuntime):
         return ProcessResult(
             exit_code=0,
             stdout=(
-                '{"url":"https://192.0.2.10/","status_code":302,'
-                '"redirect":true,"location":"https://192.0.2.11/admin"}\n'
+                '{"url":"http://192.0.2.10:80","status_code":302,'
+                '"redirect":false,"location":"http://orion.test/"}\n'
             ),
             stderr="",
         )
+
+
+class RedirectAliasRuntime(DryRunRuntime):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.specs = []
+
+    async def run(self, spec) -> ProcessResult:
+        self.calls += 1
+        self.specs.append(spec)
+        if spec.argv[0] == "httpx-toolkit":
+            if "Host: orion.test" not in spec.argv:
+                return ProcessResult(
+                    exit_code=0,
+                    stdout=(
+                        '{"url":"http://192.0.2.10:80","status_code":302,'
+                        '"redirect":false,"location":"http://orion.test/"}\n'
+                    ),
+                    stderr="",
+                )
+            return ProcessResult(
+                exit_code=0,
+                stdout=(
+                    '{"url":"http://192.0.2.10:80","status_code":200,"title":"Synthetic vhost"}\n'
+                ),
+                stderr="",
+            )
+        if spec.argv[0] == "curl":
+            return ProcessResult(
+                exit_code=0,
+                stdout='<a href="/synthetic">Synthetic</a>',
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected executable: {spec.argv[0]}")
 
 
 class NucleiRuntime(DryRunRuntime):
@@ -190,6 +225,22 @@ class CrawlerFallbackRuntime(ProcessRunner):
 class ZapProbeRuntime(ProcessRunner):
     def __init__(self) -> None:
         self.argv_calls: list[tuple[str, ...]] = []
+        self.inspection_calls: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
+
+    async def inspect_tool(
+        self,
+        executable: str,
+        *,
+        version_args: tuple[str, ...],
+        help_args: tuple[str, ...],
+    ) -> tuple[str, str, str, str]:
+        self.inspection_calls.append((executable, version_args, help_args))
+        return (
+            "/usr/bin/zaproxy",
+            "2.17.0-0kali1",
+            "Usage: zaproxy [options]\n  -help  Show help",
+            "local_help",
+        )
 
     async def run(self, spec) -> ProcessResult:
         argv = tuple(spec.argv)
@@ -231,11 +282,7 @@ class SyntheticGuardedVerticalRuntime:
                 stdout='<a href="/data/3">Download capture</a>',
                 stderr="",
             )
-        if (
-            executable == "curl"
-            and "--write-out" in argv
-            and argv.count("--url") > 1
-        ):
+        if executable == "curl" and "--write-out" in argv and argv.count("--url") > 1:
             records = []
             for output, url in zip(argv[14::4], argv[16::4], strict=True):
                 downloadable = "/download/" in url and url.endswith("/3")
@@ -244,8 +291,7 @@ class SyntheticGuardedVerticalRuntime:
                     body.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\0" * 64)
                 elif url.endswith("/data/3"):
                     body.write_text(
-                        "<button onclick=\"location.href='/download/3'\">"
-                        "Download capture</button>"
+                        "<button onclick=\"location.href='/download/3'\">Download capture</button>"
                     )
                 else:
                     body.write_text("<html>No artifact</html>")
@@ -255,9 +301,7 @@ class SyntheticGuardedVerticalRuntime:
                             "url_effective": url,
                             "response_code": 200,
                             "content_type": (
-                                "application/vnd.tcpdump.pcap"
-                                if downloadable
-                                else "text/html"
+                                "application/vnd.tcpdump.pcap" if downloadable else "text/html"
                             ),
                             "size_download": 68 if downloadable else 32,
                         },
@@ -288,10 +332,7 @@ class SyntheticGuardedVerticalRuntime:
         if executable == "tshark":
             return ProcessResult(
                 exit_code=0,
-                stdout=(
-                    'USER\t"lab-user"\t\n'
-                    'PASS\t"synthetic-credential-never-in-evidence"\t\n'
-                ),
+                stdout=('USER\t"lab-user"\t\nPASS\t"synthetic-credential-never-in-evidence"\t\n'),
                 stderr="",
             )
         if executable == "ssh":
@@ -351,6 +392,12 @@ class AcceptContract:
         return ConsentDecision.ACCEPT
 
 
+class AcceptContractAndAmendment(AcceptContract):
+    async def request_amendment(self, summary: object) -> ConsentDecision:
+        del summary
+        return ConsentDecision.ACCEPT
+
+
 class DeterministicDocumentationProbe(LocalToolProbe):
     """Side-effect-free probe for operational-flow tests."""
 
@@ -364,12 +411,29 @@ class DeterministicDocumentationProbe(LocalToolProbe):
         )
 
 
+class ZapDocumentationBlockedProbe(DeterministicDocumentationProbe):
+    def inspect(self, card, official_provider):
+        if card.executable == "zaproxy":
+            raise ToolVerificationBlockedError("synthetic ZAP documentation boundary")
+        return super().inspect(card, official_provider)
+
+
 def _isolated_tool_verifier(tmp_path: Path) -> ToolCardVerifier:
     knowledge_root = tmp_path / "canonical-knowledge"
     shutil.copytree(Path(__file__).parents[2] / "knowledge", knowledge_root)
     return ToolCardVerifier(
         index=KnowledgeIndex.load(knowledge_root),
         probe=DeterministicDocumentationProbe(),
+        store=RuntimeVerificationStore(tmp_path / "tool-runtime"),
+    )
+
+
+def _zap_blocked_tool_verifier(tmp_path: Path) -> ToolCardVerifier:
+    knowledge_root = tmp_path / "canonical-knowledge"
+    shutil.copytree(Path(__file__).parents[2] / "knowledge", knowledge_root)
+    return ToolCardVerifier(
+        index=KnowledgeIndex.load(knowledge_root),
+        probe=ZapDocumentationBlockedProbe(),
         store=RuntimeVerificationStore(tmp_path / "tool-runtime"),
     )
 
@@ -562,9 +626,7 @@ def test_evidence_driven_foothold_replay_uses_guarded_runtime_end_to_end(
             id=identifier,
             version=1,
             stage=stage,
-            triggers=(
-                Trigger(kind="observation_type", types=(evidence,)),
-            ),
+            triggers=(Trigger(kind="observation_type", types=(evidence,)),),
             required_evidence_types=frozenset({evidence}),
             capabilities=frozenset({capability}),
             actions=(
@@ -723,9 +785,7 @@ def test_evidence_driven_foothold_replay_uses_guarded_runtime_end_to_end(
             )
         )
         assert created["status"] == "active"
-        binding = services.command.get_session_binding(
-            "synthetic-guarded-vertical-session"
-        )
+        binding = services.command.get_session_binding("synthetic-guarded-vertical-session")
         assert binding is not None and binding.engagement_id is not None
         handle = services.store.open(binding.engagement_id)
         assert handle is not None
@@ -804,19 +864,14 @@ def test_evidence_driven_foothold_replay_uses_guarded_runtime_end_to_end(
         "ssh",
         "nmap",
     ]
-    assert not any(
-        event["event_type"] == "process_authorization_blocked"
-        for event in events
-    )
+    assert not any(event["event_type"] == "process_authorization_blocked" for event in events)
     assert {
         event["payload"]["objective_kind"]
         for event in events
         if event["event_type"] == "objective_completed"
     } == {"user_flag", "root_flag"}
     completed = [
-        event["payload"]
-        for event in events
-        if event["event_type"] == "objective_completed"
+        event["payload"] for event in events if event["event_type"] == "objective_completed"
     ]
     assert all(
         {
@@ -825,7 +880,8 @@ def test_evidence_driven_foothold_replay_uses_guarded_runtime_end_to_end(
             "proof_sha256",
             "observation_id",
             "target",
-        } <= payload.keys()
+        }
+        <= payload.keys()
         for payload in completed
     )
     assert "User flag: " + user_flag in result["message"]
@@ -847,11 +903,7 @@ def test_evidence_driven_foothold_replay_uses_guarded_runtime_end_to_end(
         assert objective_path.stat().st_mode & 0o777 == 0o600
     generic_files = [
         handle.path / "events.jsonl",
-        *(
-            path
-            for path in (handle.path / "artifacts").rglob("*")
-            if path.is_file()
-        ),
+        *(path for path in (handle.path / "artifacts").rglob("*") if path.is_file()),
     ]
     generic_content = b"\n".join(path.read_bytes() for path in generic_files)
     assert user_flag.encode() not in generic_content
@@ -1032,16 +1084,139 @@ async def test_post_execution_scope_candidate_persists_amendment_boundary(
     assert created["status"] == "active"
     assert result["status"] == "blocked"
     assert result["boundary"] == "scope_amendment"
-    assert result["candidate"]["target"] == "192.0.2.11"
+    assert result["candidate"]["target"] == "orion.test"
     assert any(event["event_type"] == "scope_candidate_discovered" for event in events)
     assert any(event["event_type"] == "scope_amendment_required" for event in events)
     assert runtime.calls == 1
-    assert (
-        tmp_path
-        / "canonical-knowledge"
-        / "tools"
-        / "httpx-toolkit.md"
-    ).is_file()
+    assert (tmp_path / "canonical-knowledge" / "tools" / "httpx-toolkit.md").is_file()
+
+
+@pytest.mark.asyncio
+async def test_approved_http_alias_uses_host_header_with_original_network_target(
+    tmp_path,
+) -> None:
+    fingerprint = Playbook(
+        id="scope.redirect.v1",
+        version=1,
+        stage="environment_preflight",
+        triggers=(Trigger(kind="engagement_state", types=("snapshot_locked",)),),
+        required_evidence_types=frozenset(),
+        capabilities=frozenset({"web.fingerprint"}),
+        actions=(
+            PlaybookAction(
+                adapter="httpx",
+                operation="scan",
+                inputs={"ports": [80], "timeout": 10, "max_output": 4096},
+            ),
+        ),
+        limits=PlaybookLimits(
+            max_rate=10,
+            max_concurrency=1,
+            max_attempts=1,
+            max_duration_seconds=30,
+            max_output_bytes=4096,
+        ),
+        stop_conditions=(),
+        success_emits=("web_technologies",),
+        next_playbooks=("web.alias-fetch.v1",),
+        report_sections=(),
+    )
+    fallback = Playbook(
+        id="web.alias-fetch.v1",
+        version=1,
+        stage="environment_preflight",
+        triggers=(Trigger(kind="observation_type", types=("web_technologies",)),),
+        required_evidence_types=frozenset({"web_technologies"}),
+        capabilities=frozenset({"web.content_discovery"}),
+        actions=(
+            PlaybookAction(
+                adapter="curl",
+                operation="fetch",
+                inputs={"timeout": 10, "max_output": 4096},
+            ),
+        ),
+        limits=PlaybookLimits(
+            max_rate=1,
+            max_concurrency=1,
+            max_attempts=1,
+            max_duration_seconds=30,
+            max_output_bytes=4096,
+        ),
+        stop_conditions=(),
+        success_emits=("web_paths",),
+        next_playbooks=(),
+        report_sections=(),
+    )
+    registry = AdapterRegistry()
+    registry.register("httpx", HttpxAdapter())
+    registry.register("curl", CurlAdapter())
+    runtime = RedirectAliasRuntime()
+    registry.default_runtime = runtime
+    services = ServiceContainer(
+        profile_name="approved-http-alias",
+        store=RunStore(base_path=tmp_path),
+        catalog=WorkflowCatalog(
+            playbooks={
+                fingerprint.id: fingerprint,
+                fallback.id: fallback,
+            }
+        ),
+        adapter_registry=registry,
+        consent_gateway=AcceptContractAndAmendment(),
+    )
+    object.__setattr__(services, "tool_card_verifier", None)
+    prepare = _handler_for("ariadne_prepare_engagement", services)
+    amend = _handler_for("ariadne_amend_engagement", services)
+    run = _handler_for("ariadne_run", services)
+    created = json.loads(
+        await prepare(
+            {
+                "profile": "private-lab",
+                "target_host": "192.0.2.10",
+                "objectives": ["proof"],
+                "autonomy": "controlled",
+                "intensity": "normal",
+                "exclusions": ["dos"],
+                "time_window_minutes": 30,
+            },
+            session_id="approved-http-alias-session",
+        )
+    )
+
+    boundary = json.loads(await run({"max_steps": 1}, session_id="approved-http-alias-session"))
+    assert created["status"] == "active"
+    assert boundary["boundary"] == "scope_amendment"
+    assert runtime.calls == 1
+
+    approved = json.loads(
+        await amend(
+            {
+                "add_targets": ["orion.test"],
+                "candidate_id": boundary["candidate"]["candidate_id"],
+                "reason": "Approve the observed HTTP virtual-host alias.",
+            },
+            session_id="approved-http-alias-session",
+        )
+    )
+    assert approved["status"] == "active"
+
+    resumed = json.loads(await run({"max_steps": 2}, session_id="approved-http-alias-session"))
+
+    assert resumed["boundary"] == "safety_step_limit", resumed
+    assert len(runtime.specs) == 3
+    assert "Host: orion.test" in runtime.specs[1].argv
+    assert "Host: orion.test" in runtime.specs[2].argv
+    assert runtime.specs[2].argv[-1] == "http://192.0.2.10:80/"
+    binding = services.command.get_session_binding("approved-http-alias-session")
+    assert binding is not None and binding.engagement_id is not None
+    handle = services.store.open(binding.engagement_id)
+    assert handle is not None
+    assert any(
+        event["event_type"] == "scope_alias_approved"
+        and event["payload"]["network_target"] == "192.0.2.10"
+        and event["payload"]["http_host"] == "orion.test"
+        for event in services.store.read_events(handle)
+    )
 
 
 @pytest.mark.asyncio
@@ -1312,11 +1487,7 @@ async def test_builtin_catalog_researches_each_service_without_blind_validation(
             if event.get("payload", {}).get("error")
         ],
     )
-    research_queries = [
-        call
-        for call in runtime.argv_calls
-        if call and call[0] == "searchsploit"
-    ]
+    research_queries = [call for call in runtime.argv_calls if call and call[0] == "searchsploit"]
     assert {call[-2:] for call in research_queries} == {
         ("Apache httpd", "2.4.58"),
         ("OpenSSH", "9.6"),
@@ -1375,6 +1546,14 @@ async def test_unavailable_web_provider_falls_back_without_ending_engagement(
                 inputs={
                     "scan_type": "passive",
                     "url": "https://192.0.2.10/",
+                    "tool_card": {
+                        "title": "OWASP ZAP",
+                        "official_source_url": ("https://www.zaproxy.org/docs/desktop/cmdline/"),
+                        "source_date": "2026-07-30",
+                        "summary": "Synthetic optional passive provider.",
+                        "version_args": ["-version"],
+                        "help_args": ["-help"],
+                    },
                 },
             ),
         ),
@@ -1395,7 +1574,15 @@ async def test_unavailable_web_provider_falls_back_without_ending_engagement(
             PlaybookAction(
                 adapter="curl",
                 operation="fetch",
-                inputs={"url": "http://192.0.2.10/"},
+                inputs={
+                    "url": "http://192.0.2.10/",
+                    "tool_card": {
+                        "title": "curl",
+                        "official_source_url": "https://curl.se/docs/manpage.html",
+                        "source_date": "2026-07-30",
+                        "summary": "Synthetic bounded HTTP fallback.",
+                    },
+                },
             ),
         ),
         limits=PlaybookLimits(max_attempts=1),
@@ -1420,15 +1607,14 @@ async def test_unavailable_web_provider_falls_back_without_ending_engagement(
         ),
         adapter_registry=registry,
         consent_gateway=AcceptContract(),
+        tool_card_verifier=_zap_blocked_tool_verifier(tmp_path),
     )
-    object.__setattr__(services, "tool_card_verifier", None)
     monkeypatch.setattr(
         "ariadne.hades_adapter.handlers.shutil.which",
-        lambda executable: (
-            None if executable in {"zap.sh", "zaproxy"} else f"/fixture/{executable}"
-        ),
+        lambda executable: f"/fixture/{executable}",
     )
     prepare = _handler_for("ariadne_prepare_engagement", services)
+    propose = _handler_for("ariadne_propose_plan", services)
     run = _handler_for("ariadne_run", services)
     created = json.loads(
         await prepare(
@@ -1462,7 +1648,7 @@ async def test_unavailable_web_provider_falls_back_without_ending_engagement(
     assert any(
         event["event_type"] == "execution_boundary"
         and event["payload"]["playbook_id"] == primary.id
-        and event["payload"]["boundary"] == "kali_runtime"
+        and event["payload"]["boundary"] == "tool_documentation"
         for event in events
     )
     assert any(
@@ -1472,6 +1658,33 @@ async def test_unavailable_web_provider_falls_back_without_ending_engagement(
         for event in events
     )
     assert runtime.argv_calls[0][0] == "curl"
+    services.store.append_event(
+        handle,
+        Event(
+            event_type="execution_boundary",
+            payload={
+                "plan_id": "synthetic-zap-terminal",
+                "playbook_id": primary.id,
+                "adapter": "zap",
+                "operation": "passive_scan",
+                "target": "192.0.2.10",
+                "boundary": "tool_documentation",
+                "reason": "synthetic optional-provider replay",
+            },
+            timestamp=datetime.now(UTC),
+        ),
+    )
+    terminal = json.loads(
+        await propose(
+            {
+                "snapshot_hash": handle.snapshot.snapshot_hash,
+                "hypothesis": "Continue after optional ZAP boundary.",
+            },
+            session_id="provider-fallback-session",
+        )
+    )
+    assert terminal["boundary"] == "optional_provider_complete"
+    assert "No eligible playbooks" not in terminal["message"]
 
 
 @pytest.mark.asyncio
@@ -1515,9 +1728,7 @@ async def test_declared_zap_probe_arguments_reach_local_first_runtime(
         local_runtime=probe_runtime,
         kali_runtime=probe_runtime,
         kali_executables=frozenset({"zaproxy"}),
-        local_locator=lambda executable: (
-            "/usr/bin/zaproxy" if executable == "zaproxy" else None
-        ),
+        local_locator=lambda executable: "/usr/bin/zaproxy" if executable == "zaproxy" else None,
     )
     services = ServiceContainer(
         profile_name="zap-probe",
@@ -1544,9 +1755,7 @@ async def test_declared_zap_probe_arguments_reach_local_first_runtime(
         )
     )
 
-    result = json.loads(
-        await run({"max_steps": 1}, session_id="zap-probe-session")
-    )
+    result = json.loads(await run({"max_steps": 1}, session_id="zap-probe-session"))
 
     binding = services.command.get_session_binding("zap-probe-session")
     assert binding is not None and binding.engagement_id is not None
@@ -1555,13 +1764,10 @@ async def test_declared_zap_probe_arguments_reach_local_first_runtime(
     events = services.store.read_events(handle)
     assert created["status"] == "active"
     assert result["boundary"] == "safety_step_limit", result
-    assert ("zaproxy", "-version") in probe_runtime.argv_calls
-    assert ("zaproxy", "-help") in probe_runtime.argv_calls
-    assert ("zaproxy", "--version") not in probe_runtime.argv_calls
-    assert any(
-        event["event_type"] == "tool_card_runtime_verified"
-        for event in events
-    )
+    assert probe_runtime.inspection_calls == [("zaproxy", ("-version",), ("-help",))]
+    assert ("zaproxy", "-version") not in probe_runtime.argv_calls
+    assert ("zaproxy", "-help") not in probe_runtime.argv_calls
+    assert any(event["event_type"] == "tool_card_runtime_verified" for event in events)
 
 
 @pytest.mark.asyncio

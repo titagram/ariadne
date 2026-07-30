@@ -18,6 +18,7 @@ Safety invariants
 
 from __future__ import annotations
 
+import ipaddress
 import json
 from functools import lru_cache
 from typing import ClassVar, cast
@@ -39,6 +40,7 @@ from ariadne.catalog.nuclei import (
     NucleiCatalogError,
     NucleiTemplateCatalog,
 )
+from ariadne.core.engagement import TargetSpec
 from ariadne.core.errors import AdapterPolicyError
 from ariadne.core.observations import Observation
 
@@ -209,6 +211,19 @@ class NucleiAdapter:
 
         # Target
         argv.extend(["-target", target])
+        http_host = inputs.get("http_host")
+        if http_host is not None:
+            if not isinstance(http_host, str):
+                raise AdapterError("http_host must be a hostname")
+            alias = TargetSpec(host=http_host).host
+            if alias == context.target.host:
+                raise AdapterError("http_host must be distinct from the network target")
+            try:
+                ipaddress.ip_address(alias)
+            except ValueError:
+                argv.extend(("-H", f"Host: {alias}"))
+            else:
+                raise AdapterError("http_host must be an approved FQDN alias")
 
         # JSONL output
         argv.append("-json")

@@ -248,12 +248,14 @@ class ExecutionContractRegistry:
                 ("authenticate",),
                 frozenset({"ssh"}),
                 "ariadne.adapters.ssh.SshAdapter",
-                allowed_environment_keys=frozenset({
-                    "ARIADNE_SECRET_FILE",
-                    "DISPLAY",
-                    "SSH_ASKPASS",
-                    "SSH_ASKPASS_REQUIRE",
-                }),
+                allowed_environment_keys=frozenset(
+                    {
+                        "ARIADNE_SECRET_FILE",
+                        "DISPLAY",
+                        "SSH_ASKPASS",
+                        "SSH_ASKPASS_REQUIRE",
+                    }
+                ),
             ),
             *bounded(
                 "screenshot",
@@ -274,12 +276,14 @@ class ExecutionContractRegistry:
                 ),
                 frozenset({"ssh"}),
                 "ariadne.adapters.postex.PostExAdapter",
-                allowed_environment_keys=frozenset({
-                    "ARIADNE_SECRET_FILE",
-                    "DISPLAY",
-                    "SSH_ASKPASS",
-                    "SSH_ASKPASS_REQUIRE",
-                }),
+                allowed_environment_keys=frozenset(
+                    {
+                        "ARIADNE_SECRET_FILE",
+                        "DISPLAY",
+                        "SSH_ASKPASS",
+                        "SSH_ASKPASS_REQUIRE",
+                    }
+                ),
             ),
             # The immutable action inputs select an OS-specific executable
             # for these shared operations.  Runtime policy still requires the
@@ -289,12 +293,14 @@ class ExecutionContractRegistry:
                 ("identity", "services"),
                 frozenset({"ssh", "impacket-wmiexec"}),
                 "ariadne.adapters.postex.PostExAdapter",
-                allowed_environment_keys=frozenset({
-                    "ARIADNE_SECRET_FILE",
-                    "DISPLAY",
-                    "SSH_ASKPASS",
-                    "SSH_ASKPASS_REQUIRE",
-                }),
+                allowed_environment_keys=frozenset(
+                    {
+                        "ARIADNE_SECRET_FILE",
+                        "DISPLAY",
+                        "SSH_ASKPASS",
+                        "SSH_ASKPASS_REQUIRE",
+                    }
+                ),
             ),
             *bounded(
                 "postex",
@@ -656,7 +662,9 @@ class GuardedRuntime:
 
     def _validate_httpx(self, spec: ProcessSpec) -> tuple[int, int]:
         argv = spec.argv
-        if len(argv) != 9 or argv[:2] != (
+        http_host = self._envelope.action_inputs.get("http_host")
+        expected_length = 11 if http_host is not None else 9
+        if len(argv) != expected_length or argv[:2] != (
             "httpx-toolkit",
             "-p",
         ):
@@ -668,6 +676,10 @@ class GuardedRuntime:
         target = self._envelope.exact_target.host
         expected_stdin = f"https://{target}\nhttp://{target}\n".encode()
         if spec.stdin != expected_stdin:
+            self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+        if http_host is not None and (
+            not isinstance(http_host, str) or argv[9:] != ("-H", f"Host: {http_host}")
+        ):
             self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
         try:
             threads = int(argv[6])
@@ -685,8 +697,10 @@ class GuardedRuntime:
         if self._contract.operation == "download":
             self._validate_curl_download(spec)
             return
+        http_host = self._envelope.action_inputs.get("http_host")
+        expected_length = 16 if http_host is not None else 14
         if (
-            len(spec.argv) != 14
+            len(spec.argv) != expected_length
             or spec.argv[:5]
             != (
                 "curl",
@@ -699,10 +713,18 @@ class GuardedRuntime:
             or spec.argv[7] != "--max-time"
             or spec.argv[9] != "--max-filesize"
             or spec.argv[11] != "--compressed"
-            or spec.argv[12] != "--url"
             or spec.stdin is not None
         ):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        if http_host is None:
+            if spec.argv[12] != "--url":
+                self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+        elif not isinstance(http_host, str) or spec.argv[12:15] != (
+            "--header",
+            f"Host: {http_host}",
+            "--url",
+        ):
+            self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
         self._validate_curl_numbers(
             spec.argv[6],
             spec.argv[8],
@@ -711,7 +733,7 @@ class GuardedRuntime:
         )
         if int(spec.argv[10]) > 2 * 1024 * 1024:
             self._deny(AuthorizationReason.OUTPUT_LIMIT, spec)
-        self._validate_exact_target_url(spec.argv[13], spec)
+        self._validate_exact_target_url(spec.argv[-1], spec)
 
     def _validate_curl_probe(self, spec: ProcessSpec) -> None:
         argv = spec.argv
@@ -853,6 +875,9 @@ class GuardedRuntime:
             "-cs",
             "-kf",
         }
+        http_host = self._envelope.action_inputs.get("http_host")
+        if http_host is not None:
+            valued_flags.add("-H")
         if not argv or argv[0] != "katana" or spec.stdin is not None:
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         parsed: dict[str, str] = {}
@@ -911,6 +936,10 @@ class GuardedRuntime:
             or retries != 1
             or parsed["-cs"] != expected_scope
             or parsed["-kf"] != "all"
+            or (
+                http_host is not None
+                and (not isinstance(http_host, str) or parsed["-H"] != f"Host: {http_host}")
+            )
         ):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         return rate, concurrency
@@ -923,6 +952,11 @@ class GuardedRuntime:
         target_index = argv.index("-target") if "-target" in argv else -1
         template_args = argv[1:target_index]
         template_paths = template_args[1::2]
+        http_host = self._envelope.action_inputs.get("http_host")
+        if http_host is not None and not isinstance(http_host, str):
+            self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+        header_args = ("-H", f"Host: {http_host}") if isinstance(http_host, str) else ()
+        json_index = target_index + 2 + len(header_args)
         if (
             target_index <= 2
             or argv.count("-target") != 1
@@ -935,17 +969,18 @@ class GuardedRuntime:
                 or ".." in Path(path).parts
                 for path in template_paths
             )
-            or argv[target_index + 1 : target_index + 3] != (target, "-json")
-            or argv[target_index + 3] != "-rate-limit"
-            or argv[target_index + 5] != "-timeout"
-            or target_index + 7 != len(argv)
+            or argv[target_index + 1 : json_index] != (target, *header_args)
+            or argv[json_index] != "-json"
+            or argv[json_index + 1] != "-rate-limit"
+            or argv[json_index + 3] != "-timeout"
+            or json_index + 5 != len(argv)
         ):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         if argv[target_index + 1] != target:
             self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
         try:
-            rate = int(argv[target_index + 4])
-            timeout = int(argv[target_index + 6])
+            rate = int(argv[json_index + 2])
+            timeout = int(argv[json_index + 4])
         except (IndexError, ValueError):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         if rate < 1 or timeout < 1:
@@ -953,10 +988,7 @@ class GuardedRuntime:
         return rate
 
     def _validate_zap(self, spec: ProcessSpec) -> None:
-        if (
-            spec.argv != ("zaproxy", "-cmd", "-autorun", "/dev/stdin")
-            or spec.stdin is None
-        ):
+        if spec.argv != ("zaproxy", "-cmd", "-autorun", "/dev/stdin") or spec.stdin is None:
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         try:
             automation = yaml.safe_load(spec.stdin)
@@ -996,16 +1028,36 @@ class GuardedRuntime:
         if not isinstance(jobs, list):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         operation = self._contract.operation
+        http_host = self._envelope.action_inputs.get("http_host")
+        scan_jobs = jobs
+        if http_host is not None:
+            expected_replacer = {
+                "type": "replacer",
+                "parameters": {"deleteAllRules": False},
+                "rules": [
+                    {
+                        "description": "approved-http-host-alias",
+                        "url": f"^{re.escape(target_url.rstrip('/'))}/.*",
+                        "matchType": "req_header",
+                        "matchString": "Host",
+                        "matchRegex": False,
+                        "replacementString": http_host,
+                    }
+                ],
+            }
+            if not isinstance(http_host, str) or not jobs or jobs[0] != expected_replacer:
+                self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+            scan_jobs = jobs[1:]
         expected_types = {
             "passive_scan": ["passiveScan-config", "spider"],
             "spider": ["passiveScan-config", "spider"],
             "active_scan": ["passiveScan-config", "spider", "activeScan"],
         }[operation]
-        if [job.get("type") for job in jobs if isinstance(job, dict)] != expected_types:
+        if [job.get("type") for job in scan_jobs if isinstance(job, dict)] != expected_types:
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
-        if len(jobs) != len(expected_types):
+        if len(scan_jobs) != len(expected_types):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
-        for job, job_type in zip(jobs, expected_types, strict=True):
+        for job, job_type in zip(scan_jobs, expected_types, strict=True):
             if not isinstance(job, dict) or set(job) != {"type", "parameters"}:
                 self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
             parameters = job["parameters"]
@@ -1123,9 +1175,7 @@ class GuardedRuntime:
             or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None
         ):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
-        expected_artifact = (
-            self._envelope.run_root / "artifacts" / artifact_name
-        ).resolve()
+        expected_artifact = (self._envelope.run_root / "artifacts" / artifact_name).resolve()
         expected = (
             "tshark",
             "-r",
@@ -1151,8 +1201,7 @@ class GuardedRuntime:
             spec.argv != expected
             or spec.stdin is not None
             or not expected_artifact.is_file()
-            or hashlib.sha256(expected_artifact.read_bytes()).hexdigest()
-            != expected_digest
+            or hashlib.sha256(expected_artifact.read_bytes()).hexdigest() != expected_digest
         ):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
 
@@ -1213,16 +1262,10 @@ class GuardedRuntime:
         run_root = self._envelope.run_root.resolve()
         workspace = (run_root / "workspace").resolve()
         secrets = (run_root / "secrets").resolve()
-        known_hosts = Path(
-            argv[8].removeprefix("UserKnownHostsFile=")
-        ).resolve()
+        known_hosts = Path(argv[8].removeprefix("UserKnownHostsFile=")).resolve()
         helper = Path(str(spec.environment.get("SSH_ASKPASS", ""))).resolve()
-        secret = Path(
-            str(spec.environment.get("ARIADNE_SECRET_FILE", ""))
-        ).resolve()
-        expected_helper = (
-            Path(__file__).resolve().parents[1] / "runtime" / "ssh_askpass.py"
-        )
+        secret = Path(str(spec.environment.get("ARIADNE_SECRET_FILE", ""))).resolve()
+        expected_helper = Path(__file__).resolve().parents[1] / "runtime" / "ssh_askpass.py"
         expected_secret = (run_root / expected_ref).resolve()
         if (
             set(spec.environment)
@@ -1280,10 +1323,8 @@ class GuardedRuntime:
                     remote = spec.argv[-1]
                     interpreter = remote.split(" ", 1)[0]
                     if (
-                        interpreter
-                        != self._envelope.action_inputs.get("interpreter")
-                        or
-                        re.fullmatch(
+                        interpreter != self._envelope.action_inputs.get("interpreter")
+                        or re.fullmatch(
                             r"/(?:usr/(?:local/)?)?bin/python(?:3(?:\.\d+)?)?",
                             interpreter,
                         )

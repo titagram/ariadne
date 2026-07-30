@@ -61,6 +61,11 @@ _ALLOWED_VERSION_PROBES: Final[frozenset[tuple[str, ...]]] = frozenset(
 _ALLOWED_HELP_PROBES: Final[frozenset[tuple[str, ...]]] = frozenset(
     {("--help",), ("-h",), ("-help",)}
 )
+_CURATED_ZAP_GUIDANCE: Final[str] = (
+    "OWASP ZAP command line guidance: use -cmd for headless mode, "
+    "-autorun for an Automation Framework plan, -version for version "
+    "output, and -help for command options."
+)
 
 
 class DockerRuntime:
@@ -204,12 +209,20 @@ class LocalFirstRuntime:
         version_args: tuple[str, ...] = ("--version",),
         help_args: tuple[str, ...] = ("--help",),
     ) -> tuple[str, str, str, str]:
-        if (
-            version_args not in _ALLOWED_VERSION_PROBES
-            or help_args not in _ALLOWED_HELP_PROBES
-        ):
+        if version_args not in _ALLOWED_VERSION_PROBES or help_args not in _ALLOWED_HELP_PROBES:
             raise KaliRuntimeUnavailableError(
                 f"Uncurated version/help inspection requested for {executable}."
+            )
+        if executable == "zaproxy" and executable in self._kali_executables:
+            inspect = getattr(self._kali_runtime, "inspect_tool", None)
+            if not callable(inspect):
+                raise KaliRuntimeUnavailableError(
+                    "Kali runtime does not support bounded ZAP inspection."
+                )
+            return await inspect(
+                executable,
+                version_args=version_args,
+                help_args=help_args,
             )
         local_path = self._local_locator(executable)
         if local_path is not None:
@@ -312,9 +325,7 @@ class OnDemandKaliRuntime:
         ]
         for key, value in sorted(spec.environment.items()):
             command.extend(["-e", f"{key}={self._container_value(value)}"])
-        command.extend(
-            ["kali", *(self._container_value(value) for value in spec.argv)]
-        )
+        command.extend(["kali", *(self._container_value(value) for value in spec.argv)])
         return await self._command_runtime.run(
             ProcessSpec(
                 argv=tuple(command),
@@ -359,16 +370,39 @@ class OnDemandKaliRuntime:
         help_args: tuple[str, ...] = ("--help",),
     ) -> tuple[str, str, str, str]:
         """Collect bounded version/help from the installed container tool."""
-        if (
-            version_args not in _ALLOWED_VERSION_PROBES
-            or help_args not in _ALLOWED_HELP_PROBES
-        ):
+        if version_args not in _ALLOWED_VERSION_PROBES or help_args not in _ALLOWED_HELP_PROBES:
             raise KaliRuntimeUnavailableError(
                 f"Uncurated version/help inspection requested for {executable}."
             )
         if executable not in self._curated_executables:
             raise KaliRuntimeUnavailableError(f"{executable} is not in the curated Kali manifest.")
         await self._ensure_started()
+        if executable == "zaproxy":
+            location = await self._container_command(
+                ("which", executable),
+                timeout_seconds=5,
+            )
+            version = await self._container_command(
+                ("dpkg-query", "-W", "-f=${Version}\\n", "zaproxy"),
+                timeout_seconds=5,
+            )
+            location_text = location.stdout.strip()
+            version_text = version.stdout.strip()
+            if (
+                location.exit_code != 0
+                or not location_text
+                or version.exit_code != 0
+                or not version_text
+            ):
+                raise KaliRuntimeUnavailableError(
+                    "Bounded package-metadata inspection failed for zaproxy."
+                )
+            return (
+                location_text,
+                version_text[:4096],
+                _CURATED_ZAP_GUIDANCE,
+                "official_provider",
+            )
         location = await self._container_command(("which", executable))
         version = await self._container_command((executable, *version_args))
         guidance = await self._container_command((executable, *help_args))
@@ -377,23 +411,15 @@ class OnDemandKaliRuntime:
         guidance_text = (guidance.stdout or guidance.stderr).strip()
         if version.exit_code != 0 or not version_text:
             version_text = await self._installed_package_version(location_text)
-        guidance_is_help = (
-            bool(guidance_text)
-            and (
-                guidance.exit_code == 0
-                or (
-                    guidance.exit_code in {-1, 1, 2}
-                    and re.search(r"(?im)^\s*usage\s*:", guidance_text) is not None
-                    and any(flag in guidance_text for flag in help_args)
-                )
+        guidance_is_help = bool(guidance_text) and (
+            guidance.exit_code == 0
+            or (
+                guidance.exit_code in {-1, 1, 2}
+                and re.search(r"(?im)^\s*usage\s*:", guidance_text) is not None
+                and any(flag in guidance_text for flag in help_args)
             )
         )
-        if (
-            location.exit_code != 0
-            or not location_text
-            or not version_text
-            or not guidance_is_help
-        ):
+        if location.exit_code != 0 or not location_text or not version_text or not guidance_is_help:
             raise KaliRuntimeUnavailableError(
                 f"Bounded version/help inspection failed for {executable}."
             )
@@ -407,17 +433,13 @@ class OnDemandKaliRuntime:
     async def _installed_package_version(self, executable_path: str) -> str:
         if not executable_path:
             return ""
-        owner = await self._container_command(
-            ("dpkg-query", "-S", executable_path)
-        )
+        owner = await self._container_command(("dpkg-query", "-S", executable_path))
         if owner.exit_code != 0 or not owner.stdout.strip():
             return ""
         package = owner.stdout.splitlines()[0].partition(":")[0].strip()
         if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]*", package):
             return ""
-        version = await self._container_command(
-            ("dpkg-query", "-W", "-f=${Version}\\n", package)
-        )
+        version = await self._container_command(("dpkg-query", "-W", "-f=${Version}\\n", package))
         if version.exit_code != 0:
             return ""
         return version.stdout.strip()
@@ -566,9 +588,7 @@ class OnDemandKaliRuntime:
                 )
             relative_path = path.removeprefix(template_root)
             if not relative_path or ".." in Path(relative_path).parts:
-                raise KaliRuntimeUnavailableError(
-                    f"Nuclei template path is invalid: {path}"
-                )
+                raise KaliRuntimeUnavailableError(f"Nuclei template path is invalid: {path}")
             exists = await self._container_command(("test", "-f", path))
             if exists.exit_code != 0:
                 raise KaliRuntimeUnavailableError(
@@ -594,6 +614,8 @@ class OnDemandKaliRuntime:
     async def _container_command(
         self,
         argv: tuple[str, ...],
+        *,
+        timeout_seconds: int = 30,
     ) -> ProcessResult:
         return await self._command_runtime.run(
             ProcessSpec(
@@ -606,7 +628,7 @@ class OnDemandKaliRuntime:
                 ),
                 cwd=self._compose_dir,
                 environment=self._compose_environment(),
-                timeout_seconds=30,
+                timeout_seconds=timeout_seconds,
                 max_output_bytes=256 * 1024,
             )
         )
@@ -678,9 +700,7 @@ class OnDemandKaliRuntime:
                 digest = str(image.get("digest", ""))
                 if re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
                     return digest
-        raise KaliRuntimeUnavailableError(
-            f"No pinned {image_name} digest for linux/{architecture}"
-        )
+        raise KaliRuntimeUnavailableError(f"No pinned {image_name} digest for linux/{architecture}")
 
     def _platform_image_reference(self, image_name: str) -> str | None:
         architecture = {

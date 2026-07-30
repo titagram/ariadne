@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 from html.parser import HTMLParser
@@ -75,6 +76,25 @@ class CurlAdapter:
     async def probe(self, runtime: Runtime) -> ToolProbe:
         return ToolProbe(available=True)
 
+    @staticmethod
+    def _http_host(
+        action: PlannedAction,
+        context: AdapterContext,
+    ) -> str | None:
+        value = action.inputs.get("http_host")
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise AdapterError("http_host must be a hostname")
+        alias = TargetSpec(host=value).host
+        if alias == context.target.host:
+            raise AdapterError("http_host must be distinct from the network target")
+        try:
+            ipaddress.ip_address(alias)
+        except ValueError:
+            return alias
+        raise AdapterError("http_host must be an approved FQDN alias")
+
     def plan(
         self,
         action: PlannedAction,
@@ -108,23 +128,26 @@ class CurlAdapter:
         max_bytes = int(action.inputs.get("max_output", 1024 * 1024))
         if not 1 <= max_bytes <= 2 * 1024 * 1024:
             raise AdapterError("max_output must be between 1 byte and 2 MiB")
+        argv = [
+            "curl",
+            "--silent",
+            "--show-error",
+            "--proto",
+            "=http,https",
+            "--connect-timeout",
+            str(min(timeout, 10)),
+            "--max-time",
+            str(timeout),
+            "--max-filesize",
+            str(max_bytes),
+            "--compressed",
+        ]
+        http_host = self._http_host(action, context)
+        if http_host is not None:
+            argv.extend(("--header", f"Host: {http_host}"))
+        argv.extend(("--url", url))
         return ProcessSpec(
-            argv=(
-                "curl",
-                "--silent",
-                "--show-error",
-                "--proto",
-                "=http,https",
-                "--connect-timeout",
-                str(min(timeout, 10)),
-                "--max-time",
-                str(timeout),
-                "--max-filesize",
-                str(max_bytes),
-                "--compressed",
-                "--url",
-                url,
-            ),
+            argv=tuple(argv),
             timeout_seconds=timeout + 5,
             max_output_bytes=max_bytes,
         )
@@ -160,9 +183,7 @@ class CurlAdapter:
         timeout = int(action.inputs.get("timeout", 20))
         if not 1 <= timeout <= 30:
             raise AdapterError("timeout must be between 1 and 30 seconds")
-        digest = context.action_digest or hashlib.sha256(
-            "\n".join(urls).encode()
-        ).hexdigest()
+        digest = context.action_digest or hashlib.sha256("\n".join(urls).encode()).hexdigest()
         if not all(character in "0123456789abcdef" for character in digest.casefold()):
             raise AdapterError("action digest is invalid")
         probe_root = context.run_root.resolve() / "probes"
@@ -304,14 +325,8 @@ class CurlAdapter:
             for index, argument in enumerate(spec.argv)
             if argument == "--output"
         )
-        reference_probe = bool(
-            output_paths and output_paths[0].name.startswith("webref_")
-        )
-        download_path = (
-            output_paths[0]
-            if len(output_paths) == 1 and not reference_probe
-            else None
-        )
+        reference_probe = bool(output_paths and output_paths[0].name.startswith("webref_"))
+        download_path = output_paths[0] if len(output_paths) == 1 and not reference_probe else None
         observations: list[Observation] = []
         for record_index, line in enumerate(result.stdout.splitlines()):
             try:
@@ -378,11 +393,7 @@ class CurlAdapter:
                         )
                     )
                 continue
-            if (
-                result.exit_code != 0
-                or not 200 <= status < 300
-                or not download_path.is_file()
-            ):
+            if result.exit_code != 0 or not 200 <= status < 300 or not download_path.is_file():
                 continue
             content = download_path.read_bytes()
             observations.append(

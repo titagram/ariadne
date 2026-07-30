@@ -75,12 +75,20 @@ class TestNucleiPlan:
 
     def test_scan_plan_includes_target(self, context: AdapterContext) -> None:
         spec = NucleiAdapter().plan(
-            action("scan", validated_candidates=[validated_candidate()]),
+            action(
+                "scan",
+                validated_candidates=[validated_candidate()],
+                http_host="orion.test",
+            ),
             context,
         )
         assert spec.argv[0] == "nuclei"
         argv_str = " ".join(spec.argv)
         assert "10.10.10.10" in argv_str
+        assert spec.argv[spec.argv.index("-H") : spec.argv.index("-H") + 2] == (
+            "-H",
+            "Host: orion.test",
+        )
 
     def test_scan_plan_selects_exact_cve_from_pinned_catalog(self, context: AdapterContext) -> None:
         spec = NucleiAdapter().plan(

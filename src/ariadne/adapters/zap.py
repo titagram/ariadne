@@ -15,6 +15,7 @@ Safety invariants
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 from typing import Any, ClassVar
@@ -34,6 +35,7 @@ from ariadne.adapters.base import (
     Runtime,
     ToolProbe,
 )
+from ariadne.core.engagement import TargetSpec
 from ariadne.core.observations import Observation
 
 
@@ -41,6 +43,7 @@ def _build_automation_plan(
     context: AdapterContext,
     *,
     seed_url: str | None = None,
+    http_host: str | None = None,
 ) -> dict[str, Any]:
     """Build a ZAP Automation Framework plan dict from the engagement context.
 
@@ -58,24 +61,40 @@ def _build_automation_plan(
         or parsed.password is not None
         or parsed.fragment
     ):
-        raise AdapterError(
-            f"ZAP seed {target_url!r} is outside the exact target scope"
-        )
+        raise AdapterError(f"ZAP seed {target_url!r} is outside the exact target scope")
     root_url = f"{parsed.scheme}://{parsed.netloc}"
     escaped_root = re.escape(root_url)
+    if http_host is not None:
+        alias = TargetSpec(host=http_host).host
+        if alias == context.target.host:
+            raise AdapterError("http_host must be distinct from the network target")
+        try:
+            ipaddress.ip_address(alias)
+        except ValueError:
+            http_host = alias
+        else:
+            raise AdapterError("http_host must be an approved FQDN alias")
 
-    plan: dict[str, Any] = {
-        "env": {
-            "contexts": [
-                {
-                    "name": "ariadne",
-                    "urls": [root_url],
-                    "includePaths": [f"{escaped_root}/.*"],
-                    "excludePaths": [],
-                }
-            ]
-        },
-        "jobs": [
+    jobs: list[dict[str, Any]] = []
+    if http_host is not None:
+        jobs.append(
+            {
+                "type": "replacer",
+                "parameters": {"deleteAllRules": False},
+                "rules": [
+                    {
+                        "description": "approved-http-host-alias",
+                        "url": f"^{escaped_root}/.*",
+                        "matchType": "req_header",
+                        "matchString": "Host",
+                        "matchRegex": False,
+                        "replacementString": http_host,
+                    }
+                ],
+            }
+        )
+    jobs.extend(
+        [
             {
                 "type": "passiveScan-config",
                 "parameters": {
@@ -89,7 +108,20 @@ def _build_automation_plan(
                     "maxDuration": 5,
                 },
             },
-        ],
+        ]
+    )
+    plan: dict[str, Any] = {
+        "env": {
+            "contexts": [
+                {
+                    "name": "ariadne",
+                    "urls": [root_url],
+                    "includePaths": [f"{escaped_root}/.*"],
+                    "excludePaths": [],
+                }
+            ]
+        },
+        "jobs": jobs,
     }
 
     return plan
@@ -129,15 +161,21 @@ class ZapAdapter:
         op = action.operation
         if op not in _OPERATIONS:
             raise AdapterError(
-                f"Unknown ZAP operation: {op!r}. "
-                f"Supported: {', '.join(sorted(_OPERATIONS))}"
+                f"Unknown ZAP operation: {op!r}. Supported: {', '.join(sorted(_OPERATIONS))}"
             )
 
         inputs = action.inputs
         seed_url = inputs.get("url")
         if seed_url is not None and not isinstance(seed_url, str):
             raise AdapterError("ZAP url must be a string")
-        plan = _build_automation_plan(context, seed_url=seed_url)
+        http_host = inputs.get("http_host")
+        if http_host is not None and not isinstance(http_host, str):
+            raise AdapterError("http_host must be a hostname")
+        plan = _build_automation_plan(
+            context,
+            seed_url=seed_url,
+            http_host=http_host,
+        )
 
         if op == "active_scan":
             plan["jobs"].append(
@@ -149,11 +187,8 @@ class ZapAdapter:
                 }
             )
         elif op == "spider":
-            plan["jobs"] = [
-                j for j in plan["jobs"] if j["type"] != "spider"
-            ]
-            plan["jobs"].insert(
-                1,
+            plan["jobs"] = [j for j in plan["jobs"] if j["type"] != "spider"]
+            plan["jobs"].append(
                 {
                     "type": "spider",
                     "parameters": {

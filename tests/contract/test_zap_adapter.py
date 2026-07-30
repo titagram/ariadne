@@ -66,14 +66,10 @@ def action(operation: str, **inputs: object) -> PlannedAction:
 class TestZapPlan:
     """Verify that ZapAdapter.automation_plan() generates correct YAML."""
 
-    def test_automation_plan_contains_confirmed_context(
-        self, context: AdapterContext
-    ) -> None:
+    def test_automation_plan_contains_confirmed_context(self, context: AdapterContext) -> None:
         plan = ZapAdapter().automation_plan(context)
         assert plan["env"]["contexts"][0]["urls"] == ["https://10.10.10.10"]
-        assert plan["env"]["contexts"][0]["includePaths"] == [
-            r"https://10\.10\.10\.10/.*"
-        ]
+        assert plan["env"]["contexts"][0]["includePaths"] == [r"https://10\.10\.10\.10/.*"]
 
     def test_automation_plan_fqdn(self, context_fqdn: AdapterContext) -> None:
         """FQDN targets should produce the correct context URL."""
@@ -82,30 +78,25 @@ class TestZapPlan:
         include_paths = plan["env"]["contexts"][0]["includePaths"]
         assert any("scanme\\.nmap\\.org" in p for p in include_paths)
 
-    def test_automation_plan_includes_passive_scan(
-        self, context: AdapterContext
-    ) -> None:
+    def test_automation_plan_includes_passive_scan(self, context: AdapterContext) -> None:
         plan = ZapAdapter().automation_plan(context)
         job_types = [j["type"] for j in plan["jobs"]]
         assert "passiveScan-config" in job_types
 
-    def test_automation_plan_includes_spider(
-        self, context: AdapterContext
-    ) -> None:
+    def test_automation_plan_includes_spider(self, context: AdapterContext) -> None:
         plan = ZapAdapter().automation_plan(context)
         job_types = [j["type"] for j in plan["jobs"]]
         assert "spider" in job_types
 
-    def test_automation_plan_rejects_unknown_operation(
-        self, context: AdapterContext
-    ) -> None:
+    def test_automation_plan_rejects_unknown_operation(self, context: AdapterContext) -> None:
         with pytest.raises(AdapterError):
             ZapAdapter().plan(action("unknown_op"), context)
 
-    def test_plan_returns_process_spec_with_yaml_stdin(
-        self, context: AdapterContext
-    ) -> None:
-        spec = ZapAdapter().plan(action("passive_scan"), context)
+    def test_plan_returns_process_spec_with_yaml_stdin(self, context: AdapterContext) -> None:
+        spec = ZapAdapter().plan(
+            action("passive_scan", http_host="orion.test"),
+            context,
+        )
         assert spec.argv == (
             "zaproxy",
             "-cmd",
@@ -116,10 +107,22 @@ class TestZapPlan:
         stdin_text = spec.stdin.decode("utf-8")
         parsed = yaml.safe_load(stdin_text)
         assert parsed["env"]["contexts"][0]["urls"] == ["https://10.10.10.10"]
+        assert parsed["jobs"][0] == {
+            "type": "replacer",
+            "parameters": {"deleteAllRules": False},
+            "rules": [
+                {
+                    "description": "approved-http-host-alias",
+                    "url": r"^https://10\.10\.10\.10/.*",
+                    "matchType": "req_header",
+                    "matchString": "Host",
+                    "matchRegex": False,
+                    "replacementString": "orion.test",
+                }
+            ],
+        }
 
-    def test_sets_bounded_timeout_and_output(
-        self, context: AdapterContext
-    ) -> None:
+    def test_sets_bounded_timeout_and_output(self, context: AdapterContext) -> None:
         bounded_context = context.model_copy(
             update={"limits": PlaybookLimits(max_duration_seconds=180)}
         )
@@ -127,9 +130,7 @@ class TestZapPlan:
         assert spec.timeout_seconds == 180
         assert spec.max_output_bytes >= 1024
 
-    def test_active_scan_rejects_random_paths_without_policy(
-        self, context: AdapterContext
-    ) -> None:
+    def test_active_scan_rejects_random_paths_without_policy(self, context: AdapterContext) -> None:
         """Active scan should reject unapproved paths outside scope."""
         spec = ZapAdapter().plan(action("active_scan"), context)
         assert spec.stdin is not None

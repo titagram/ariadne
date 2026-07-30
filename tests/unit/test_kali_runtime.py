@@ -18,12 +18,10 @@ from ariadne.runtime.process import ProcessResult, ProcessSpec
 _REVISION = "9979ce144c257f1c427a75604f8c0ffbc8293390"
 _INDEX_SHA = "c8b69adb4b906eba5e9d9239f1d775d8175739a8bc263073243b0f0c129c74f9"
 _PINNED_KALI_REF = (
-    "ariadne-kali@"
-    "sha256:38348d7ab556982555ffcea3fcfd0aa9ffaa30286ce4fcc3802cb92aa2c15b67"
+    "ariadne-kali@sha256:38348d7ab556982555ffcea3fcfd0aa9ffaa30286ce4fcc3802cb92aa2c15b67"
 )
 _PINNED_NETGUARD_REF = (
-    "ariadne-netguard@"
-    "sha256:0da048944617b30d54d330d8fd983924ccc2bef45205e901f467229808a95789"
+    "ariadne-netguard@sha256:0da048944617b30d54d330d8fd983924ccc2bef45205e901f467229808a95789"
 )
 
 
@@ -127,35 +125,7 @@ class _ZapProbeCommandRuntime(_PinnedImageCommandRuntime):
                 stdout="/usr/bin/zaproxy\n",
                 stderr="",
             )
-        if argv[-2:] == ("zaproxy", "-version"):
-            self.calls.append(spec)
-            return ProcessResult(
-                exit_code=-1,
-                stdout="2.17.0\n",
-                stderr="",
-                timed_out=True,
-            )
-        if argv[-2:] == ("zaproxy", "-help"):
-            self.calls.append(spec)
-            return ProcessResult(
-                exit_code=-1,
-                stdout=(
-                    "Usage:\n"
-                    "  zap.sh [Options]\n"
-                    "  -version  Reports the ZAP version\n"
-                    "  -help     Shows all command line options\n"
-                ),
-                stderr="",
-                timed_out=True,
-            )
-        if argv[-3:] == ("dpkg-query", "-S", "/usr/bin/zaproxy"):
-            self.calls.append(spec)
-            return ProcessResult(
-                exit_code=0,
-                stdout="zaproxy: /usr/bin/zaproxy\n",
-                stderr="",
-            )
-        if "dpkg-query" in argv and "-W" in argv:
+        if argv[-4:] == ("dpkg-query", "-W", "-f=${Version}\\n", "zaproxy"):
             self.calls.append(spec)
             return ProcessResult(
                 exit_code=0,
@@ -193,9 +163,7 @@ def test_kali_reuses_locally_available_pinned_image_without_rebuild(tmp_path) ->
 
     commands = [" ".join(call.argv) for call in command_runtime.calls]
     compose_up = next(
-        call
-        for call in command_runtime.calls
-        if " up " in f" {' '.join(call.argv)} "
+        call for call in command_runtime.calls if " up " in f" {' '.join(call.argv)} "
     )
     assert any(" image inspect " in f" {command} " for command in commands)
     assert " up --no-build --detach --wait " in f" {' '.join(compose_up.argv)} "
@@ -230,13 +198,12 @@ def test_kali_uses_package_metadata_when_tool_has_no_version_flag(tmp_path) -> N
     assert asyncio.run(runtime.inspect_tool("searchsploit")) == (
         "/usr/bin/searchsploit",
         "20260709-0kali1",
-        "Usage: searchsploit [options] term\n"
-        "Options:\n  -h, --help  Show this help screen",
+        "Usage: searchsploit [options] term\nOptions:\n  -h, --help  Show this help screen",
         "local_help",
     )
 
 
-def test_kali_uses_declared_zap_probe_args_and_bounded_help_output(
+def test_kali_zap_probe_uses_package_metadata_within_total_budget(
     tmp_path,
 ) -> None:
     snapshot = EngagementSnapshot(
@@ -273,16 +240,27 @@ def test_kali_uses_declared_zap_probe_args_and_bounded_help_output(
     assert inspection == (
         "/usr/bin/zaproxy",
         "2.17.0-0kali1",
-        "Usage:\n"
-        "  zap.sh [Options]\n"
-        "  -version  Reports the ZAP version\n"
-        "  -help     Shows all command line options",
-        "local_help",
+        "OWASP ZAP command line guidance: use -cmd for headless mode, "
+        "-autorun for an Automation Framework plan, -version for version "
+        "output, and -help for command options.",
+        "official_provider",
     )
-    commands = [call.argv for call in command_runtime.calls]
-    assert any(command[-2:] == ("zaproxy", "-version") for command in commands)
-    assert any(command[-2:] == ("zaproxy", "-help") for command in commands)
-    assert not any(command[-2:] == ("zaproxy", "--help") for command in commands)
+    probe_calls = [
+        call
+        for call in command_runtime.calls
+        if call.argv[-2:] == ("which", "zaproxy")
+        or call.argv[-4:] == ("dpkg-query", "-W", "-f=${Version}\\n", "zaproxy")
+    ]
+    assert sum(call.timeout_seconds for call in probe_calls) <= 15
+    assert not any(
+        call.argv[-2:]
+        in {
+            ("zaproxy", "-version"),
+            ("zaproxy", "-help"),
+            ("zaproxy", "--help"),
+        }
+        for call in command_runtime.calls
+    )
 
 
 def test_kali_startup_error_includes_compose_stdout(tmp_path) -> None:
@@ -432,9 +410,7 @@ def test_research_runtime_routes_each_tool_without_eager_kali() -> None:
         kali_runtime=kali,
         kali_executables=frozenset({"msfconsole"}),
         local_locator=lambda executable: (
-            f"/usr/bin/{executable}"
-            if executable in {"curl", "searchsploit"}
-            else None
+            f"/usr/bin/{executable}" if executable in {"curl", "searchsploit"} else None
         ),
     )
 
