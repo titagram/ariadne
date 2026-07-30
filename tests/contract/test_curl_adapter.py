@@ -91,3 +91,28 @@ def test_curl_fetch_extracts_literal_routes_from_static_javascript() -> None:
         "http://192.0.2.10:80/capture",
         "http://192.0.2.10:80/status?id=1",
     }
+
+
+def test_curl_fetch_promotes_explicit_html_technology_version() -> None:
+    adapter = CurlAdapter()
+    spec = adapter.plan(
+        PlannedAction(
+            operation="fetch",
+            inputs={"url": "http://192.0.2.10:80/admin/login"},
+        ),
+        _context(),
+    )
+    observations = adapter.parse_for_spec(
+        ProcessResult(
+            exit_code=0,
+            stdout="<footer>Powered by Craft CMS 5.6.16</footer>",
+            stderr="",
+        ),
+        TargetSpec(host="192.0.2.10"),
+        spec,
+    )
+    technology = next(
+        item for item in observations if item.data.get("type") == "service_fingerprinted"
+    )
+    assert technology.data["product"] == "Craft CMS"
+    assert technology.data["version"] == "5.6.16"

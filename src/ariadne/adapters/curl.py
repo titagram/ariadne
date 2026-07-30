@@ -324,6 +324,29 @@ class CurlAdapter:
                     },
                 )
             )
+        version_match = re.search(
+            r"\bCraft\s+CMS\s+(?P<version>\d+\.\d+(?:\.\d+)?)\b",
+            result.stdout,
+            flags=re.IGNORECASE,
+        )
+        if version_match is not None:
+            seed_url = urlparse(seed)
+            observations.append(
+                Observation(
+                    observation_id=uuid4(),
+                    target=target,
+                    source="curl",
+                    data={
+                        "type": "service_fingerprinted",
+                        "service": "http",
+                        "protocol": "tcp",
+                        "port": seed_url.port or (443 if seed_url.scheme == "https" else 80),
+                        "product": "Craft CMS",
+                        "version": version_match.group("version"),
+                        "evidence": "HTML technology/version marker",
+                    },
+                )
+            )
         return tuple(observations)
 
     def _parse_metadata(
