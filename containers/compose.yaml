@@ -51,4 +51,5 @@ services:
       - ENGAGEMENT_DIR=/engagement
       - EVIDENCE_DIR=/evidence
       - HOME=/workspace/home
+      - JAVA_TOOL_OPTIONS=-Duser.home=/workspace/home
     restart: "no"

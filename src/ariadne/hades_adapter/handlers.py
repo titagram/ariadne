@@ -124,6 +124,30 @@ def _tool_id_for_executable(executable: str) -> str:
     return f"tool.{slug}"
 
 
+def _declared_tool_probe_args(
+    action_inputs: dict[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    declaration = action_inputs.get("tool_card")
+    if declaration is None:
+        return ("--version",), ("--help",)
+    if not isinstance(declaration, dict):
+        raise ToolVerificationBlockedError(
+            "playbook tool_card metadata must be a mapping"
+        )
+    version_args = declaration.get("version_args", ("--version",))
+    help_args = declaration.get("help_args", ("--help",))
+    if (
+        not isinstance(version_args, (list, tuple))
+        or not isinstance(help_args, (list, tuple))
+        or tuple(version_args) not in {("--version",), ("-version",)}
+        or tuple(help_args) not in {("--help",), ("-h",), ("-help",)}
+    ):
+        raise ToolVerificationBlockedError(
+            "unknown-tool probes must use a curated version/help form"
+        )
+    return tuple(version_args), tuple(help_args)
+
+
 def _inspect_planned_tool(
     *,
     verifier: ToolCardVerifier,
@@ -190,17 +214,7 @@ def _inspect_planned_tool(
         raise ToolVerificationBlockedError(
             f"{tool_id}: playbook tool_card title and summary must be strings"
         )
-    version_args = metadata.get("version_args", ("--version",))
-    help_args = metadata.get("help_args", ("--help",))
-    if (
-        not isinstance(version_args, (list, tuple))
-        or not isinstance(help_args, (list, tuple))
-        or tuple(version_args) not in {("--version",), ("-version",)}
-        or tuple(help_args) not in {("--help",), ("-h",), ("-help",)}
-    ):
-        raise ToolVerificationBlockedError(
-            f"{tool_id}: unknown-tool probes must use a curated version/help form"
-        )
+    version_args, help_args = _declared_tool_probe_args(action_inputs)
 
     slug = tool_id.removeprefix("tool.")
     try:
@@ -213,8 +227,8 @@ def _inspect_planned_tool(
             official_source_url=official_url,
             source_date=source_date,
             summary=summary,
-            version_args=("--version",),
-            help_args=("--help",),
+            version_args=version_args,
+            help_args=help_args,
         )
     except ValidationError as exc:
         raise ToolVerificationBlockedError(
@@ -2835,7 +2849,14 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                             raise ToolVerificationBlockedError(
                                 "Kali runtime cannot inspect the planned tool"
                             )
-                        runtime_inspection = await inspect_tool(process_spec.argv[0])
+                        version_args, help_args = _declared_tool_probe_args(
+                            action.inputs
+                        )
+                        runtime_inspection = await inspect_tool(
+                            process_spec.argv[0],
+                            version_args=version_args,
+                            help_args=help_args,
+                        )
                     pending_tool_verification = _inspect_planned_tool(
                         verifier=tool_card_verifier,
                         process_argv=process_spec.argv,

@@ -57,6 +57,7 @@ def test_kali_root_filesystem_is_read_only_with_persistent_home() -> None:
     assert kali["read_only"] is True
     assert any(str(value).startswith("/tmp:") for value in kali["tmpfs"])
     assert "HOME=/workspace/home" in kali["environment"]
+    assert "JAVA_TOOL_OPTIONS=-Duser.home=/workspace/home" in kali["environment"]
     assert kali["command"] == ["sleep", "infinity"]
 
 

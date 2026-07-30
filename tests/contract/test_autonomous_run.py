@@ -42,6 +42,7 @@ from ariadne.knowledge import (
     RuntimeVerificationStore,
     ToolCardVerifier,
 )
+from ariadne.runtime.docker import LocalFirstRuntime
 from ariadne.runtime.process import ProcessResult, ProcessRunner
 from ariadne.store.run_store import ArtifactInput, Event, RunStore
 
@@ -184,6 +185,34 @@ class CrawlerFallbackRuntime(ProcessRunner):
                 stderr="",
             )
         raise AssertionError(f"Unexpected executable: {spec.argv[0]}")
+
+
+class ZapProbeRuntime(ProcessRunner):
+    def __init__(self) -> None:
+        self.argv_calls: list[tuple[str, ...]] = []
+
+    async def run(self, spec) -> ProcessResult:
+        argv = tuple(spec.argv)
+        self.argv_calls.append(argv)
+        if argv == ("zaproxy", "-version"):
+            return ProcessResult(exit_code=0, stdout="ZAP 2.17.0", stderr="")
+        if argv == ("zaproxy", "-help"):
+            return ProcessResult(
+                exit_code=0,
+                stdout="Usage: zaproxy [options]\n  -help  Show help",
+                stderr="",
+            )
+        if argv[:2] == ("zaproxy", "-cmd"):
+            return ProcessResult(
+                exit_code=0,
+                stdout=(
+                    '[{"alert":"Missing X-Content-Type-Options",'
+                    '"risk":"Low","confidence":"High",'
+                    '"url":"http://192.0.2.10/","alertRef":"10021"}]'
+                ),
+                stderr="",
+            )
+        return ProcessResult(exit_code=1, stdout="", stderr="unsupported probe")
 
 
 class SyntheticGuardedVerticalRuntime:
@@ -1443,6 +1472,96 @@ async def test_unavailable_web_provider_falls_back_without_ending_engagement(
         for event in events
     )
     assert runtime.argv_calls[0][0] == "curl"
+
+
+@pytest.mark.asyncio
+async def test_declared_zap_probe_arguments_reach_local_first_runtime(
+    tmp_path,
+) -> None:
+    playbook = Playbook(
+        id="web.zap-probe.v1",
+        version=1,
+        stage="environment_preflight",
+        triggers=(Trigger(kind="engagement_state", types=("snapshot_locked",)),),
+        required_evidence_types=frozenset(),
+        capabilities=frozenset({"web.passive_scan"}),
+        actions=(
+            PlaybookAction(
+                adapter="zap",
+                operation="passive_scan",
+                inputs={
+                    "url": "http://192.0.2.10/",
+                    "tool_card": {
+                        "title": "OWASP ZAP",
+                        "official_source_url": "https://www.zaproxy.org/docs/desktop/cmdline/",
+                        "source_date": "2026-07-30",
+                        "summary": "Official OWASP proxy for passive analysis.",
+                        "version_args": ["-version"],
+                        "help_args": ["-help"],
+                    },
+                },
+            ),
+        ),
+        limits=PlaybookLimits(max_attempts=1, max_duration_seconds=30),
+        stop_conditions=("provider_complete",),
+        success_emits=("zap_passive_alerts",),
+        next_playbooks=(),
+        report_sections=("web",),
+    )
+    registry = AdapterRegistry()
+    registry.register("zap", ZapAdapter())
+    probe_runtime = ZapProbeRuntime()
+    registry.default_runtime = LocalFirstRuntime(
+        local_runtime=probe_runtime,
+        kali_runtime=probe_runtime,
+        kali_executables=frozenset({"zaproxy"}),
+        local_locator=lambda executable: (
+            "/usr/bin/zaproxy" if executable == "zaproxy" else None
+        ),
+    )
+    services = ServiceContainer(
+        profile_name="zap-probe",
+        store=RunStore(base_path=tmp_path),
+        catalog=WorkflowCatalog(playbooks={playbook.id: playbook}),
+        adapter_registry=registry,
+        consent_gateway=AcceptContract(),
+        tool_card_verifier=_isolated_tool_verifier(tmp_path),
+    )
+    prepare = _handler_for("ariadne_prepare_engagement", services)
+    run = _handler_for("ariadne_run", services)
+    created = json.loads(
+        await prepare(
+            {
+                "profile": "private-lab",
+                "target_host": "192.0.2.10",
+                "objectives": ["proof"],
+                "autonomy": "controlled",
+                "intensity": "normal",
+                "exclusions": ["dos"],
+                "time_window_minutes": 30,
+            },
+            session_id="zap-probe-session",
+        )
+    )
+
+    result = json.loads(
+        await run({"max_steps": 1}, session_id="zap-probe-session")
+    )
+
+    binding = services.command.get_session_binding("zap-probe-session")
+    assert binding is not None and binding.engagement_id is not None
+    handle = services.store.open(binding.engagement_id)
+    assert handle is not None
+    events = services.store.read_events(handle)
+    assert created["status"] == "active"
+    assert result["boundary"] == "safety_step_limit", result
+    assert ("zaproxy", "-version") in probe_runtime.argv_calls
+    assert ("zaproxy", "-help") in probe_runtime.argv_calls
+    assert ("zaproxy", "--version") not in probe_runtime.argv_calls
+    assert any(
+        event["event_type"] == "tool_card_runtime_verified"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio

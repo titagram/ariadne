@@ -55,6 +55,12 @@ class RuntimeHandle:
 # ── DockerRuntime ────────────────────────────────────────────────────────
 
 _COMPOSE_DIR: Final[Path] = Path(__file__).resolve().parent.parent.parent.parent / "containers"
+_ALLOWED_VERSION_PROBES: Final[frozenset[tuple[str, ...]]] = frozenset(
+    {("--version",), ("-version",)}
+)
+_ALLOWED_HELP_PROBES: Final[frozenset[tuple[str, ...]]] = frozenset(
+    {("--help",), ("-h",), ("-help",)}
+)
 
 
 class DockerRuntime:
@@ -194,19 +200,29 @@ class LocalFirstRuntime:
     async def inspect_tool(
         self,
         executable: str,
+        *,
+        version_args: tuple[str, ...] = ("--version",),
+        help_args: tuple[str, ...] = ("--help",),
     ) -> tuple[str, str, str, str]:
+        if (
+            version_args not in _ALLOWED_VERSION_PROBES
+            or help_args not in _ALLOWED_HELP_PROBES
+        ):
+            raise KaliRuntimeUnavailableError(
+                f"Uncurated version/help inspection requested for {executable}."
+            )
         local_path = self._local_locator(executable)
         if local_path is not None:
             version = await self._local_runtime.run(
                 ProcessSpec(
-                    argv=(executable, "--version"),
+                    argv=(executable, *version_args),
                     timeout_seconds=10,
                     max_output_bytes=4096,
                 )
             )
             guidance = await self._local_runtime.run(
                 ProcessSpec(
-                    argv=(executable, "--help"),
+                    argv=(executable, *help_args),
                     timeout_seconds=10,
                     max_output_bytes=4096,
                 )
@@ -228,7 +244,11 @@ class LocalFirstRuntime:
             raise KaliRuntimeUnavailableError(
                 "Kali runtime does not support bounded tool inspection."
             )
-        return await inspect(executable)
+        return await inspect(
+            executable,
+            version_args=version_args,
+            help_args=help_args,
+        )
 
 
 class OnDemandKaliRuntime:
@@ -334,28 +354,37 @@ class OnDemandKaliRuntime:
     async def inspect_tool(
         self,
         executable: str,
+        *,
+        version_args: tuple[str, ...] = ("--version",),
+        help_args: tuple[str, ...] = ("--help",),
     ) -> tuple[str, str, str, str]:
         """Collect bounded version/help from the installed container tool."""
+        if (
+            version_args not in _ALLOWED_VERSION_PROBES
+            or help_args not in _ALLOWED_HELP_PROBES
+        ):
+            raise KaliRuntimeUnavailableError(
+                f"Uncurated version/help inspection requested for {executable}."
+            )
         if executable not in self._curated_executables:
             raise KaliRuntimeUnavailableError(f"{executable} is not in the curated Kali manifest.")
         await self._ensure_started()
         location = await self._container_command(("which", executable))
-        version = await self._container_command((executable, "--version"))
-        guidance = await self._container_command((executable, "--help"))
+        version = await self._container_command((executable, *version_args))
+        guidance = await self._container_command((executable, *help_args))
         location_text = location.stdout.strip()
         version_text = (version.stdout or version.stderr).strip()
         guidance_text = (guidance.stdout or guidance.stderr).strip()
         if version.exit_code != 0 or not version_text:
             version_text = await self._installed_package_version(location_text)
         guidance_is_help = (
-            not guidance.timed_out
-            and bool(guidance_text)
+            bool(guidance_text)
             and (
                 guidance.exit_code == 0
                 or (
-                    guidance.exit_code in {1, 2}
+                    guidance.exit_code in {-1, 1, 2}
                     and re.search(r"(?im)^\s*usage\s*:", guidance_text) is not None
-                    and "--help" in guidance_text
+                    and any(flag in guidance_text for flag in help_args)
                 )
             )
         )

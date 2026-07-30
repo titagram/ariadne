@@ -117,6 +117,54 @@ class _SearchSploitPackageVersionRuntime(_PinnedImageCommandRuntime):
         return await super().run(spec)
 
 
+class _ZapProbeCommandRuntime(_PinnedImageCommandRuntime):
+    async def run(self, spec: ProcessSpec) -> ProcessResult:
+        argv = spec.argv
+        if argv[-2:] == ("which", "zaproxy"):
+            self.calls.append(spec)
+            return ProcessResult(
+                exit_code=0,
+                stdout="/usr/bin/zaproxy\n",
+                stderr="",
+            )
+        if argv[-2:] == ("zaproxy", "-version"):
+            self.calls.append(spec)
+            return ProcessResult(
+                exit_code=-1,
+                stdout="2.17.0\n",
+                stderr="",
+                timed_out=True,
+            )
+        if argv[-2:] == ("zaproxy", "-help"):
+            self.calls.append(spec)
+            return ProcessResult(
+                exit_code=-1,
+                stdout=(
+                    "Usage:\n"
+                    "  zap.sh [Options]\n"
+                    "  -version  Reports the ZAP version\n"
+                    "  -help     Shows all command line options\n"
+                ),
+                stderr="",
+                timed_out=True,
+            )
+        if argv[-3:] == ("dpkg-query", "-S", "/usr/bin/zaproxy"):
+            self.calls.append(spec)
+            return ProcessResult(
+                exit_code=0,
+                stdout="zaproxy: /usr/bin/zaproxy\n",
+                stderr="",
+            )
+        if "dpkg-query" in argv and "-W" in argv:
+            self.calls.append(spec)
+            return ProcessResult(
+                exit_code=0,
+                stdout="2.17.0-0kali1\n",
+                stderr="",
+            )
+        return await super().run(spec)
+
+
 def test_kali_reuses_locally_available_pinned_image_without_rebuild(tmp_path) -> None:
     snapshot = EngagementSnapshot(
         engagement_id=uuid4(),
@@ -186,6 +234,55 @@ def test_kali_uses_package_metadata_when_tool_has_no_version_flag(tmp_path) -> N
         "Options:\n  -h, --help  Show this help screen",
         "local_help",
     )
+
+
+def test_kali_uses_declared_zap_probe_args_and_bounded_help_output(
+    tmp_path,
+) -> None:
+    snapshot = EngagementSnapshot(
+        engagement_id=uuid4(),
+        revision=1,
+        previous_snapshot_hash=None,
+        snapshot_hash="0" * 64,
+        confirmed_at=datetime.now(UTC),
+        authorization_attested=True,
+        disclaimer_version="1.0",
+        profile=EnvironmentProfile.PRIVATE_LAB,
+        autonomy=AutonomyMode.CONTROLLED,
+        targets=(TargetSpec(host="192.0.2.10"),),
+        objectives=(Objective(kind="proof"),),
+    )
+    command_runtime = _ZapProbeCommandRuntime()
+    runtime = OnDemandKaliRuntime(
+        snapshot=snapshot,
+        run_root=tmp_path,
+        command_runtime=command_runtime,
+        docker_locator=lambda _: "/usr/local/bin/docker",
+        kali_image_ref=_PINNED_KALI_REF,
+        netguard_image_ref=_PINNED_NETGUARD_REF,
+    )
+
+    inspection = asyncio.run(
+        runtime.inspect_tool(
+            "zaproxy",
+            version_args=("-version",),
+            help_args=("-help",),
+        )
+    )
+
+    assert inspection == (
+        "/usr/bin/zaproxy",
+        "2.17.0-0kali1",
+        "Usage:\n"
+        "  zap.sh [Options]\n"
+        "  -version  Reports the ZAP version\n"
+        "  -help     Shows all command line options",
+        "local_help",
+    )
+    commands = [call.argv for call in command_runtime.calls]
+    assert any(command[-2:] == ("zaproxy", "-version") for command in commands)
+    assert any(command[-2:] == ("zaproxy", "-help") for command in commands)
+    assert not any(command[-2:] == ("zaproxy", "--help") for command in commands)
 
 
 def test_kali_startup_error_includes_compose_stdout(tmp_path) -> None:
