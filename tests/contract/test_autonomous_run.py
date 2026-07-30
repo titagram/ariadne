@@ -201,15 +201,29 @@ class SyntheticGuardedVerticalRuntime:
                 stdout='<a href="/data/3">Download capture</a>',
                 stderr="",
             )
-        if executable == "curl" and argv[argv.index("--output") + 1] == "/dev/null":
+        if (
+            executable == "curl"
+            and "--write-out" in argv
+            and argv.count("--url") > 1
+        ):
             records = []
-            for url in argv[16::2]:
-                downloadable = url.endswith("/0")
+            for output, url in zip(argv[14::4], argv[16::4], strict=True):
+                downloadable = "/download/" in url and url.endswith("/3")
+                body = Path(output)
+                if downloadable:
+                    body.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\0" * 64)
+                elif url.endswith("/data/3"):
+                    body.write_text(
+                        "<button onclick=\"location.href='/download/3'\">"
+                        "Download capture</button>"
+                    )
+                else:
+                    body.write_text("<html>No artifact</html>")
                 records.append(
                     json.dumps(
                         {
                             "url_effective": url,
-                            "response_code": 200 if downloadable else 404,
+                            "response_code": 200,
                             "content_type": (
                                 "application/vnd.tcpdump.pcap"
                                 if downloadable
@@ -725,7 +739,7 @@ def test_evidence_driven_foothold_replay_uses_guarded_runtime_end_to_end(
             )
         result = json.loads(
             await run(
-                {"max_steps": 10},
+                {"max_steps": 11},
                 session_id="synthetic-guarded-vertical-session",
             )
         )
@@ -737,6 +751,7 @@ def test_evidence_driven_foothold_replay_uses_guarded_runtime_end_to_end(
 
     assert result["status"] == "complete", result
     assert [argv[0] for argv in runtime.argv_calls] == [
+        "curl",
         "curl",
         "curl",
         "curl",

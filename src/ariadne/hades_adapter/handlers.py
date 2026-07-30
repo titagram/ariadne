@@ -1072,8 +1072,21 @@ def _observed_object_reference_urls(
     target: TargetSpec,
 ) -> tuple[str, ...]:
     """Derive one bounded adjacent-ID set from already observed same-host URLs."""
+    probed_urls = {
+        str(observation.data["url"])
+        for observation in observations
+        if (
+            observation.target == target
+            and observation.source == "web_object_reference"
+            and observation.data.get("type") == "object_reference_candidate"
+            and isinstance(observation.data.get("url"), str)
+        )
+    }
     for observation in reversed(observations):
-        if observation.target != target:
+        if (
+            observation.target != target
+            or observation.source == "web_object_reference"
+        ):
             continue
         value = observation.data.get("url")
         if not isinstance(value, str):
@@ -1102,7 +1115,9 @@ def _observed_object_reference_urls(
                 + parsed.path[match.end("identifier") :]
             )
             urls.append(parsed._replace(path=path, query="").geturl())
-        return tuple(dict.fromkeys(urls))
+        pending = tuple(url for url in dict.fromkeys(urls) if url not in probed_urls)
+        if pending:
+            return pending
     return ()
 
 
@@ -1735,6 +1750,10 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 playbook.id == "web.http-fallback.v1"
                 and pending_capture_url is not None
             )
+            or (
+                playbook.id == "web.object-reference.v1"
+                and bool(object_reference_urls)
+            )
         )
         and (
             playbook.id != "web.object-reference.v1"
@@ -1745,7 +1764,18 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             or _observed_ssh_port(observations, first_target) is not None
         )
     )
-    if last_routing_playbook in catalog.playbooks:
+    if (
+        "web.object-reference.v1" in executed_playbooks
+        and object_reference_urls
+    ):
+        repeated_reference_probe = tuple(
+            playbook
+            for playbook in eligible
+            if playbook.id == "web.object-reference.v1"
+        )
+        if repeated_reference_probe:
+            eligible = repeated_reference_probe
+    elif last_routing_playbook in catalog.playbooks:
         allowed_next = catalog.playbooks[last_routing_playbook].next_playbooks
         preferred = tuple(
             playbook for playbook in eligible if playbook.id in allowed_next

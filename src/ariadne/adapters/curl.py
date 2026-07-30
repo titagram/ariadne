@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import ClassVar
@@ -35,6 +36,21 @@ class _LinkExtractor(HTMLParser):
         tag: str,
         attrs: list[tuple[str, str | None]],
     ) -> None:
+        for key, value in attrs:
+            if (
+                key.casefold() == "onclick"
+                and isinstance(value, str)
+                and (
+                    match := re.fullmatch(
+                        r"""\s*(?:window\.)?location(?:\.href)?\s*=\s*
+                        (?P<quote>['"])(?P<url>[^'"]+)(?P=quote)\s*;?\s*""",
+                        value,
+                        flags=re.VERBOSE | re.IGNORECASE,
+                    )
+                )
+                is not None
+            ):
+                self.references.append(match.group("url"))
         attribute = {
             "a": "href",
             "area": "href",
@@ -133,6 +149,8 @@ class CurlAdapter:
         action: PlannedAction,
         context: AdapterContext,
     ) -> ProcessSpec:
+        if context.run_root is None:
+            raise AdapterError("reference probe requires a durable run root")
         values = action.inputs.get("urls")
         if not isinstance(values, (list, tuple)) or not values:
             raise AdapterError("urls must contain target-bound object references")
@@ -142,6 +160,13 @@ class CurlAdapter:
         timeout = int(action.inputs.get("timeout", 20))
         if not 1 <= timeout <= 30:
             raise AdapterError("timeout must be between 1 and 30 seconds")
+        digest = context.action_digest or hashlib.sha256(
+            "\n".join(urls).encode()
+        ).hexdigest()
+        if not all(character in "0123456789abcdef" for character in digest.casefold()):
+            raise AdapterError("action digest is invalid")
+        probe_root = context.run_root.resolve() / "probes"
+        probe_root.mkdir(parents=True, exist_ok=True)
         argv = [
             "curl",
             "--silent",
@@ -157,8 +182,9 @@ class CurlAdapter:
             "--write-out",
             "%{json}\\n",
         ]
-        for url in urls:
-            argv.extend(("--output", "/dev/null", "--url", url))
+        for index, url in enumerate(urls):
+            output = probe_root / f"webref_{digest[:20]}_{index}.body"
+            argv.extend(("--output", str(output), "--url", url))
         return ProcessSpec(
             argv=tuple(argv),
             timeout_seconds=min(300, timeout * len(urls) + 5),
@@ -273,13 +299,21 @@ class CurlAdapter:
         target: TargetSpec,
         spec: ProcessSpec,
     ) -> tuple[Observation, ...]:
-        download_path: Path | None = None
-        if "--output" in spec.argv:
-            raw_output = spec.argv[spec.argv.index("--output") + 1]
-            if raw_output != "/dev/null":
-                download_path = Path(raw_output)
+        output_paths = tuple(
+            Path(spec.argv[index + 1])
+            for index, argument in enumerate(spec.argv)
+            if argument == "--output"
+        )
+        reference_probe = bool(
+            output_paths and output_paths[0].name.startswith("webref_")
+        )
+        download_path = (
+            output_paths[0]
+            if len(output_paths) == 1 and not reference_probe
+            else None
+        )
         observations: list[Observation] = []
-        for line in result.stdout.splitlines():
+        for record_index, line in enumerate(result.stdout.splitlines()):
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
@@ -326,6 +360,23 @@ class CurlAdapter:
                         },
                     )
                 )
+                if (
+                    reference_probe
+                    and 200 <= status < 300
+                    and str(content_type).casefold().startswith("text/html")
+                    and record_index < len(output_paths)
+                    and output_paths[record_index].is_file()
+                ):
+                    observations.extend(
+                        self._parse_html_references(
+                            output_paths[record_index].read_text(
+                                encoding="utf-8",
+                                errors="replace",
+                            ),
+                            url,
+                            target,
+                        )
+                    )
                 continue
             if (
                 result.exit_code != 0
@@ -346,6 +397,51 @@ class CurlAdapter:
                         "content_type": str(content_type),
                         "size_bytes": len(content),
                         "sha256": hashlib.sha256(content).hexdigest(),
+                    },
+                )
+            )
+        return tuple(observations)
+
+    def _parse_html_references(
+        self,
+        body: str,
+        seed: str,
+        target: TargetSpec,
+    ) -> tuple[Observation, ...]:
+        extractor = _LinkExtractor()
+        extractor.feed(body)
+        observations: list[Observation] = []
+        seen: set[str] = set()
+        for reference in extractor.references:
+            url = urljoin(seed, reference)
+            parsed = urlparse(url)
+            if (
+                url == seed
+                or url in seen
+                or parsed.scheme not in {"http", "https"}
+                or parsed.hostname is None
+                or parsed.hostname.casefold() != target.host.casefold()
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.fragment
+            ):
+                continue
+            seen.add(url)
+            observations.append(
+                Observation(
+                    observation_id=uuid4(),
+                    target=target,
+                    source="curl",
+                    data={
+                        "type": "web_paths",
+                        "url": url,
+                        "path": parsed.path or "/",
+                        "method": "GET",
+                        "fetched": False,
+                        "discovered_from": seed,
+                        "parameters": tuple(
+                            dict.fromkeys(key for key, _ in parse_qsl(parsed.query))
+                        ),
                     },
                 )
             )
@@ -389,7 +485,7 @@ class CurlAdapter:
         if "--output" not in spec.argv:
             return ()
         output = Path(spec.argv[spec.argv.index("--output") + 1])
-        if output == Path("/dev/null") or not output.is_file():
+        if output.name.startswith("webref_") or not output.is_file():
             return ()
         return (output.name,)
 

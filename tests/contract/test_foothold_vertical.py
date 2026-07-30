@@ -66,21 +66,26 @@ def test_object_reference_probe_is_target_bound_and_download_is_persisted(
 
     assert probe.argv.count("--url") == 2
     assert probe.argv.count("--output") == 2
-    assert all(
-        probe.argv[index + 1] == "/dev/null"
+    probe_outputs = [
+        Path(probe.argv[index + 1])
         for index, argument in enumerate(probe.argv)
         if argument == "--output"
+    ]
+    assert all(output.parent == tmp_path / "probes" for output in probe_outputs)
+    probe_outputs[0].write_text("<html>No download here</html>")
+    probe_outputs[1].write_text(
+        "<button onclick=\"location.href='/download/1'\">Download</button>"
     )
     observations = adapter.parse_for_spec(
         ProcessResult(
             exit_code=0,
             stdout=(
                 '{"url_effective":"http://192.0.2.10/data/0",'
-                '"response_code":200,"content_type":"application/vnd.tcpdump.pcap",'
-                '"size_download":512}\n'
+                '"response_code":200,"content_type":"text/html",'
+                '"size_download":29}\n'
                 '{"url_effective":"http://192.0.2.10/data/1",'
-                '"response_code":404,"content_type":"text/html",'
-                '"size_download":32}\n'
+                '"response_code":200,"content_type":"text/html",'
+                '"size_download":64}\n'
             ),
             stderr="",
         ),
@@ -88,15 +93,45 @@ def test_object_reference_probe_is_target_bound_and_download_is_persisted(
         probe,
     )
 
-    assert len(observations) == 2
+    assert len(observations) == 3
     assert observations[0].source == "web_object_reference"
-    assert observations[0].data["download_candidate"] is True
+    assert observations[0].data["download_candidate"] is False
+    assert observations[2].source == "curl"
+    assert observations[2].data["url"] == "http://192.0.2.10/download/1"
+
+    verified_probe = adapter.plan(
+        PlannedAction(
+            operation="probe_references",
+            inputs={"urls": ["http://192.0.2.10/download/1"], "timeout": 20},
+        ),
+        context,
+    )
+    verified_output = Path(
+        verified_probe.argv[verified_probe.argv.index("--output") + 1]
+    )
+    verified_output.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\0" * 64)
+    verified = adapter.parse_for_spec(
+        ProcessResult(
+            exit_code=0,
+            stdout=(
+                '{"url_effective":"http://192.0.2.10/download/1",'
+                '"response_code":200,"content_type":"application/vnd.tcpdump.pcap",'
+                '"size_download":68}\n'
+            ),
+            stderr="",
+        ),
+        context.target,
+        verified_probe,
+    )
+
+    assert verified[0].source == "web_object_reference"
+    assert verified[0].data["download_candidate"] is True
 
     download = adapter.plan(
         PlannedAction(
             operation="download",
             inputs={
-                "url": "http://192.0.2.10/data/0",
+                "url": "http://192.0.2.10/download/1",
                 "expected_content_type": "application/vnd.tcpdump.pcap",
                 "max_output": 2 * 1024 * 1024,
             },
@@ -110,7 +145,7 @@ def test_object_reference_probe_is_target_bound_and_download_is_persisted(
         ProcessResult(
             exit_code=0,
             stdout=(
-                '{"url_effective":"http://192.0.2.10/data/0",'
+                '{"url_effective":"http://192.0.2.10/download/1",'
                 '"response_code":200,"content_type":"application/vnd.tcpdump.pcap",'
                 f'"size_download":{output.stat().st_size}}}\n'
             ),

@@ -736,7 +736,6 @@ class GuardedRuntime:
             )
             or (len(argv) - 13) % 4 != 0
             or argv[13::4] != ("--output",) * len(argv[13::4])
-            or argv[14::4] != ("/dev/null",) * len(argv[14::4])
             or argv[15::4] != ("--url",) * len(argv[15::4])
             or spec.stdin is not None
         ):
@@ -745,7 +744,18 @@ class GuardedRuntime:
         if not 1 <= len(urls) <= 8:
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         self._validate_curl_numbers(argv[6], argv[8], argv[10], max_timeout=30)
-        for url in urls:
+        allowed = (self._envelope.run_root / "probes").resolve()
+        for index, (raw_output, url) in enumerate(zip(argv[14::4], urls, strict=True)):
+            output = Path(raw_output).resolve()
+            if (
+                not output.is_relative_to(allowed)
+                or re.fullmatch(
+                    rf"webref_[0-9a-f]{{20}}_{index}\.body",
+                    output.name,
+                )
+                is None
+            ):
+                self._deny(AuthorizationReason.CWD_DENIED, spec)
             self._validate_exact_target_url(url, spec)
 
     def _validate_curl_download(self, spec: ProcessSpec) -> None:
