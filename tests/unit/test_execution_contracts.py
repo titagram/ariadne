@@ -603,7 +603,10 @@ def test_zap_contract_accepts_only_the_exact_operation_yaml_shape(
         adapter="zap",
         operation="passive_scan",
         capability=capability,
-        inputs={"http_host": "orion.test"},
+        inputs={
+            "url": "http://10.10.10.10:80/",
+            "http_host": "orion.test",
+        },
     )
     guard = _guard(
         tmp_path,
@@ -621,6 +624,7 @@ def test_zap_contract_accepts_only_the_exact_operation_yaml_shape(
         AdapterPlannedAction(
             operation="passive_scan",
             inputs={
+                "url": "http://10.10.10.10:80/",
                 "timeout": 30,
                 "max_output": 4096,
                 "http_host": "orion.test",

@@ -94,7 +94,11 @@ class TestZapPlan:
 
     def test_plan_returns_process_spec_with_yaml_stdin(self, context: AdapterContext) -> None:
         spec = ZapAdapter().plan(
-            action("passive_scan", http_host="orion.test"),
+            action(
+                "passive_scan",
+                url="http://10.10.10.10:80/",
+                http_host="orion.test",
+            ),
             context,
         )
         assert spec.argv == (
@@ -111,21 +115,16 @@ class TestZapPlan:
         assert spec.stdin is not None
         stdin_text = spec.stdin.decode("utf-8")
         parsed = yaml.safe_load(stdin_text)
-        assert parsed["env"]["contexts"][0]["urls"] == ["https://10.10.10.10"]
-        assert parsed["jobs"][0] == {
-            "type": "replacer",
-            "parameters": {"deleteAllRules": False},
-            "rules": [
-                {
-                    "description": "approved-http-host-alias",
-                    "url": r"^https://10\.10\.10\.10/.*",
-                    "matchType": "req_header",
-                    "matchString": "Host",
-                    "matchRegex": False,
-                    "replacementString": "orion.test",
-                }
-            ],
+        assert parsed["env"]["contexts"][0] == {
+            "name": "ariadne",
+            "urls": ["http://orion.test:80"],
+            "includePaths": [r"http://orion\.test:80/.*"],
+            "excludePaths": [],
         }
+        assert [job["type"] for job in parsed["jobs"]] == [
+            "passiveScan-config",
+            "spider",
+        ]
 
     def test_sets_bounded_timeout_and_output(self, context: AdapterContext) -> None:
         bounded_context = context.model_copy(

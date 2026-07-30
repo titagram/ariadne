@@ -1014,11 +1014,34 @@ class GuardedRuntime:
         urls = contexts[0].get("urls") if contexts and isinstance(contexts[0], dict) else None
         if not isinstance(urls, list) or len(urls) != 1 or not isinstance(urls[0], str):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
-        target_url = urls[0]
-        parsed_target = urlsplit(target_url)
+        target = self._envelope.exact_target.host
+        seed_url = self._envelope.action_inputs.get("url", f"https://{target}")
+        if not isinstance(seed_url, str):
+            self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+        parsed_seed = urlsplit(seed_url)
         if (
-            parsed_target.scheme not in {"http", "https"}
-            or parsed_target.hostname != self._envelope.exact_target.host
+            parsed_seed.scheme not in {"http", "https"}
+            or parsed_seed.hostname != target
+            or parsed_seed.username is not None
+            or parsed_seed.password is not None
+            or parsed_seed.fragment
+        ):
+            self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+        http_host = self._envelope.action_inputs.get("http_host")
+        if http_host is not None and not isinstance(http_host, str):
+            self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+        try:
+            port = parsed_seed.port
+        except ValueError:
+            self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
+        scan_host = http_host if isinstance(http_host, str) else target
+        scan_netloc = f"{scan_host}:{port}" if port is not None else scan_host
+        target_url = f"{parsed_seed.scheme}://{scan_netloc}"
+        parsed_target = urlsplit(urls[0])
+        if (
+            parsed_target.scheme != parsed_seed.scheme
+            or parsed_target.hostname != scan_host
+            or parsed_target.port != port
             or parsed_target.username is not None
             or parsed_target.password is not None
             or parsed_target.fragment
@@ -1038,11 +1061,10 @@ class GuardedRuntime:
         if not isinstance(jobs, list):
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
         operation = self._contract.operation
-        http_host = self._envelope.action_inputs.get("http_host")
         expected_environment = (
             {
                 "ARIADNE_ZAP_HTTP_HOST": http_host,
-                "ARIADNE_ZAP_NETWORK_TARGET": self._envelope.exact_target.host,
+                "ARIADNE_ZAP_NETWORK_TARGET": target,
             }
             if isinstance(http_host, str)
             else {}
@@ -1050,24 +1072,6 @@ class GuardedRuntime:
         if dict(spec.environment) != expected_environment:
             self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
         scan_jobs = jobs
-        if http_host is not None:
-            expected_replacer = {
-                "type": "replacer",
-                "parameters": {"deleteAllRules": False},
-                "rules": [
-                    {
-                        "description": "approved-http-host-alias",
-                        "url": f"^{re.escape(target_url.rstrip('/'))}/.*",
-                        "matchType": "req_header",
-                        "matchString": "Host",
-                        "matchRegex": False,
-                        "replacementString": http_host,
-                    }
-                ],
-            }
-            if not isinstance(http_host, str) or not jobs or jobs[0] != expected_replacer:
-                self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
-            scan_jobs = jobs[1:]
         expected_types = {
             "passive_scan": ["passiveScan-config", "spider"],
             "spider": ["passiveScan-config", "spider"],

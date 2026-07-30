@@ -62,8 +62,6 @@ def _build_automation_plan(
         or parsed.fragment
     ):
         raise AdapterError(f"ZAP seed {target_url!r} is outside the exact target scope")
-    root_url = f"{parsed.scheme}://{parsed.netloc}"
-    escaped_root = re.escape(root_url)
     if http_host is not None:
         alias = TargetSpec(host=http_host).host
         if alias == context.target.host:
@@ -75,41 +73,30 @@ def _build_automation_plan(
         else:
             raise AdapterError("http_host must be an approved FQDN alias")
 
-    jobs: list[dict[str, Any]] = []
-    if http_host is not None:
-        jobs.append(
-            {
-                "type": "replacer",
-                "parameters": {"deleteAllRules": False},
-                "rules": [
-                    {
-                        "description": "approved-http-host-alias",
-                        "url": f"^{escaped_root}/.*",
-                        "matchType": "req_header",
-                        "matchString": "Host",
-                        "matchRegex": False,
-                        "replacementString": http_host,
-                    }
-                ],
-            }
-        )
-    jobs.extend(
-        [
-            {
-                "type": "passiveScan-config",
-                "parameters": {
-                    "maxAlertsPerRule": 10,
-                },
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise AdapterError(f"ZAP seed {target_url!r} has an invalid port") from exc
+    scan_host = http_host or parsed.hostname
+    scan_netloc = f"{scan_host}:{port}" if port is not None else str(scan_host)
+    root_url = f"{parsed.scheme}://{scan_netloc}"
+    escaped_root = re.escape(root_url)
+
+    jobs: list[dict[str, Any]] = [
+        {
+            "type": "passiveScan-config",
+            "parameters": {
+                "maxAlertsPerRule": 10,
             },
-            {
-                "type": "spider",
-                "parameters": {
-                    "maxDepth": 2,
-                    "maxDuration": 5,
-                },
+        },
+        {
+            "type": "spider",
+            "parameters": {
+                "maxDepth": 2,
+                "maxDuration": 5,
             },
-        ]
-    )
+        },
+    ]
     plan: dict[str, Any] = {
         "env": {
             "contexts": [
