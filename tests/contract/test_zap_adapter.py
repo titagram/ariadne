@@ -117,8 +117,8 @@ class TestZapPlan:
         parsed = yaml.safe_load(stdin_text)
         assert parsed["env"]["contexts"][0] == {
             "name": "ariadne",
-            "urls": ["http://orion.test:80"],
-            "includePaths": [r"http://orion\.test:80/.*"],
+            "urls": ["http://orion.test"],
+            "includePaths": [r"http://orion\.test/.*"],
             "excludePaths": [],
         }
         assert [job["type"] for job in parsed["jobs"]] == [

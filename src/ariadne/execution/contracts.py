@@ -1035,13 +1035,18 @@ class GuardedRuntime:
         except ValueError:
             self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
         scan_host = http_host if isinstance(http_host, str) else target
-        scan_netloc = f"{scan_host}:{port}" if port is not None else scan_host
+        scan_port = (
+            None
+            if (parsed_seed.scheme, port) in {("http", 80), ("https", 443)}
+            else port
+        )
+        scan_netloc = f"{scan_host}:{scan_port}" if scan_port is not None else scan_host
         target_url = f"{parsed_seed.scheme}://{scan_netloc}"
         parsed_target = urlsplit(urls[0])
         if (
             parsed_target.scheme != parsed_seed.scheme
             or parsed_target.hostname != scan_host
-            or parsed_target.port != port
+            or parsed_target.port != scan_port
             or parsed_target.username is not None
             or parsed_target.password is not None
             or parsed_target.fragment

@@ -78,7 +78,12 @@ def _build_automation_plan(
     except ValueError as exc:
         raise AdapterError(f"ZAP seed {target_url!r} has an invalid port") from exc
     scan_host = http_host or parsed.hostname
-    scan_netloc = f"{scan_host}:{port}" if port is not None else str(scan_host)
+    scan_port = (
+        None
+        if (parsed.scheme, port) in {("http", 80), ("https", 443)}
+        else port
+    )
+    scan_netloc = f"{scan_host}:{scan_port}" if scan_port is not None else str(scan_host)
     root_url = f"{parsed.scheme}://{scan_netloc}"
     escaped_root = re.escape(root_url)
 
