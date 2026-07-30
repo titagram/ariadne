@@ -209,6 +209,17 @@
     - adapter: curl
       operation: fetch
       inputs:
+        path: "/admin/login"
+        timeout: 10
+        max_output: 524288
+        tool_card:
+          title: "curl"
+          official_source_url: "https://curl.se/docs/manpage.html"
+          source_date: "2026-07-30"
+          summary: "Official curl client used for bounded application-surface discovery."
+    - adapter: curl
+      operation: fetch
+      inputs:
         path: "/login"
         timeout: 10
         max_output: 524288
@@ -240,7 +251,7 @@
           source_date: "2026-07-30"
           summary: "Official curl client used for bounded application-surface discovery."
   limits:
-    max_rate: 4
+    max_rate: 5
     max_concurrency: 1
     max_attempts: 1
     max_duration_seconds: 60
