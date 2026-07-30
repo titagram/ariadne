@@ -526,6 +526,80 @@ def _determine_engagement_state(
                 )
                 observations.append(obs)
 
+    # Re-derive explicit technology versions from already persisted curl
+    # artifacts. This is offline-only and lets a parser improvement consume
+    # historical evidence without repeating target traffic.
+    artifact_root = (run_handle.path / "artifacts").resolve()
+    seen_versions = {
+        (
+            observation.data.get("product"),
+            observation.data.get("version"),
+            observation.data.get("url"),
+        )
+        for observation in observations
+        if observation.data.get("type") == "service_fingerprinted"
+    }
+    for event in events:
+        payload = event.get("payload", {})
+        if (
+            event.get("event_type") != "evidence_collected"
+            or payload.get("adapter") != "curl"
+            or payload.get("execution_classification") != "success"
+            or not isinstance(payload.get("artifact"), str)
+            or not isinstance(payload.get("observation_data"), dict)
+        ):
+            continue
+        data = payload["observation_data"]
+        url = data.get("url")
+        if not isinstance(url, str):
+            continue
+        artifact_path = (artifact_root / payload["artifact"]).resolve()
+        try:
+            artifact_path.relative_to(artifact_root)
+        except ValueError:
+            continue
+        if not artifact_path.is_file():
+            continue
+        try:
+            body = artifact_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        version_match = re.search(
+            r"\bCraft\s+CMS\s+(?P<version>\d+\.\d+(?:\.\d+)?)\b",
+            body,
+            flags=re.IGNORECASE,
+        )
+        if version_match is None:
+            continue
+        key = ("Craft CMS", version_match.group("version"), url)
+        if key in seen_versions:
+            continue
+        seen_versions.add(key)
+        parsed_url = urlsplit(url)
+        observations.append(
+            Observation(
+                observation_id=uuid4(),
+                target=run_handle.snapshot.targets[0]
+                if run_handle.snapshot.targets
+                else TargetSpec(host="unknown"),
+                source="curl",
+                data={
+                    "event_type": "evidence_collected",
+                    "finding": "curl:technology-version",
+                    "artifact": payload["artifact"],
+                    "type": "service_fingerprinted",
+                    "service": "http",
+                    "protocol": "tcp",
+                    "port": parsed_url.port or (443 if parsed_url.scheme == "https" else 80),
+                    "product": "Craft CMS",
+                    "version": version_match.group("version"),
+                    "url": url,
+                    "evidence": "persisted HTML technology/version marker",
+                },
+            )
+        )
+        evidence_types.add("service_fingerprinted")
+
     required_objectives = {
         (
             objective.kind,
