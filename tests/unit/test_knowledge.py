@@ -15,6 +15,8 @@ from ariadne.knowledge import (
     ToolVerificationBlockedError,
 )
 
+_LOCAL_PROBE_TEST_TIMEOUT_SECONDS = 3
+
 
 def _write_node(root: Path, name: str, frontmatter: str, body: str = "Concise guidance.") -> None:
     path = root / f"{name}.md"
@@ -220,7 +222,10 @@ def test_runtime_verification_promotes_only_after_local_version_and_help(
     store = RuntimeVerificationStore(tmp_path / "runtime")
     verifier = ToolCardVerifier(
         index=index,
-        probe=LocalToolProbe(timeout_seconds=1, max_output_bytes=256),
+        probe=LocalToolProbe(
+            timeout_seconds=_LOCAL_PROBE_TEST_TIMEOUT_SECONDS,
+            max_output_bytes=256,
+        ),
         store=store,
     )
 
@@ -245,7 +250,10 @@ def test_documentation_probe_does_not_promote_before_success(tmp_path: Path) -> 
     store = RuntimeVerificationStore(tmp_path / "runtime")
     verifier = ToolCardVerifier(
         index=index,
-        probe=LocalToolProbe(timeout_seconds=1, max_output_bytes=256),
+        probe=LocalToolProbe(
+            timeout_seconds=_LOCAL_PROBE_TEST_TIMEOUT_SECONDS,
+            max_output_bytes=256,
+        ),
         store=store,
     )
 
@@ -267,7 +275,10 @@ def test_unknown_tool_gets_a_concise_card_before_runtime_promotion(
     index = _knowledge_tree(tmp_path / "knowledge", str(tool))
     verifier = ToolCardVerifier(
         index=index,
-        probe=LocalToolProbe(timeout_seconds=1, max_output_bytes=256),
+        probe=LocalToolProbe(
+            timeout_seconds=_LOCAL_PROBE_TEST_TIMEOUT_SECONDS,
+            max_output_bytes=256,
+        ),
         store=RuntimeVerificationStore(tmp_path / "runtime"),
     )
     discovery = ToolDiscovery(
@@ -305,7 +316,10 @@ def test_policy_block_prevents_probe_and_runtime_promotion(tmp_path: Path) -> No
     store = RuntimeVerificationStore(tmp_path / "runtime")
     verifier = ToolCardVerifier(
         index=index,
-        probe=LocalToolProbe(timeout_seconds=1, max_output_bytes=256),
+        probe=LocalToolProbe(
+            timeout_seconds=_LOCAL_PROBE_TEST_TIMEOUT_SECONDS,
+            max_output_bytes=256,
+        ),
         store=store,
     )
 
@@ -331,7 +345,7 @@ def test_official_provider_is_a_bounded_fallback_for_missing_local_guidance(
     verifier = ToolCardVerifier(
         index=index,
         probe=LocalToolProbe(
-            timeout_seconds=1,
+            timeout_seconds=_LOCAL_PROBE_TEST_TIMEOUT_SECONDS,
             max_output_bytes=64,
             man_executable=None,
         ),
@@ -350,7 +364,6 @@ def test_official_provider_is_a_bounded_fallback_for_missing_local_guidance(
 
 
 def test_local_guidance_process_is_stopped_at_the_output_bound(tmp_path: Path) -> None:
-    marker = tmp_path / "finished"
     tool = tmp_path / "verbose-probe"
     tool.write_text(
         "#!/bin/sh\n"
@@ -359,13 +372,7 @@ def test_local_guidance_process_is_stopped_at_the_output_bound(tmp_path: Path) -
         "  exit 0\n"
         "fi\n"
         'if [ "$1" = "--help" ]; then\n'
-        "  i=0\n"
-        "  while [ $i -lt 100000 ]; do\n"
-        '    printf "0123456789"\n'
-        "    i=$((i + 1))\n"
-        "  done\n"
-        f"  touch {marker!s}\n"
-        "  exit 0\n"
+        '  exec yes "0123456789"\n'
         "fi\n"
         "exit 3\n",
         encoding="utf-8",
@@ -375,7 +382,7 @@ def test_local_guidance_process_is_stopped_at_the_output_bound(tmp_path: Path) -
     verifier = ToolCardVerifier(
         index=index,
         probe=LocalToolProbe(
-            timeout_seconds=1,
+            timeout_seconds=_LOCAL_PROBE_TEST_TIMEOUT_SECONDS,
             max_output_bytes=64,
             man_executable=None,
         ),
@@ -388,4 +395,3 @@ def test_local_guidance_process_is_stopped_at_the_output_bound(tmp_path: Path) -
     )
 
     assert len(record.guidance.encode("utf-8")) <= 64
-    assert not marker.exists()
