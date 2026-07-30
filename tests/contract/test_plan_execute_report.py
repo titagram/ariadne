@@ -30,7 +30,9 @@ from ariadne.adapters.base import ProcessResult, ProcessSpec
 from ariadne.adapters.nmap import NmapAdapter
 from ariadne.adapters.research import ResearchAdapter
 from ariadne.composition import ServiceContainer
+from ariadne.core.engagement import TargetSpec
 from ariadne.core.errors import PolicyConfigurationError
+from ariadne.core.observations import Observation
 from ariadne.core.planner import Planner
 from ariadne.core.policy import CapabilityRule, EffectivePolicy
 from ariadne.core.workflow import WorkflowCatalog
@@ -47,6 +49,7 @@ from ariadne.hades_adapter.consent import (
 from ariadne.hades_adapter.handlers import (
     _determine_engagement_state,
     _inspect_planned_tool,
+    _research_fingerprint_needs_refresh,
     handle_execute_plan,
     handle_prepare_engagement,
     handle_propose_plan,
@@ -349,6 +352,22 @@ async def test_new_service_fingerprint_precedes_historical_research_candidates(
     )
     state, _ = _determine_engagement_state(command.store, handle)
     assert state.value == "hypothesis"
+
+
+def test_research_refresh_detects_incomplete_metasploit_applicability() -> None:
+    target = TargetSpec(host="10.10.10.10")
+    observation = Observation(
+        observation_id=__import__("uuid").uuid4(),
+        target=target,
+        source="research_complete",
+        data={
+            "fingerprint": {"product": "Craft CMS", "version": "5.6.16", "port": 80},
+            "candidates": [{"metasploit_modules": ["exploit/test"], "check_supported": True}],
+        },
+    )
+    assert _research_fingerprint_needs_refresh((observation,), target) == {
+        "product": "Craft CMS", "version": "5.6.16", "port": 80,
+    }
 
 
 @pytest.mark.parametrize(

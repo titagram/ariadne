@@ -669,6 +669,8 @@ def _determine_engagement_state(
     # candidates produced for an older fingerprint.  Otherwise the presence
     # of historical candidates incorrectly advances the state to VALIDATION,
     # making the hypothesis-stage research playbook ineligible.
+    if _research_fingerprint_needs_refresh(tuple(observations), target) is not None:
+        return EngagementState.HYPOTHESIS, tuple(observations)
     if _latest_service_fingerprint(tuple(observations), target) is not None:
         return EngagementState.HYPOTHESIS, tuple(observations)
     if _persisted_research_candidates(events, run_handle, target.host):
@@ -1122,6 +1124,37 @@ def _latest_service_fingerprint(
         if isinstance(port, int) and not isinstance(port, bool) and port > 0:
             fingerprint["port"] = port
         return fingerprint
+    return None
+
+
+def _research_fingerprint_needs_refresh(
+    observations: tuple[Observation, ...],
+    target: TargetSpec,
+) -> dict[str, Any] | None:
+    """Return the latest fingerprint whose exploit metadata lacks applicability."""
+    latest: dict[tuple[str, str, str, int | None, str], Observation] = {}
+    for observation in observations:
+        if observation.target != target or observation.source != "research_complete":
+            continue
+        fingerprint = observation.data.get("fingerprint")
+        if not isinstance(fingerprint, dict):
+            continue
+        identity = _service_fingerprint_identity(fingerprint)
+        if identity is not None:
+            latest[identity] = observation
+    for observation in reversed(tuple(latest.values())):
+        fingerprint = observation.data.get("fingerprint")
+        candidates = observation.data.get("candidates")
+        if not isinstance(fingerprint, dict) or not isinstance(candidates, list):
+            continue
+        if any(
+            isinstance(candidate, dict)
+            and candidate.get("metasploit_modules")
+            and candidate.get("check_supported") is True
+            and not candidate.get("applicability_evidence")
+            for candidate in candidates
+        ):
+            return dict(fingerprint)
     return None
 
 
@@ -2062,7 +2095,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
     unresearched_fingerprint = _latest_service_fingerprint(
         observations,
         first_target,
-    )
+    ) or _research_fingerprint_needs_refresh(observations, first_target)
     object_reference_urls = _observed_object_reference_urls(
         observations,
         first_target,
@@ -2314,7 +2347,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         fingerprint = _latest_service_fingerprint(
             observations,
             plan.target,
-        )
+        ) or _research_fingerprint_needs_refresh(observations, plan.target)
         if fingerprint is None:
             return {
                 "status": "blocked",
