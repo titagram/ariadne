@@ -133,7 +133,10 @@ class PolicyDecision(BaseModel):
 
 def _canonical_policy_digest(doc: PolicyDocument) -> str:
     """Deterministic SHA-256 hex digest of a policy document."""
-    raw = doc.model_dump(mode="json")
+    raw = doc.model_dump(mode="python")
+    capabilities = raw["capabilities"]
+    for rule in capabilities.values():
+        rule["allowed_tools"] = sorted(rule["allowed_tools"])
     canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

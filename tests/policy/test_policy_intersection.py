@@ -1,5 +1,9 @@
 """Task 4: monotonic policy intersection property and contract tests."""
 
+import os
+import subprocess
+import sys
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -487,6 +491,35 @@ def test_effective_policy_carries_source_digests() -> None:
     assert len(effective.source_digests) == 2
     assert all(isinstance(d, str) for d in effective.source_digests)
     assert len(effective.source_digests[0]) == 64  # SHA-256 hex
+
+
+def test_policy_digest_is_stable_across_python_hash_seeds() -> None:
+    script = """
+from ariadne.core.policy import CapabilityRule, PolicyDocument, intersect_policies
+document = PolicyDocument(
+    name="stable",
+    version=1,
+    capabilities={
+        "scan.tcp": CapabilityRule(
+            allowed=True,
+            allowed_tools=frozenset({"curl", "katana", "nmap", "zaproxy"}),
+        )
+    },
+)
+print(intersect_policies(document).source_digests[0])
+"""
+    digests = {
+        subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        ).stdout.strip()
+        for seed in ("1", "2")
+    }
+
+    assert len(digests) == 1
 
 
 # ── PolicyDecision carries effective_rule ────────────────────────────────────
