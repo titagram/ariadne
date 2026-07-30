@@ -251,15 +251,11 @@ def test_sysreptor_htb_objectives_include_flags_not_findings(tmp_path: Path) -> 
     with ZipFile(bundle.path) as archive:
         project = json.loads(archive.read("project.json"))
 
-    objective_values = {
-        objective["kind"]: objective["flag"]
-        for objective in project["objectives"]
-    }
-    assert objective_values == {
-        "user_flag": _USER_FLAG,
-        "root_flag": _ROOT_FLAG,
-    }
-    assert project["finding_count"] == 0
+    assert set(project) == {"sections", "findings"}
+    objective_evidence = project["sections"][0]["data"]["objective_evidence"]
+    assert f"Flag: `{_USER_FLAG}`" in objective_evidence
+    assert f"Flag: `{_ROOT_FLAG}`" in objective_evidence
+    assert project["findings"] == []
 
 
 def test_hash_only_htb_run_can_render_redacted_but_not_complete_delivery(

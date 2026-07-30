@@ -416,8 +416,8 @@ def test_common_exclusion_aliases_block_the_matching_workflow_branch(
 
 
 @pytest.mark.asyncio
-async def test_public_dry_run_reaches_both_offline_reports(tmp_path) -> None:
-    """One representative wrapper flow needs no target traffic or manual events."""
+async def test_public_dry_run_blocks_superficial_professional_report(tmp_path) -> None:
+    """A completed dry-run objective cannot bypass the semantic report gate."""
     playbook = Playbook(
         id="dry-run.complete.v1",
         version=1,
@@ -502,11 +502,13 @@ async def test_public_dry_run_reaches_both_offline_reports(tmp_path) -> None:
     result = json.loads(await run({"max_steps": 3}, session_id="dry-run-session"))
 
     assert created["status"] == "active"
-    assert result["status"] == "complete", result
+    assert result["status"] == "blocked", result
+    assert result["boundary"] == "report_quality_gate"
+    assert "zero validated findings" in result["message"]
+    assert "zero attack steps" in result["message"]
+    assert "zero remediation" in result["message"]
     assert runtime.calls == 1
     assert (tmp_path / "runs").is_dir()
-    assert result["walkthrough_path"].endswith("walkthrough.md")
-    assert result["professional_path"].endswith("professional.html")
     assert (tmp_path / "canonical-knowledge" / "tools" / "ping.md").is_file()
 
 
