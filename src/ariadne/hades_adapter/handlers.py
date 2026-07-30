@@ -1168,6 +1168,21 @@ def _observed_web_asset_urls(
     return tuple(reversed(assets))
 
 
+def _observed_fetched_web_asset(
+    observations: tuple[Observation, ...],
+    target: TargetSpec,
+) -> bool:
+    return any(
+        observation.target == target
+        and observation.data.get("fetched") is True
+        and isinstance(observation.data.get("path"), str)
+        and observation.data["path"].casefold().endswith(
+            (".js", ".json", ".map", ".xml")
+        )
+        for observation in observations
+    )
+
+
 def _observed_object_reference_urls(
     observations: tuple[Observation, ...],
     target: TargetSpec,
@@ -1904,6 +1919,10 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             )
             or (playbook.id == "web.http-fallback.v1" and pending_capture_url is not None)
             or (playbook.id == "web.object-reference.v1" and bool(object_reference_urls))
+            or (
+                playbook.id == "web.asset-analysis.v1"
+                and not _observed_fetched_web_asset(observations, first_target)
+            )
         )
         and (playbook.id != "web.object-reference.v1" or bool(object_reference_urls))
         and (
