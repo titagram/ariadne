@@ -325,9 +325,9 @@ class ZapAdapter:
                 summary=f"Found {len(observations)} alerts",
             )
         return ExecutionClassification(
-            kind="unknown",
-            confidence=0.5,
-            summary="ZAP completed with no alerts",
+            kind="success",
+            confidence=0.8,
+            summary="ZAP completed successfully with no alerts",
         )
 
     async def collect(

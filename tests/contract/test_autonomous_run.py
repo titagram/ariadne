@@ -107,20 +107,16 @@ class RedirectAliasRuntime(DryRunRuntime):
         raise AssertionError(f"Unexpected executable: {spec.argv[0]}")
 
 
-class ApprovedAliasZapFailureRuntime(RedirectAliasRuntime, ProcessRunner):
+class ApprovedAliasZapRuntime(RedirectAliasRuntime, ProcessRunner):
+    def __init__(self, zap_result: ProcessResult) -> None:
+        super().__init__()
+        self.zap_result = zap_result
+
     async def run(self, spec) -> ProcessResult:
         if spec.argv[0] == "zaproxy":
             self.calls += 1
             self.specs.append(spec)
-            return ProcessResult(
-                exit_code=1,
-                stdout=(
-                    "Automation plan failures:\n"
-                    "Job spider failed to access URL http://192.0.2.10:80: "
-                    "orion.test: Name or service not known\n"
-                ),
-                stderr="orion.test: Name or service not known",
-            )
+            return self.zap_result
         return await super().run(spec)
 
 
@@ -1340,10 +1336,37 @@ async def test_approved_http_alias_uses_host_header_with_original_network_target
     )
 
 
+@pytest.mark.parametrize(
+    ("zap_result", "expected_status"),
+    (
+        (
+            ProcessResult(
+                exit_code=1,
+                stdout=(
+                    "Automation plan failures:\n"
+                    "Job spider failed to access URL http://192.0.2.10:80: "
+                    "orion.test: Name or service not known\n"
+                ),
+                stderr="orion.test: Name or service not known",
+            ),
+            "failure",
+        ),
+        (
+            ProcessResult(
+                exit_code=0,
+                stdout="Automation plan succeeded!\n",
+                stderr="",
+            ),
+            "executed",
+        ),
+    ),
+)
 @pytest.mark.asyncio
-async def test_approved_alias_is_not_reprompted_when_optional_zap_fails(
+async def test_approved_alias_zap_attempt_is_terminal_and_falls_back(
     tmp_path,
     monkeypatch,
+    zap_result,
+    expected_status,
 ) -> None:
     fingerprint = Playbook(
         id="scope.redirect.v1",
@@ -1382,11 +1405,11 @@ async def test_approved_alias_is_not_reprompted_when_optional_zap_fails(
         limits=PlaybookLimits(max_attempts=1, max_duration_seconds=30),
         stop_conditions=("provider_complete",),
         success_emits=("zap_passive_alerts",),
-        next_playbooks=(),
+        next_playbooks=("web.next-analysis.v1",),
         report_sections=("web",),
     )
     fallback = Playbook(
-        id="web.http-fallback.v1",
+        id="web.next-analysis.v1",
         version=1,
         stage="environment_preflight",
         triggers=(Trigger(kind="observation_type", types=("web_technologies",)),),
@@ -1409,7 +1432,7 @@ async def test_approved_alias_is_not_reprompted_when_optional_zap_fails(
     registry.register("httpx", HttpxAdapter())
     registry.register("zap", ZapAdapter())
     registry.register("curl", CurlAdapter())
-    runtime = ApprovedAliasZapFailureRuntime()
+    runtime = ApprovedAliasZapRuntime(zap_result)
     kali_factory_calls: list[tuple[object, Path]] = []
 
     def kali_factory(snapshot, run_root):
@@ -1499,7 +1522,7 @@ async def test_approved_alias_is_not_reprompted_when_optional_zap_fails(
     assert any(
         event["event_type"] == "plan_executed"
         and event["payload"]["playbook_id"] == zap.id
-        and event["payload"]["status"] == "failure"
+        and event["payload"]["status"] == expected_status
         for event in events
     )
     assert any(
