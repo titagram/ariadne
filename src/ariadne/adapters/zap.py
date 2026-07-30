@@ -19,7 +19,7 @@ import ipaddress
 import json
 import re
 from typing import Any, ClassVar
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 from uuid import uuid4
 
 import yaml
@@ -119,6 +119,21 @@ def _build_automation_plan(
     return plan
 
 
+def _append_url_export(plan: dict[str, Any]) -> None:
+    """Export only the guarded context's requested URLs to process stdout."""
+    plan["jobs"].append(
+        {
+            "type": "export",
+            "parameters": {
+                "context": "ariadne",
+                "type": "url",
+                "source": "all",
+                "fileName": "/dev/stdout",
+            },
+        }
+    )
+
+
 _OPERATIONS: frozenset = frozenset({"passive_scan", "active_scan", "spider"})
 
 
@@ -143,7 +158,9 @@ class ZapAdapter:
         This method is public so that contract tests can inspect the
         generated plan structure without executing the tool.
         """
-        return _build_automation_plan(context)
+        plan = _build_automation_plan(context)
+        _append_url_export(plan)
+        return plan
 
     def plan(
         self,
@@ -189,6 +206,7 @@ class ZapAdapter:
                     },
                 },
             )
+        _append_url_export(plan)
 
         # Serialize to YAML for stdin
         yaml_bytes = yaml.dump(plan, default_flow_style=False).encode("utf-8")
@@ -291,6 +309,60 @@ class ZapAdapter:
             )
             observations.append(obs)
 
+        return tuple(observations)
+
+    def parse_for_spec(
+        self,
+        result: ProcessResult,
+        target: TargetSpec,
+        spec: ProcessSpec,
+    ) -> tuple[Observation, ...]:
+        """Parse alerts and exported context URLs, binding aliases to *target*."""
+        observations = [
+            observation.model_copy(update={"target": target})
+            for observation in self.parse(result)
+        ]
+        approved_host = str(spec.environment.get("ARIADNE_ZAP_HTTP_HOST", target.host))
+        seen_urls: set[str] = set()
+        for line in result.stdout.splitlines():
+            raw_url = line.strip()
+            parsed = urlparse(raw_url)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or parsed.hostname is None
+                or parsed.hostname.casefold() != approved_host.casefold()
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.fragment
+            ):
+                continue
+            try:
+                port = parsed.port
+            except ValueError:
+                continue
+            network_host = f"[{target.host}]" if ":" in target.host else target.host
+            network_netloc = f"{network_host}:{port}" if port is not None else network_host
+            network_url = parsed._replace(netloc=network_netloc).geturl()
+            if network_url in seen_urls:
+                continue
+            seen_urls.add(network_url)
+            observations.append(
+                Observation(
+                    observation_id=uuid4(),
+                    target=target,
+                    source="zap",
+                    data={
+                        "type": "web_paths",
+                        "url": network_url,
+                        "path": parsed.path or "/",
+                        "method": "GET",
+                        "fetched": True,
+                        "parameters": tuple(
+                            dict.fromkeys(key for key, _ in parse_qsl(parsed.query))
+                        ),
+                    },
+                )
+            )
         return tuple(observations)
 
     def classify(

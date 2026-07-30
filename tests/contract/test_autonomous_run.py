@@ -1337,7 +1337,7 @@ async def test_approved_http_alias_uses_host_header_with_original_network_target
 
 
 @pytest.mark.parametrize(
-    ("zap_result", "expected_status"),
+    ("zap_result", "expected_status", "expected_web_paths"),
     (
         (
             ProcessResult(
@@ -1350,14 +1350,19 @@ async def test_approved_http_alias_uses_host_header_with_original_network_target
                 stderr="orion.test: Name or service not known",
             ),
             "failure",
+            False,
         ),
         (
             ProcessResult(
                 exit_code=0,
-                stdout="Automation plan succeeded!\n",
+                stdout=(
+                    "http://orion.test/capture/7\n"
+                    "Automation plan succeeded!\n"
+                ),
                 stderr="",
             ),
             "executed",
+            True,
         ),
     ),
 )
@@ -1367,6 +1372,7 @@ async def test_approved_alias_zap_attempt_is_terminal_and_falls_back(
     monkeypatch,
     zap_result,
     expected_status,
+    expected_web_paths,
 ) -> None:
     fingerprint = Playbook(
         id="scope.redirect.v1",
@@ -1530,6 +1536,17 @@ async def test_approved_alias_zap_attempt_is_terminal_and_falls_back(
         and event["payload"]["playbook_id"] == fallback.id
         and event["payload"]["status"] == "executed"
         for event in events
+    )
+    assert (
+        any(
+            event["event_type"] == "evidence_collected"
+            and event["payload"].get("adapter") == "zap"
+            and event["payload"].get("observation_data", {}).get("type") == "web_paths"
+            and event["payload"]["observation_data"].get("url")
+            == "http://192.0.2.10/capture/7"
+            for event in events
+        )
+        is expected_web_paths
     )
 
 

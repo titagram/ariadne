@@ -124,7 +124,14 @@ class TestZapPlan:
         assert [job["type"] for job in parsed["jobs"]] == [
             "passiveScan-config",
             "spider",
+            "export",
         ]
+        assert parsed["jobs"][-1]["parameters"] == {
+            "context": "ariadne",
+            "type": "url",
+            "source": "all",
+            "fileName": "/dev/stdout",
+        }
 
     def test_sets_bounded_timeout_and_output(self, context: AdapterContext) -> None:
         bounded_context = context.model_copy(
@@ -187,6 +194,41 @@ class TestZapParse:
         obs = ZapAdapter().parse(result)
         for o in obs:
             assert o.target.host == "10.10.10.10"
+
+    def test_exported_alias_urls_are_bound_to_the_network_target(
+        self,
+        context: AdapterContext,
+    ) -> None:
+        adapter = ZapAdapter()
+        spec = adapter.plan(
+            action(
+                "passive_scan",
+                url="http://10.10.10.10:80/",
+                http_host="orion.test",
+            ),
+            context,
+        )
+        result = ProcessResult(
+            exit_code=0,
+            stdout=(
+                "Job spider found 3 URLs\n"
+                "http://orion.test/\n"
+                "http://orion.test/capture/7\n"
+                "http://outside.test/not-in-context\n"
+                "Automation plan succeeded!\n"
+            ),
+            stderr="",
+        )
+
+        observations = adapter.parse_for_spec(result, context.target, spec)
+
+        assert [observation.data["url"] for observation in observations] == [
+            "http://10.10.10.10/",
+            "http://10.10.10.10/capture/7",
+        ]
+        assert all(observation.target == context.target for observation in observations)
+        assert all(observation.source == "zap" for observation in observations)
+        assert all(observation.data["type"] == "web_paths" for observation in observations)
 
 
 # ── Probe ─────────────────────────────────────────────────────────────────────

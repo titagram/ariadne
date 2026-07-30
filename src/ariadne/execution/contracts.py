@@ -1078,9 +1078,9 @@ class GuardedRuntime:
             self._deny(AuthorizationReason.TARGET_MISMATCH, spec)
         scan_jobs = jobs
         expected_types = {
-            "passive_scan": ["passiveScan-config", "spider"],
-            "spider": ["passiveScan-config", "spider"],
-            "active_scan": ["passiveScan-config", "spider", "activeScan"],
+            "passive_scan": ["passiveScan-config", "spider", "export"],
+            "spider": ["passiveScan-config", "spider", "export"],
+            "active_scan": ["passiveScan-config", "spider", "activeScan", "export"],
         }[operation]
         if [job.get("type") for job in scan_jobs if isinstance(job, dict)] != expected_types:
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
@@ -1100,6 +1100,13 @@ class GuardedRuntime:
                     and _positive_int(parameters["maxDepth"], maximum=20)
                     and _positive_int(parameters["maxDuration"], maximum=60)
                 )
+            elif job_type == "export":
+                valid = parameters == {
+                    "context": "ariadne",
+                    "type": "url",
+                    "source": "all",
+                    "fileName": "/dev/stdout",
+                }
             else:
                 valid = set(parameters) == {"maxDuration"} and _positive_int(
                     parameters["maxDuration"], maximum=120
