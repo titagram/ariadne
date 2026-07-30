@@ -1248,6 +1248,29 @@ def _observed_unfetched_web_endpoint(
     return candidates[0] if candidates else None
 
 
+def _playbook_has_unfetched_path(
+    playbook: Any,
+    observations: tuple[Observation, ...],
+    target: TargetSpec,
+) -> bool:
+    """Return whether a bounded path action still has an evidence delta."""
+    fetched_paths = {
+        str(observation.data.get("path"))
+        for observation in observations
+        if (
+            observation.target == target
+            and observation.data.get("fetched") is True
+            and isinstance(observation.data.get("path"), str)
+        )
+    }
+    return any(
+        isinstance(path := action.inputs.get("path"), str)
+        and path.startswith("/")
+        and path not in fetched_paths
+        for action in getattr(playbook, "actions", ())
+    )
+
+
 def _observed_object_reference_urls(
     observations: tuple[Observation, ...],
     target: TargetSpec,
@@ -1991,6 +2014,14 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             or (
                 playbook.id == "web.observed-endpoint.v1"
                 and unfetched_web_endpoint is not None
+            )
+            or (
+                playbook.id == "web.application-surface.v1"
+                and _playbook_has_unfetched_path(
+                    playbook,
+                    observations,
+                    first_target,
+                )
             )
             or (
                 playbook.id == "web.asset-analysis.v1"
