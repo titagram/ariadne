@@ -108,8 +108,14 @@ class ProfessionalRenderer:
             validated_findings=validated_findings,
             candidate_findings=candidate_findings,
             evidence=dossier.evidence,
-            compromise_narrative=dossier.lifecycle,
-            remediation=dossier.remediation,
+            compromise_narrative=dossier.attack_steps,
+            remediation=tuple(dict.fromkeys(
+                (*dossier.remediation, *(
+                    item
+                    for finding in dossier.findings
+                    for item in finding.remediation
+                )),
+            )),
             compromised=dossier.compromised,
             cleanup=dossier.cleanup,
             screenshots=tuple(

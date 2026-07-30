@@ -55,8 +55,33 @@ class ReportFinding(BaseModel):
     status: str = "validated"
     target: str | None = None
     description: str | None = None
+    affected_assets: tuple[str, ...] = ()
+    prerequisites: tuple[str, ...] = ()
+    procedure: tuple[str, ...] = ()
+    impact: str | None = None
+    cwe: str | None = None
+    cvss_vector: str | None = None
+    cvss_score: float | None = None
     evidence: tuple[str, ...] = ()
     remediation: tuple[str, ...] = ()
+
+
+class AttackStep(BaseModel):
+    """One evidence-derived, reproducible link in the attack chain."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    step_id: str
+    phase: str
+    action: str
+    input: str
+    result: str
+    target: str | None = None
+    prerequisites: tuple[str, ...] = ()
+    commands: tuple[str, ...] = ()
+    evidence: tuple[str, ...] = ()
+    next_step_id: str | None = None
+    status: str = "executed"
 
 
 class ReportLifecycleEntry(BaseModel):
@@ -86,6 +111,7 @@ class ReportModel(BaseModel):
     objectives: tuple[ReportObjective, ...]
     evidence: tuple[ReportEvidence, ...] = ()
     findings: tuple[ReportFinding, ...] = ()
+    attack_steps: tuple[AttackStep, ...] = ()
     lifecycle: tuple[ReportLifecycleEntry, ...] = ()
     cleanup: tuple[str, ...] = ()
     remediation: tuple[str, ...] = ()

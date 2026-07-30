@@ -127,7 +127,13 @@ class ReportValidator:
     8. Cleanup or remediation events are present.
     """
 
-    def validate(self, run: RunHandle, options: ReportOptions) -> ValidationResult:
+    def validate(
+        self,
+        run: RunHandle,
+        options: ReportOptions,
+        *,
+        style: str | None = None,
+    ) -> ValidationResult:
         """Run all quality gates against *run*.
 
         Returns a ``ValidationResult`` with detailed error messages for
@@ -328,6 +334,42 @@ class ReportValidator:
             errors.append(
                 "No cleanup_completed or remediation_applied event found"
             )
+
+        # ── 9. Semantic professional-report gate ─────────────────────────────
+        if style in {"professional", "sysreptor"} and obj_events:
+            # Local import avoids a module cycle: the dossier builder depends on
+            # ReportOptions but remains the canonical semantic representation.
+            from ariadne.reporting.dossier import DossierBuilder
+
+            try:
+                dossier = DossierBuilder().build(run, options)
+            except ValueError:
+                dossier = None
+            if dossier is not None:
+                validated_findings = tuple(
+                    finding
+                    for finding in dossier.findings
+                    if finding.status == "validated"
+                )
+                if not validated_findings:
+                    errors.append(
+                        "Professional report has completed objectives but zero "
+                        "validated findings"
+                    )
+                if not any(
+                    step.phase != "cleanup" for step in dossier.attack_steps
+                ):
+                    errors.append(
+                        "Professional report has completed objectives but zero "
+                        "attack steps"
+                    )
+                if not any(
+                    finding.remediation for finding in validated_findings
+                ):
+                    errors.append(
+                        "Professional report has completed objectives but zero "
+                        "remediation"
+                    )
 
         return ValidationResult(
             valid=len(errors) == 0,

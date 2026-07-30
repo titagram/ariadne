@@ -2297,7 +2297,7 @@ class TestRenderReportHandler:
         command: AriadneCommand,
         session_id: str,
     ) -> None:
-        """Handler renders a professional HTML report."""
+        """Handler rejects a superficial professional report."""
         await _bind_engagement(command, session_id)
 
         # Populate events
@@ -2313,8 +2313,10 @@ class TestRenderReportHandler:
             session_id=session_id,
             ariadne_command=command,
         )
-        assert result["status"] == "report_rendered"
-        assert "path" in result
+        assert result["status"] == "error"
+        assert "zero validated findings" in result["message"]
+        assert "zero attack steps" in result["message"]
+        assert "zero remediation" in result["message"]
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

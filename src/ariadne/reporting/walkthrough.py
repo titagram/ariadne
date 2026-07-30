@@ -77,21 +77,36 @@ class WalkthroughRenderer:
             engagement_id=dossier.engagement_id,
             snapshot_hash=dossier.snapshot_hash,
             generated_at=dossier.generated_at,
-            discoveries=summaries("discovery_completed"),
-            enumeration=summaries("enumeration_completed"),
+            discoveries=tuple(
+                step.result for step in dossier.attack_steps
+                if step.phase == "discovery"
+            ),
+            enumeration=tuple(
+                step.result for step in dossier.attack_steps
+                if step.phase == "enumeration"
+            ),
             hypotheses=summaries("hypothesis_created"),
             discarded=summaries("hypothesis_discarded", "alternative_discarded"),
-            initial_access=summaries(
-                "initial_access", "access_validated", "host_compromised",
+            initial_access=tuple(
+                step.result for step in dossier.attack_steps
+                if step.phase == "foothold"
             ),
-            post_exploitation=summaries("post_exploitation"),
-            privilege_escalation=summaries("privilege_escalation"),
+            post_exploitation=tuple(
+                step.result for step in dossier.attack_steps
+                if step.phase == "enumeration"
+                and "foothold" in " ".join(step.prerequisites).casefold()
+            ),
+            privilege_escalation=tuple(
+                step.result for step in dossier.attack_steps
+                if step.phase == "privilege_escalation"
+            ),
             ad_pivoting=summaries("ad_enumeration", "pivot_completed"),
             objectives=dossier.objectives,
             cleanup=dossier.cleanup,
             lessons=dossier.lessons,
             commands=dossier.commands,
             lifecycle=dossier.lifecycle,
+            attack_steps=dossier.attack_steps,
             evidence=dossier.evidence,
             findings=dossier.findings,
             validated_findings=tuple(

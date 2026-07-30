@@ -111,7 +111,25 @@
 {% if compromise_narrative %}
 <ol>
 {% for step in compromise_narrative %}
-<li><strong>{{ step.event_type }}</strong>: {{ step.summary }}</li>
+<li>
+  <strong>{{ step.step_id }} — {{ step.phase }}</strong>
+  <p><strong>Action:</strong> {{ step.action }}</p>
+  <p><strong>Input:</strong> {{ step.input }}</p>
+  {% if step.prerequisites %}
+  <p><strong>Prerequisites:</strong> {{ step.prerequisites | join("; ") }}</p>
+  {% endif %}
+  {% if step.commands %}
+  <p><strong>Command / action:</strong></p>
+  {% for command in step.commands %}<pre><code>{{ command }}</code></pre>{% endfor %}
+  {% else %}
+  <p><strong>Command / action:</strong> No target-facing command was required for this persisted transition.</p>
+  {% endif %}
+  <p><strong>Result:</strong> {{ step.result }}</p>
+  <p><strong>Evidence:</strong>
+    {% if step.evidence %}{% for name in step.evidence %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}{% else %}persisted lifecycle event{% endif %}
+  </p>
+  <p><strong>Next:</strong> {{ step.next_step_id or "engagement complete" }}</p>
+</li>
 {% endfor %}
 </ol>
 {% else %}
@@ -128,12 +146,22 @@
 <table class="finding-meta">
   <tr><th>Severity</th><td class="severity-{{ f.severity or 'unspecified' }}">{{ f.severity or 'unspecified' }}</td></tr>
   <tr><th>Status</th><td>{{ f.status }}</td></tr>
-  <tr><th>Target</th><td>{% if f.target %}<code>{{ f.target }}</code>{% else %}unspecified{% endif %}</td></tr>
+  <tr><th>Affected asset</th><td>{% if f.affected_assets %}{% for asset in f.affected_assets %}<code>{{ asset }}</code>{% if not loop.last %}, {% endif %}{% endfor %}{% elif f.target %}<code>{{ f.target }}</code>{% else %}unspecified{% endif %}</td></tr>
+  <tr><th>CWE</th><td>{{ f.cwe or "not assigned" }}</td></tr>
+  <tr><th>CVSS</th><td>{% if f.cvss_score is not none %}{{ f.cvss_score }} — {% endif %}{{ f.cvss_vector or "not assigned" }}</td></tr>
 </table>
 {% if f.description %}
 <p>{{ f.description }}</p>
 {% else %}
 <p>No description was persisted for this finding.</p>
+{% endif %}
+{% if f.prerequisites %}
+<h4>Prerequisites</h4>
+<ul>{% for item in f.prerequisites %}<li>{{ item }}</li>{% endfor %}</ul>
+{% endif %}
+{% if f.procedure %}
+<h4>Procedure</h4>
+<p>{{ f.procedure | join(" → ") }}</p>
 {% endif %}
 {% if f.evidence %}
 <h4>Evidence</h4>
@@ -142,6 +170,10 @@
   <li><code>{{ e }}</code></li>
 {% endfor %}
 </ul>
+{% endif %}
+{% if f.impact %}
+<h4>Impact</h4>
+<p>{{ f.impact }}</p>
 {% endif %}
 {% if f.remediation %}
 <h4>Finding Remediation</h4>

@@ -1,0 +1,205 @@
+{
+  "target": "192.0.2.10",
+  "artifacts": {
+    "ports": "21/tcp ftp open\n22/tcp ssh open\n80/tcp http open\n",
+    "web": "HTTP 200 Security Dashboard\n",
+    "references": "/download/0 application/vnd.tcpdump.pcap 200\n",
+    "capture": "sanitized-pcap-fixture",
+    "credentials": "protocol=ftp credential_ref=protected:test\n",
+    "ssh": "uid=1001 gid=1001 method=ssh_password\n",
+    "identity": "uid=1001(testuser) gid=1001(testuser)\n",
+    "capabilities": "/usr/bin/python3.8 = cap_setuid+eip\n",
+    "root_proof": "euid=0 root_flag_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+  },
+  "events": [
+    {
+      "event_type": "evidence_collected",
+      "artifact_key": "ports",
+      "payload": {
+        "adapter": "nmap",
+        "asset": "192.0.2.10",
+        "evidence_type": "port_open",
+        "finding": "nmap:tcp_discovery",
+        "command_redacted": ["nmap", "-sT", "-p", "1-200", "--", "192.0.2.10"],
+        "observation_data": {"port": 21, "protocol": "tcp", "state": "open", "service": "ftp"}
+      }
+    },
+    {
+      "event_type": "evidence_collected",
+      "artifact_key": "ports",
+      "payload": {
+        "adapter": "nmap",
+        "asset": "192.0.2.10",
+        "evidence_type": "port_open",
+        "finding": "nmap:tcp_discovery",
+        "command_redacted": ["nmap", "-sT", "-p", "1-200", "--", "192.0.2.10"],
+        "observation_data": {"port": 22, "protocol": "tcp", "state": "open", "service": "ssh"}
+      }
+    },
+    {
+      "event_type": "evidence_collected",
+      "artifact_key": "ports",
+      "payload": {
+        "adapter": "nmap",
+        "asset": "192.0.2.10",
+        "evidence_type": "port_open",
+        "finding": "nmap:tcp_discovery",
+        "command_redacted": ["nmap", "-sT", "-p", "1-200", "--", "192.0.2.10"],
+        "observation_data": {"port": 80, "protocol": "tcp", "state": "open", "service": "http"}
+      }
+    },
+    {
+      "event_type": "evidence_collected",
+      "artifact_key": "ports",
+      "payload": {
+        "adapter": "nmap",
+        "asset": "192.0.2.10",
+        "evidence_type": "service_fingerprinted",
+        "finding": "nmap:service_fingerprint",
+        "command_redacted": ["nmap", "-sV", "-p", "21,22,80", "--", "192.0.2.10"],
+        "observation_data": {"port": 80, "protocol": "tcp", "state": "open", "service": "http", "product": "Gunicorn"}
+      }
+    },
+    {
+      "event_type": "evidence_collected",
+      "artifact_key": "web",
+      "payload": {
+        "adapter": "httpx",
+        "asset": "192.0.2.10",
+        "evidence_type": "web_technologies",
+        "finding": "httpx:scan — web_technologies",
+        "command_redacted": ["httpx-toolkit", "-p", "80", "-json"],
+        "observation_data": {"type": "web_technologies", "url": "http://192.0.2.10:80", "status_code": 200, "title": "Security Dashboard", "tech": ["Python", "gunicorn"]}
+      }
+    },
+    {
+      "event_type": "plan_executed",
+      "payload": {
+        "playbook_id": "web.content-discovery.v1",
+        "action": "katana",
+        "operation": "crawl",
+        "status": "failure",
+        "summary": "Katana timed out without collecting target-bound endpoints",
+        "target": "192.0.2.10"
+      }
+    },
+    {
+      "event_type": "execution_boundary",
+      "payload": {
+        "playbook_id": "web.passive-zap.v1",
+        "adapter": "zap",
+        "operation": "passive_scan",
+        "boundary": "kali_runtime",
+        "reason": "Bounded version/help inspection failed for zaproxy.",
+        "target": "192.0.2.10"
+      }
+    },
+    {
+      "event_type": "plan_executed",
+      "payload": {
+        "playbook_id": "web.http-fallback.v1",
+        "action": "curl",
+        "operation": "fetch",
+        "status": "executed",
+        "summary": "curl extracted same-host URLs",
+        "target": "192.0.2.10"
+      }
+    },
+    {
+      "event_type": "evidence_collected",
+      "artifact_key": "references",
+      "payload": {
+        "adapter": "curl",
+        "asset": "192.0.2.10",
+        "evidence_type": "web_object_reference",
+        "finding": "curl:probe_references — object_reference_candidate",
+        "command_redacted": ["curl", "--url", "http://192.0.2.10:80/download/0"],
+        "observation_data": {"type": "object_reference_candidate", "url": "http://192.0.2.10:80/download/0", "path": "/download/0", "status_code": 200, "content_type": "application/vnd.tcpdump.pcap", "size_bytes": 9935, "download_candidate": true}
+      }
+    },
+    {
+      "event_type": "evidence_collected",
+      "artifact_key": "capture",
+      "payload": {
+        "adapter": "curl",
+        "asset": "192.0.2.10",
+        "evidence_type": "web_artifact",
+        "finding": "curl:download — downloaded_artifact",
+        "command_redacted": ["curl", "--fail", "--output", "capture.pcap", "--url", "http://192.0.2.10:80/download/0"],
+        "observation_data": {"type": "downloaded_artifact", "url": "http://192.0.2.10:80/download/0", "artifact": "capture.pcap", "content_type": "application/vnd.tcpdump.pcap", "size_bytes": 9935, "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      }
+    },
+    {
+      "event_type": "evidence_collected",
+      "artifact_key": "credentials",
+      "payload": {
+        "adapter": "pcap",
+        "asset": "192.0.2.10",
+        "evidence_type": "credential_material",
+        "finding": "pcap:extract_plaintext_credentials — credential_material",
+        "command_redacted": ["tshark", "-r", "capture.pcap", "-Y", "ftp.request.command == USER || ftp.request.command == PASS"],
+        "observation_data": {"type": "credential_material", "protocol": "ftp", "credential_ref": "protected:test", "secret_persisted": true, "secret_storage": "protected_local_reference"}
+      }
+    },
+    {
+      "event_type": "evidence_collected",
+      "artifact_key": "ssh",
+      "payload": {
+        "adapter": "ssh",
+        "asset": "192.0.2.10",
+        "evidence_type": "foothold_established",
+        "finding": "ssh:authenticate — foothold_established",
+        "command_redacted": ["ssh", "--", "testuser@192.0.2.10", "id"],
+        "observation_data": {"type": "foothold_established", "uid": 1001, "gid": 1001, "method": "ssh_password", "objective_proof": {"kind": "user_flag", "proof": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+      }
+    },
+    {
+      "event_type": "evidence_collected",
+      "artifact_key": "identity",
+      "payload": {
+        "adapter": "postex",
+        "asset": "192.0.2.10",
+        "evidence_type": "linux_host_info",
+        "finding": "postex:identity — linux_host_info",
+        "command_redacted": ["ssh", "--", "testuser@192.0.2.10", "id"],
+        "observation_data": {"tool": "identity", "type": "linux_host_info", "identity": "uid=1001(testuser) gid=1001(testuser)"}
+      }
+    },
+    {
+      "event_type": "evidence_collected",
+      "artifact_key": "capabilities",
+      "payload": {
+        "adapter": "postex",
+        "asset": "192.0.2.10",
+        "evidence_type": "postex",
+        "finding": "postex:file_capabilities — privilege_escalation",
+        "command_redacted": ["ssh", "--", "testuser@192.0.2.10", "getcap -r / 2>/dev/null"],
+        "observation_data": {"tool": "file_capabilities", "type": "privilege_escalation", "capabilities": "/usr/bin/python3.8 = cap_setuid+eip"}
+      }
+    },
+    {
+      "event_type": "evidence_collected",
+      "artifact_key": "root_proof",
+      "payload": {
+        "adapter": "postex",
+        "asset": "192.0.2.10",
+        "evidence_type": "postex",
+        "finding": "postex:capability_python_proof — privesc_path_identified",
+        "command_redacted": ["ssh", "--", "testuser@192.0.2.10", "/usr/bin/python3.8 -c REDACTED_ROOT_PROOF"],
+        "observation_data": {"tool": "python_cap_setuid", "type": "privesc_path_identified", "euid": 0, "objective_proof": {"kind": "root_flag", "proof": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}
+      }
+    },
+    {
+      "event_type": "objective_completed",
+      "payload": {"objective_kind": "user_flag", "proof_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "observation_id": "user-proof", "target": "192.0.2.10"}
+    },
+    {
+      "event_type": "objective_completed",
+      "payload": {"objective_kind": "root_flag", "proof_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "observation_id": "root-proof", "target": "192.0.2.10"}
+    },
+    {
+      "event_type": "cleanup_completed",
+      "payload": {"description": "No persistent changes were introduced; temporary local files retained in the engagement dossier.", "target": "192.0.2.10"}
+    }
+  ]
+}

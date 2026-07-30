@@ -20,6 +20,35 @@
 - **Snapshot Hash:** `{{ snapshot_hash }}`
 - **Report generated:** {{ generated_at }}
 
+## Attack Chain
+{% if attack_steps %}
+{% for step in attack_steps %}
+### {{ step.step_id }} — {{ step.phase }}
+
+- **Action:** {{ step.action }}
+- **Input:** {{ step.input }}
+{% if step.prerequisites %}
+- **Prerequisites:** {{ step.prerequisites | join("; ") }}
+{% endif %}
+{% if step.commands %}
+- **Command / action:**
+{% for command in step.commands %}
+```bash
+{{ command }}
+```
+{% endfor %}
+{% else %}
+- **Command / action:** No target-facing command was required for this persisted transition.
+{% endif %}
+- **Result:** {{ step.result }}
+- **Evidence:** {% if step.evidence %}{% for name in step.evidence %}`{{ name }}`{% if not loop.last %}, {% endif %}{% endfor %}{% else %}persisted lifecycle event{% endif %}
+- **Next:** {% if step.next_step_id %}`{{ step.next_step_id }}`{% else %}engagement complete{% endif %}
+
+{% endfor %}
+{% else %}
+*No evidence-derived attack chain could be reconstructed.*
+{% endif %}
+
 ## Discovery
 {% if discoveries %}
 {% for d in discoveries %}
@@ -45,6 +74,30 @@
 {% endfor %}
 {% else %}
 *No validated findings were persisted.*
+{% endif %}
+
+## Technical Findings
+{% if validated_findings %}
+{% for f in validated_findings %}
+### {{ f.finding_id or loop.index }} — {{ f.title }}
+
+- **Affected asset:** {{ f.affected_assets | join(", ") }}
+- **Severity:** {{ f.severity or "unspecified" }}
+- **CWE:** {{ f.cwe or "not assigned" }}
+- **CVSS:** {% if f.cvss_score is not none %}{{ f.cvss_score }} — {% endif %}{{ f.cvss_vector or "not assigned" }}
+- **Prerequisites:** {{ f.prerequisites | join("; ") }}
+- **Procedure:** {{ f.procedure | join(" → ") }}
+- **Result:** {{ f.description or "Validated by the referenced evidence chain." }}
+- **Evidence:** {% for name in f.evidence %}`{{ name }}`{% if not loop.last %}, {% endif %}{% endfor %}
+- **Impact:** {{ f.impact }}
+- **Remediation:**
+{% for item in f.remediation %}
+  - {{ item }}
+{% endfor %}
+
+{% endfor %}
+{% else %}
+*No validated technical findings were derived from the persisted evidence.*
 {% endif %}
 
 ## Candidate Findings

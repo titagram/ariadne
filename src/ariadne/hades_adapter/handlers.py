@@ -3663,7 +3663,7 @@ async def handle_render_report(args: dict[str, Any], **context: Any) -> dict[str
 
     # 4. Validate the run
     validator = ReportValidator()
-    validation = validator.validate(run_handle, options)
+    validation = validator.validate(run_handle, options, style=style)
     if not validation.valid:
         return {
             "status": "error",
