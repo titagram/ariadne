@@ -519,6 +519,51 @@ async def test_equivalent_unfinished_plan_is_not_proposed_twice(
     assert second["plan_id"] == first["plan_id"]
 
 
+@pytest.mark.asyncio
+async def test_execution_boundary_releases_equivalent_plan_for_retry(
+    command: AriadneCommand,
+    session_id: str,
+    planner: Planner,
+    catalog: WorkflowCatalog,
+) -> None:
+    snapshot_hash = await _bind_engagement(command, session_id)
+    first = await handle_propose_plan(
+        {"snapshot_hash": snapshot_hash, "hypothesis": "retry after boundary"},
+        session_id=session_id,
+        ariadne_command=command,
+        planner=planner,
+        catalog=catalog,
+    )
+    binding = command.get_session_binding(session_id)
+    assert binding is not None and binding.engagement_id is not None
+    handle = command.store.open(binding.engagement_id)
+    assert handle is not None
+    command.store.append_event(
+        handle,
+        Event(
+            event_type="execution_boundary",
+            payload={
+                "plan_id": first["plan_id"],
+                "playbook_id": first["playbook_id"],
+                "boundary": "adapter_policy",
+                "reason": "synthetic terminal boundary",
+            },
+            timestamp=datetime.now(UTC),
+        ),
+    )
+
+    second = await handle_propose_plan(
+        {"snapshot_hash": snapshot_hash, "hypothesis": "retry after boundary"},
+        session_id=session_id,
+        ariadne_command=command,
+        planner=planner,
+        catalog=catalog,
+    )
+
+    assert second["status"] == "plan_auto_approved"
+    assert second["plan_id"] != first["plan_id"]
+
+
 @pytest.mark.parametrize(
     ("runtime", "force_no_observations"),
     [(FakeRuntime(), True), (TimedOutRuntime(), False)],

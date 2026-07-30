@@ -1829,6 +1829,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         for event in events
         if event.get("event_type")
         in {
+            "execution_boundary",
             "plan_executed",
             "plan_rejected",
         }
