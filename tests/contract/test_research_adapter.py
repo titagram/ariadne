@@ -23,13 +23,16 @@ class NoIcmpReplyRuntime:
     async def run(self, spec: object) -> ProcessResult:
         del spec
         return ProcessResult(
-            exit_code=1,
+            # BSD/macOS ping reports an unanswered probe as exit status 2;
+            # Linux iputils reports the same observed outcome as status 1.
+            exit_code=2,
             stdout=(
                 "PING 10.10.10.10 (10.10.10.10): 56 data bytes\n\n"
                 "--- 10.10.10.10 ping statistics ---\n"
                 "1 packets transmitted, 0 packets received, 100.0% packet loss\n"
             ),
             stderr="",
+            status=ProcessStatus.FAILED,
         )
 
 

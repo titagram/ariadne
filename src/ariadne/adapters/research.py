@@ -929,8 +929,8 @@ class ResearchAdapter:
             result = await runtime.run(spec)
             if (
                 spec.argv[0] == "ping"
-                and result.exit_code == 1
-                and result.status == ProcessStatus.COMPLETED
+                and result.exit_code in {1, 2}
+                and result.status in {ProcessStatus.COMPLETED, ProcessStatus.FAILED}
                 and "packet loss" in result.stdout.lower()
             ):
                 # ICMP silence is not proof that an HTB/lab target is down.
