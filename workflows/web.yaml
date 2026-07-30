@@ -294,6 +294,7 @@
     - "web_paths"
     - "web_parameters"
   next_playbooks:
+    - web.asset-analysis.v1
     - web.object-reference.v1
     - web.nuclei-selected.v1
   report_sections:
