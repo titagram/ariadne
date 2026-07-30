@@ -2216,6 +2216,11 @@ async def test_application_surface_paths_are_derived_from_observed_web_url(tmp_p
                 operation="fetch",
                 inputs={"path": "/admin", "timeout": 10},
             ),
+            PlaybookAction(
+                adapter="curl",
+                operation="fetch",
+                inputs={"path_from_evidence": "static_asset", "timeout": 10},
+            ),
         ),
         limits=PlaybookLimits(max_attempts=1),
         stop_conditions=(),
@@ -2274,6 +2279,22 @@ async def test_application_surface_paths_are_derived_from_observed_web_url(tmp_p
         Event(
             event_type="evidence_collected",
             payload={
+                "evidence_type": "web_paths",
+                "execution_classification": "success",
+                "observation_data": {
+                    "type": "web_paths",
+                    "url": "http://192.0.2.10:80/assets/app.js",
+                    "path": "/assets/app.js",
+                },
+            },
+            timestamp=datetime.now(UTC),
+        ),
+    )
+    services.store.append_event(
+        handle,
+        Event(
+            event_type="evidence_collected",
+            payload={
                 "evidence_type": "service_fingerprinted",
                 "execution_classification": "success",
                 "observation_data": {
@@ -2300,8 +2321,9 @@ async def test_application_surface_paths_are_derived_from_observed_web_url(tmp_p
         for event in reversed(services.store.read_events(handle))
         if event["event_type"] == "plan_proposed"
     )
-    action = plan_event["payload"]["plan"]["actions"][0]
-    assert action["inputs"]["url"] == "http://192.0.2.10:80/admin"
+    actions = plan_event["payload"]["plan"]["actions"]
+    assert actions[0]["inputs"]["url"] == "http://192.0.2.10:80/admin"
+    assert actions[1]["inputs"]["url"] == "http://192.0.2.10:80/assets/app.js"
 
 
 @pytest.mark.asyncio

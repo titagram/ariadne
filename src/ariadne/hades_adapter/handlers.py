@@ -2161,26 +2161,29 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                                     if action.adapter == "katana"
                                     else {
                                         "url": (
-                                            (
-                                                asset_urls[0]
-                                                if action.inputs.get("path_from_evidence")
-                                                == "static_asset"
-                                                and asset_urls
-                                                else urljoin(web_urls[0], action.inputs["path"])
-                                            )
+                                            asset_urls[0]
                                             if (
                                                 action.adapter == "curl"
-                                                and isinstance(action.inputs.get("path"), str)
-                                                and action.inputs["path"].startswith("/")
-                                                and not action.inputs["path"].startswith("//")
+                                                and action.inputs.get("path_from_evidence")
+                                                == "static_asset"
+                                                and asset_urls
                                             )
                                             else (
-                                                pending_capture_url
+                                                urljoin(web_urls[0], action.inputs["path"])
                                                 if (
                                                     action.adapter == "curl"
-                                                    and pending_capture_url is not None
+                                                    and isinstance(action.inputs.get("path"), str)
+                                                    and action.inputs["path"].startswith("/")
+                                                    and not action.inputs["path"].startswith("//")
                                                 )
-                                                else web_urls[0]
+                                                else (
+                                                    pending_capture_url
+                                                    if (
+                                                        action.adapter == "curl"
+                                                        and pending_capture_url is not None
+                                                    )
+                                                    else web_urls[0]
+                                                )
                                             )
                                         )
                                     }
