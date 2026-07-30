@@ -313,6 +313,51 @@ async def test_amendment_creates_linked_revision_and_rebinds_session(
 
 
 @pytest.mark.asyncio
+async def test_amendment_freezes_current_policy_provenance(
+    command: AriadneCommand,
+    valid_answers: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await handle_prepare_engagement(
+        valid_answers,
+        session_id="policy-refresh-session",
+        ariadne_command=command,
+        consent_gateway=ContractConsent(),
+    )
+    binding = command.get_session_binding("policy-refresh-session")
+    assert binding is not None and binding.engagement_id is not None
+    original = command.store.open(binding.engagement_id)
+    assert original is not None
+    refreshed = ("d" * 64, "e" * 64, "f" * 64)
+
+    from ariadne.core.policy import build_effective_policy
+
+    effective = build_effective_policy(
+        original.snapshot.profile,
+        original.snapshot.constraints,
+    ).model_copy(update={"source_digests": refreshed})
+    monkeypatch.setattr(
+        "ariadne.hades_adapter.commands.build_effective_policy",
+        lambda _profile, _constraints: effective,
+    )
+
+    amended = await handle_amend_engagement(
+        {
+            "intensity": "high",
+            "reason": "Refresh immutable policy provenance.",
+        },
+        session_id="policy-refresh-session",
+        ariadne_command=command,
+        consent_gateway=ContractConsent(),
+    )
+
+    assert amended["status"] == "active"
+    current = command.store.open(binding.engagement_id)
+    assert current is not None
+    assert current.snapshot.policy_source_digests == refreshed
+
+
+@pytest.mark.asyncio
 async def test_declined_scope_candidate_is_recorded_and_not_reprompted(
     command: AriadneCommand,
     valid_answers: dict,

@@ -418,6 +418,7 @@ def amend_engagement(
     exclusions: tuple[str, ...] | None = None,
     constraints: EngagementConstraints | None = None,
     confirmed_at: datetime | None = None,
+    policy_source_digests: tuple[str, ...] | None = None,
 ) -> EngagementSnapshot:
     """Create the next immutable contract version after trusted Hades consent.
 
@@ -433,6 +434,13 @@ def amend_engagement(
         raise ScopeError("An engagement must retain at least one objective")
     next_intensity = snapshot.intensity if intensity is None else intensity
     next_constraints = snapshot.constraints if constraints is None else constraints
+    next_policy_source_digests = (
+        snapshot.policy_source_digests
+        if policy_source_digests is None
+        else policy_source_digests
+    )
+    if not next_policy_source_digests:
+        raise ConfirmationError("Policy provenance is required for an amendment")
     next_exclusions = snapshot.exclusions if exclusions is None else tuple(
         dict.fromkeys(value.strip() for value in exclusions if value.strip())
     )
@@ -453,7 +461,7 @@ def amend_engagement(
         "intensity": next_intensity,
         "exclusions": list(next_exclusions),
         "constraints": next_constraints.model_dump(mode="json"),
-        "policy_source_digests": list(snapshot.policy_source_digests),
+        "policy_source_digests": list(next_policy_source_digests),
     }
     snapshot_hash = _make_content_hash(data)
     return EngagementSnapshot(
@@ -471,5 +479,5 @@ def amend_engagement(
         intensity=next_intensity,
         exclusions=next_exclusions,
         constraints=next_constraints,
-        policy_source_digests=snapshot.policy_source_digests,
+        policy_source_digests=next_policy_source_digests,
     )

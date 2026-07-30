@@ -1516,7 +1516,7 @@ async def handle_amend_engagement(
             expected_snapshot_hash=summary["base_snapshot_hash"],
             expected_revision=summary["base_revision"],
         )
-    except (OSError, ValueError, TypeError) as exc:
+    except (OSError, PolicyConfigurationError, ValueError, TypeError) as exc:
         return {"status": "error", "message": f"Amendment failed: {exc}"}
     return {
         "status": result.status,

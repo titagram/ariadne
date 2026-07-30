@@ -363,6 +363,10 @@ class AriadneCommand:
                     "max_concurrent_checks": concurrency,
                 }
             )
+        effective_policy = build_effective_policy(
+            handle.snapshot.profile,
+            constraints,
+        )
         amended = amend_engagement(
             handle.snapshot,
             targets=tuple(targets),
@@ -374,6 +378,7 @@ class AriadneCommand:
                 else tuple(changes["exclusions"])
             ),
             constraints=constraints,
+            policy_source_digests=effective_policy.source_digests,
         )
         amended_handle = self.store.amend_snapshot(handle, amended)
         transaction_id = uuid4().hex

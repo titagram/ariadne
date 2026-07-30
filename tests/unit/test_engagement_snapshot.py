@@ -326,6 +326,23 @@ def test_contract_amendment_versions_intensity_and_exclusions(
     assert first.exclusions == ()
 
 
+def test_contract_amendment_can_refresh_policy_provenance(
+    confirmed_draft: EngagementDraft,
+    confirmation: Confirmation,
+) -> None:
+    first = lock_engagement(confirmed_draft, confirmation)
+    refreshed = ("d" * 64, "e" * 64, "f" * 64)
+
+    second = amend_engagement(
+        first,
+        intensity="high",
+        policy_source_digests=refreshed,
+    )
+
+    assert second.policy_source_digests == refreshed
+    assert first.policy_source_digests == POLICY_SOURCE_DIGESTS
+
+
 def test_scope_amendment_preserves_original_fields(
     confirmed_draft: EngagementDraft, confirmation: Confirmation
 ) -> None:
