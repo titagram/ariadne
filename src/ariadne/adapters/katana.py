@@ -256,9 +256,15 @@ class KatanaAdapter:
         observations: tuple[Observation, ...],
     ) -> ExecutionClassification:
         if result.timed_out:
+            if not observations:
+                return ExecutionClassification(
+                    kind="failure",
+                    confidence=0.8,
+                    summary="Katana timed out without collecting target-bound endpoints",
+                )
             return ExecutionClassification(
                 kind="partial",
-                confidence=0.5 if observations else 0.2,
+                confidence=0.5,
                 summary=f"Katana timed out after collecting {len(observations)} endpoints",
             )
         if result.exit_code != 0:

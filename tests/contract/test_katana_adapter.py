@@ -80,3 +80,41 @@ def test_katana_rejects_an_out_of_scope_seed() -> None:
             ),
             _context(),
         )
+
+
+def test_katana_timeout_without_evidence_fails_instead_of_retrying() -> None:
+    adapter = KatanaAdapter()
+
+    empty = adapter.classify(
+        ProcessResult(
+            exit_code=-1,
+            stdout="",
+            stderr="",
+            timed_out=True,
+        ),
+        (),
+    )
+    partial = adapter.classify(
+        ProcessResult(
+            exit_code=-1,
+            stdout="",
+            stderr="",
+            timed_out=True,
+        ),
+        (
+            adapter.parse_for_target(
+                ProcessResult(
+                    exit_code=0,
+                    stdout=(
+                        '{"request":{"method":"GET",'
+                        '"endpoint":"http://192.0.2.10:80/capture"}}\n'
+                    ),
+                    stderr="",
+                ),
+                TargetSpec(host="192.0.2.10"),
+            )[0],
+        ),
+    )
+
+    assert empty.kind == "failure"
+    assert partial.kind == "partial"

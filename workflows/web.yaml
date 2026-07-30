@@ -65,7 +65,7 @@
       operation: crawl
       inputs:
         depth: 3
-        duration_seconds: 60
+        duration_seconds: 30
         max_pages: 200
         tool_card:
           title: "ProjectDiscovery Katana"
