@@ -1193,6 +1193,15 @@ def _observed_unfetched_web_endpoint(
     keeps the next request evidence-derived and bounded to a route already
     observed by a successful target-bound response.
     """
+    fetched_urls = {
+        str(observation.data["url"])
+        for observation in observations
+        if (
+            observation.target == target
+            and observation.data.get("fetched") is True
+            and isinstance(observation.data.get("url"), str)
+        )
+    }
     candidates: list[str] = []
     for observation in reversed(observations):
         if observation.target != target or observation.data.get("fetched") is not False:
@@ -1200,6 +1209,8 @@ def _observed_unfetched_web_endpoint(
         value = observation.data.get("url")
         path = observation.data.get("path")
         if not isinstance(value, str) or not isinstance(path, str):
+            continue
+        if value in fetched_urls:
             continue
         parsed = urlsplit(value)
         if (

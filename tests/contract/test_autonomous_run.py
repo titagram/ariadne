@@ -2433,6 +2433,103 @@ async def test_observed_endpoint_plan_uses_unfetched_evidence(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetched_observed_endpoint_is_not_replanned(tmp_path) -> None:
+    playbook = Playbook(
+        id="web.observed-endpoint.v1",
+        version=1,
+        stage="enumeration",
+        triggers=(Trigger(kind="observation_type", types=("web_paths",)),),
+        required_evidence_types=frozenset({"web_paths"}),
+        capabilities=frozenset({"web.content_discovery"}),
+        actions=(
+            PlaybookAction(
+                adapter="curl",
+                operation="fetch",
+                inputs={"path_from_evidence": "observed_endpoint", "timeout": 10},
+            ),
+        ),
+        limits=PlaybookLimits(max_attempts=1),
+        stop_conditions=(),
+        success_emits=("web_paths",),
+        next_playbooks=(),
+        report_sections=("web",),
+    )
+    registry = AdapterRegistry()
+    registry.register("curl", CurlAdapter())
+    services = ServiceContainer(
+        profile_name="observed-endpoint-fetched",
+        store=RunStore(base_path=tmp_path),
+        catalog=WorkflowCatalog(playbooks={playbook.id: playbook}),
+        adapter_registry=registry,
+        consent_gateway=AcceptContract(),
+    )
+    object.__setattr__(services, "tool_card_verifier", None)
+    prepare = _handler_for("ariadne_prepare_engagement", services)
+    propose = _handler_for("ariadne_propose_plan", services)
+    created = json.loads(
+        await prepare(
+            {
+                "profile": "private-lab",
+                "target_host": "192.0.2.10",
+                "objectives": ["proof"],
+                "autonomy": "controlled",
+                "intensity": "normal",
+                "exclusions": ["dos"],
+                "time_window_minutes": 30,
+            },
+            session_id="observed-endpoint-fetched-session",
+        )
+    )
+    binding = services.command.get_session_binding("observed-endpoint-fetched-session")
+    assert binding is not None and binding.engagement_id is not None
+    handle = services.store.open(binding.engagement_id)
+    assert handle is not None
+    for fetched in (False, True):
+        services.store.append_event(
+            handle,
+            Event(
+                event_type="evidence_collected",
+                payload={
+                    "evidence_type": "web_paths",
+                    "execution_classification": "success",
+                    "observation_data": {
+                        "type": "web_paths",
+                        "url": "http://192.0.2.10:80/api/contact",
+                        "path": "/api/contact",
+                        "fetched": fetched,
+                    },
+                },
+                timestamp=datetime.now(UTC),
+            ),
+        )
+    services.store.append_event(
+        handle,
+        Event(
+            event_type="evidence_collected",
+            payload={
+                "evidence_type": "service_fingerprinted",
+                "execution_classification": "success",
+                "observation_data": {
+                    "type": "service_fingerprinted",
+                    "service": "http",
+                    "protocol": "tcp",
+                    "port": 80,
+                },
+            },
+            timestamp=datetime.now(UTC),
+        ),
+    )
+    result = json.loads(
+        await propose(
+            {"snapshot_hash": created["snapshot_hash"], "hypothesis": "endpoint"},
+            session_id="observed-endpoint-fetched-session",
+        )
+    )
+    assert result["status"] == "error"
+    assert "No eligible playbooks" in result["message"]
+
+
+@pytest.mark.asyncio
 async def test_proposal_follows_declared_next_playbooks(tmp_path) -> None:
     def playbook(identifier: str, next_playbooks: tuple[str, ...] = ()) -> Playbook:
         return Playbook(
