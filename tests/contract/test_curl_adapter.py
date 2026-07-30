@@ -66,3 +66,28 @@ def test_curl_fetch_rejects_an_out_of_scope_url() -> None:
             ),
             _context(),
         )
+
+
+def test_curl_fetch_extracts_literal_routes_from_static_javascript() -> None:
+    adapter = CurlAdapter()
+    spec = adapter.plan(
+        PlannedAction(
+            operation="fetch",
+            inputs={"url": "http://192.0.2.10:80/assets/app.js"},
+        ),
+        _context(),
+    )
+    observations = adapter.parse_for_spec(
+        ProcessResult(
+            exit_code=0,
+            stdout="const endpoint = '/capture'; fetch('/status?id=1');",
+            stderr="",
+        ),
+        TargetSpec(host="192.0.2.10"),
+        spec,
+    )
+    assert {item.data["url"] for item in observations} == {
+        "http://192.0.2.10:80/assets/app.js",
+        "http://192.0.2.10:80/capture",
+        "http://192.0.2.10:80/status?id=1",
+    }

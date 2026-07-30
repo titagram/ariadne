@@ -283,6 +283,18 @@ class CurlAdapter:
         extractor.feed(result.stdout)
         urls = [seed]
         urls.extend(urljoin(seed, reference) for reference in extractor.references)
+        # JavaScript assets commonly expose routes through fetch/axios calls
+        # rather than HTML links. Extract only literal same-host path strings;
+        # dynamic expressions remain untrusted and are ignored.
+        urls.extend(
+            urljoin(seed, reference)
+            for reference in re.findall(
+                r"(?:fetch|axios\.(?:get|post|request)|(?:url|endpoint|path))\s*"
+                r"(?:\(|:|=)\s*[\"'](?P<path>/[^\"']+)[\"']",
+                result.stdout,
+                flags=re.IGNORECASE,
+            )
+        )
         observations: list[Observation] = []
         seen: set[str] = set()
         for url in urls:

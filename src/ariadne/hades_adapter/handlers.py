@@ -1136,6 +1136,38 @@ def _observed_web_urls(
     return tuple(reversed(urls))
 
 
+def _observed_web_asset_urls(
+    observations: tuple[Observation, ...],
+    target: TargetSpec,
+) -> tuple[str, ...]:
+    """Return already observed same-host static assets for offline inspection."""
+    assets: list[str] = []
+    for observation in reversed(observations):
+        if observation.target != target:
+            continue
+        value = observation.data.get("url")
+        path = observation.data.get("path")
+        if not isinstance(value, str) or not isinstance(path, str):
+            continue
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.hostname.casefold() != target.host.casefold()
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or parsed.query
+            or not path.casefold().endswith((".js", ".json", ".map", ".xml"))
+        ):
+            continue
+        if value not in assets:
+            assets.append(value)
+        if len(assets) == 4:
+            break
+    return tuple(reversed(assets))
+
+
 def _observed_object_reference_urls(
     observations: tuple[Observation, ...],
     target: TargetSpec,
@@ -2010,6 +2042,21 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             }
         )
 
+    asset_urls = _observed_web_asset_urls(observations, plan.target)
+    if any(
+        action.adapter == "curl"
+        and action.operation == "fetch"
+        and action.inputs.get("path_from_evidence") == "static_asset"
+        and not action.inputs.get("url")
+        for action in plan.actions
+    ) and not asset_urls:
+        return {
+            "status": "blocked",
+            "boundary": "missing_evidence",
+            "message": "Static asset analysis requires an observed same-host asset URL.",
+            "plan_id": "",
+        }
+
     if any(
         action.adapter == "research"
         and action.operation == "investigate"
@@ -2114,7 +2161,13 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                                     if action.adapter == "katana"
                                     else {
                                         "url": (
-                                            urljoin(web_urls[0], action.inputs["path"])
+                                            (
+                                                asset_urls[0]
+                                                if action.inputs.get("path_from_evidence")
+                                                == "static_asset"
+                                                and asset_urls
+                                                else urljoin(web_urls[0], action.inputs["path"])
+                                            )
                                             if (
                                                 action.adapter == "curl"
                                                 and isinstance(action.inputs.get("path"), str)
