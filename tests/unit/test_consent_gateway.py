@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
+from types import ModuleType
 
 import pytest
 
 from ariadne.core.engagement import TargetSpec
 from ariadne.core.planner import Plan, PlannedAction
 from ariadne.core.workflow import PlaybookLimits
-from ariadne.hades_adapter.consent import ConsentDecision, HadesConsentGateway
+from ariadne.hades_adapter.consent import (
+    ConsentDecision,
+    HadesConsentGateway,
+    load_hades_consent_gateway,
+)
 
 
 def _plan() -> Plan:
@@ -41,6 +47,51 @@ def _plan() -> Plan:
         created_at=now,
         expires_at=now + timedelta(minutes=15),
     )
+
+
+@pytest.mark.asyncio
+async def test_loaded_gateway_uses_hades_cli_callback_on_originating_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback_state = threading.local()
+    callback_threads: list[int] = []
+    originating_thread = threading.get_ident()
+
+    def approval_callback(
+        command: str,
+        description: str,
+        *,
+        allow_permanent: bool,
+    ) -> str:
+        del command, description
+        assert allow_permanent is False
+        callback_threads.append(threading.get_ident())
+        return "once"
+
+    callback_state.value = approval_callback
+
+    tools_package = ModuleType("tools")
+    tools_package.__path__ = []  # type: ignore[attr-defined]
+    approval_module = ModuleType("tools.approval")
+    terminal_module = ModuleType("tools.terminal_tool")
+
+    def public_requester(**kwargs: object) -> str:
+        del kwargs
+        return "decline"
+
+    def get_callback() -> object | None:
+        return getattr(callback_state, "value", None)
+
+    approval_module.request_elicitation_consent = public_requester  # type: ignore[attr-defined]
+    terminal_module._get_approval_callback = get_callback  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools", tools_package)
+    monkeypatch.setitem(sys.modules, "tools.approval", approval_module)
+    monkeypatch.setitem(sys.modules, "tools.terminal_tool", terminal_module)
+
+    gateway = load_hades_consent_gateway()
+
+    assert await gateway.request_contract({"target": "10.10.10.10"}) == (ConsentDecision.ACCEPT)
+    assert callback_threads == [originating_thread]
 
 
 @pytest.mark.asyncio

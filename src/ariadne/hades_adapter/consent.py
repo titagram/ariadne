@@ -55,11 +55,14 @@ class HadesConsentGateway:
         self,
         requester: Any,
         *,
+        interactive_requester: Any | None = None,
         requester_timeout_seconds: float = 120,
         external_timeout_seconds: float | None = None,
     ) -> None:
         if not callable(requester):
             raise TypeError("Hades consent requester must be callable")
+        if interactive_requester is not None and not callable(interactive_requester):
+            raise TypeError("Hades interactive consent requester must be callable")
         if requester_timeout_seconds <= 0:
             raise ValueError("Requester timeout must be positive")
         external_timeout = (
@@ -68,20 +71,16 @@ class HadesConsentGateway:
             else external_timeout_seconds
         )
         if external_timeout <= requester_timeout_seconds:
-            raise ValueError(
-                "External timeout must exceed the requester timeout"
-            )
+            raise ValueError("External timeout must exceed the requester timeout")
         self._requester = requester
+        self._interactive_requester = interactive_requester
         self._requester_timeout_seconds = requester_timeout_seconds
         self._external_timeout_seconds = external_timeout
 
     async def request_plan(self, plan: Plan) -> ConsentDecision:
         import json
 
-        message = (
-            f"Authorize Ariadne plan {plan.plan_id[:8]} for target "
-            f"{plan.target.host}?"
-        )
+        message = f"Authorize Ariadne plan {plan.plan_id[:8]} for target {plan.target.host}?"
         description = json.dumps(
             {
                 "plan_id": plan.plan_id,
@@ -140,6 +139,18 @@ class HadesConsentGateway:
         description: str,
         surface: str,
     ) -> ConsentDecision:
+        if self._interactive_requester is not None:
+            try:
+                outcome = self._interactive_requester(
+                    message=message,
+                    description=description,
+                    surface=surface,
+                )
+            except Exception:
+                return ConsentDecision.UNAVAILABLE
+            if outcome is not None:
+                return self._normalize(outcome)
+
         async def invoke() -> object:
             outcome = await asyncio.to_thread(
                 self._requester,
@@ -159,6 +170,10 @@ class HadesConsentGateway:
             return ConsentDecision.CANCEL
         except Exception:
             return ConsentDecision.UNAVAILABLE
+        return self._normalize(outcome)
+
+    @staticmethod
+    def _normalize(outcome: object) -> ConsentDecision:
         if not isinstance(outcome, str):
             return ConsentDecision.UNAVAILABLE
         try:
@@ -175,11 +190,39 @@ def load_hades_consent_gateway() -> ConsentGateway:
     from importlib import import_module
 
     try:
-        requester = import_module(
-            "tools.approval"
-        ).request_elicitation_consent
+        requester = import_module("tools.approval").request_elicitation_consent
     except (AttributeError, ImportError):
         return UnavailableConsentGateway()
     if not callable(requester):
         return UnavailableConsentGateway()
-    return HadesConsentGateway(requester)
+
+    try:
+        callback_getter = import_module("tools.terminal_tool")._get_approval_callback
+    except (AttributeError, ImportError):
+        callback_getter = None
+
+    def request_interactively(
+        *,
+        message: str,
+        description: str,
+        surface: str,
+    ) -> str | None:
+        del surface
+        if not callable(callback_getter):
+            return None
+        callback = callback_getter()
+        if callback is None:
+            return None
+        choice = callback(
+            message,
+            description,
+            allow_permanent=False,
+        )
+        if choice in {"once", "session", "always"}:
+            return ConsentDecision.ACCEPT.value
+        return ConsentDecision.DECLINE.value
+
+    return HadesConsentGateway(
+        requester,
+        interactive_requester=request_interactively,
+    )
