@@ -1792,6 +1792,8 @@ async def handle_amend_engagement(
         "base_snapshot_hash": handle.snapshot.snapshot_hash,
         "base_revision": handle.snapshot.revision,
         "add_targets": changes["add_targets"],
+        "target_host": changes.get("target_host"),
+        "time_window_minutes": changes.get("time_window_minutes"),
         "objectives": changes["objectives"],
         "intensity": changes["intensity"],
         "exclusions": changes["exclusions"],

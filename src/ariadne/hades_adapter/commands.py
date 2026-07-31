@@ -338,6 +338,14 @@ class AriadneCommand:
             )
 
         targets = list(handle.snapshot.targets)
+        replacement_target = changes.get("target_host")
+        previous_primary_target = targets[0].host if targets else ""
+        if replacement_target is not None:
+            replacement = TargetSpec(host=replacement_target)
+            # A replacement changes only the primary network destination. Any
+            # additional targets already present remain part of the immutable
+            # contract unless explicitly amended separately.
+            targets[0] = replacement
         for raw_target in changes.get("add_targets", ()):
             target = TargetSpec(host=raw_target)
             if target not in targets:
@@ -355,6 +363,11 @@ class AriadneCommand:
         )
         intensity = changes.get("intensity")
         constraints = handle.snapshot.constraints
+        requested_duration = changes.get("time_window_minutes")
+        if requested_duration is not None:
+            constraints = constraints.model_copy(
+                update={"max_duration_minutes": requested_duration}
+            )
         if intensity is not None:
             rate, concurrency = intensity_default_limits(intensity)
             constraints = constraints.model_copy(
@@ -398,6 +411,12 @@ class AriadneCommand:
                         "trusted_confirmation_digest": trusted_confirmation_digest,
                         "candidate_id": changes.get("candidate_id", ""),
                         "reason": changes["reason"],
+                        "target_host": replacement_target or "",
+                        "previous_target": previous_primary_target,
+                        "time_window_minutes": amended.constraints.max_duration_minutes,
+                        "previous_time_window_minutes": (
+                            handle.snapshot.constraints.max_duration_minutes
+                        ),
                         "add_targets": [
                             target.host
                             for target in amended.targets

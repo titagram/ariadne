@@ -313,6 +313,60 @@ async def test_amendment_creates_linked_revision_and_rebinds_session(
 
 
 @pytest.mark.asyncio
+async def test_amendment_replaces_primary_target_and_updates_duration_without_relaxing_contract(
+    command: AriadneCommand,
+    valid_answers: dict,
+) -> None:
+    await handle_prepare_engagement(
+        valid_answers,
+        session_id="replace-target-session",
+        ariadne_command=command,
+        consent_gateway=ContractConsent(),
+    )
+    binding = command.get_session_binding("replace-target-session")
+    assert binding is not None and binding.engagement_id is not None
+    original = command.store.open(binding.engagement_id)
+    assert original is not None
+
+    amended = await handle_amend_engagement(
+        {
+            "target_host": "10.129.244.146",
+            "time_window_minutes": 120,
+            "reason": "HTB rotated the authorized target address.",
+        },
+        session_id="replace-target-session",
+        ariadne_command=command,
+        consent_gateway=ContractConsent(),
+    )
+
+    assert amended["status"] == "active"
+    current = command.store.open(binding.engagement_id)
+    assert current is not None
+    snapshot = current.snapshot
+    assert snapshot.revision == original.snapshot.revision + 1
+    assert snapshot.previous_snapshot_hash == original.snapshot.snapshot_hash
+    assert [target.host for target in snapshot.targets] == ["10.129.244.146"]
+    assert snapshot.constraints.max_duration_minutes == 120
+    # Replacing the target/window cannot change authorization or policy scope.
+    assert snapshot.profile == original.snapshot.profile
+    assert snapshot.autonomy == original.snapshot.autonomy
+    assert snapshot.objectives == original.snapshot.objectives
+    assert snapshot.exclusions == original.snapshot.exclusions
+    # Base/profile provenance stays fixed; the engagement-constraint digest is
+    # intentionally refreshed to cover the amended duration.
+    assert snapshot.policy_source_digests[:2] == original.snapshot.policy_source_digests[:2]
+    assert len(snapshot.policy_source_digests) == len(original.snapshot.policy_source_digests)
+
+    events = command.store.read_events(current)
+    amended_event = next(
+        event for event in events if event["event_type"] == "engagement_amended"
+    )
+    assert amended_event["payload"]["target_host"] == "10.129.244.146"
+    assert amended_event["payload"]["previous_target"] == "192.168.2.148"
+    assert amended_event["payload"]["time_window_minutes"] == 120
+
+
+@pytest.mark.asyncio
 async def test_amendment_freezes_current_policy_provenance(
     command: AriadneCommand,
     valid_answers: dict,

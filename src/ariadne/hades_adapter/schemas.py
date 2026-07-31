@@ -127,6 +127,21 @@ class AmendEngagementInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     add_targets: list[str] = Field(default_factory=list, max_length=20)
+    target_host: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description=(
+            "Replace the engagement's primary target after explicit consent. "
+            "The previous immutable snapshot remains available for audit."
+        ),
+    )
+    time_window_minutes: int | None = Field(
+        default=None,
+        ge=1,
+        le=1440,
+        description="Replace the engagement time window in minutes.",
+    )
     objectives: list[ObjectiveAnswer] | None = None
     intensity: Literal["low", "normal", "high"] | None = None
     exclusions: list[str] | None = Field(default=None, max_length=50)
@@ -137,6 +152,8 @@ class AmendEngagementInput(BaseModel):
     def _requires_change(self) -> AmendEngagementInput:
         if not (
             self.add_targets
+            or self.target_host is not None
+            or self.time_window_minutes is not None
             or self.objectives is not None
             or self.intensity is not None
             or self.exclusions is not None
