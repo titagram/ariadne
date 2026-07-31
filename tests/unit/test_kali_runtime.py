@@ -304,7 +304,7 @@ def test_kali_recreates_started_stack_before_publishing_callback_port(tmp_path) 
     assert preserved.read_text(encoding="utf-8") == "keep"
 
 
-def test_kali_serializes_callback_reconfiguration_after_concurrent_startup(tmp_path) -> None:
+def test_kali_serializes_callback_reconfiguration_after_concurrent_inspection(tmp_path) -> None:
     snapshot = EngagementSnapshot(
         engagement_id=uuid4(),
         revision=1,
@@ -327,11 +327,6 @@ def test_kali_serializes_callback_reconfiguration_after_concurrent_startup(tmp_p
         kali_image_ref=_PINNED_KALI_REF,
         netguard_image_ref=_PINNED_NETGUARD_REF,
     )
-    ordinary = ProcessSpec(
-        argv=("searchsploit", "--json", "craft", "5"),
-        timeout_seconds=30,
-        max_output_bytes=4096,
-    )
     callback = ProcessSpec(
         argv=("msfconsole", "-q", "-x", "use exploit/test; run; exit"),
         environment={
@@ -345,7 +340,7 @@ def test_kali_serializes_callback_reconfiguration_after_concurrent_startup(tmp_p
     )
 
     async def execute() -> None:
-        first = asyncio.create_task(runtime.run(ordinary))
+        first = asyncio.create_task(runtime.inspect_tool("searchsploit"))
         await command_runtime.startup_entered.wait()
         second = asyncio.create_task(runtime.run(callback))
         await asyncio.sleep(0)

@@ -573,6 +573,21 @@ class OnDemandKaliRuntime:
             )
         if executable not in self._curated_executables:
             raise KaliRuntimeUnavailableError(f"{executable} is not in the curated Kali manifest.")
+        async with self._lifecycle_lock:
+            return await self._inspect_started_tool(
+                executable,
+                version_args=version_args,
+                help_args=help_args,
+            )
+
+    async def _inspect_started_tool(
+        self,
+        executable: str,
+        *,
+        version_args: tuple[str, ...],
+        help_args: tuple[str, ...],
+    ) -> tuple[str, str, str, str]:
+        """Inspect one tool while the mutable Kali stack lifecycle is locked."""
         await self._ensure_started()
         if executable == "zaproxy":
             location = await self._container_command(
