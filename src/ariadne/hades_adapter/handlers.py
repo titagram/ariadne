@@ -4679,17 +4679,19 @@ def _record_dead_end_once(
     state: EngagementState,
 ) -> None:
     """Persist one terminal record for an unchanged workflow boundary."""
+    events = store.read_events(run_handle)
     signature = canonical_digest(
         {
             "boundary": boundary,
             "snapshot_hash": run_handle.snapshot.snapshot_hash,
             "state": state.value,
+            "evidence_digest": _dead_end_evidence_digest(events),
         }
     )
     if any(
         event.get("event_type") == "dead_end"
         and event.get("payload", {}).get("signature") == signature
-        for event in store.read_events(run_handle)
+        for event in events
     ):
         return
     store.append_event(
@@ -4708,7 +4710,9 @@ def _dead_end_for_state(
     state: EngagementState,
 ) -> dict[str, str] | None:
     """Return an unchanged terminal boundary before attempting to replan it."""
-    for event in reversed(store.read_events(run_handle)):
+    events = store.read_events(run_handle)
+    evidence_digest = _dead_end_evidence_digest(events)
+    for event in reversed(events):
         if event.get("event_type") != "dead_end":
             continue
         payload = event.get("payload", {})
@@ -4721,11 +4725,27 @@ def _dead_end_for_state(
                 "boundary": boundary,
                 "snapshot_hash": run_handle.snapshot.snapshot_hash,
                 "state": state.value,
+                "evidence_digest": evidence_digest,
             }
         )
         if hmac.compare_digest(signature, expected):
             return {"boundary": boundary, "signature": signature}
     return None
+
+
+def _dead_end_evidence_digest(events: list[dict[str, Any]]) -> str:
+    """Digest persisted evidence/research context for dead-end invalidation."""
+    relevant = tuple(
+        {
+            "event_type": event.get("event_type", ""),
+            "sequence": event.get("sequence"),
+            "event_hash": event.get("event_hash"),
+            "payload": event.get("payload", {}),
+        }
+        for event in events
+        if event.get("event_type") not in {"dead_end", "execution_time_paused"}
+    )
+    return canonical_digest(relevant)
 
 
 def _get_run_handle(store: RunStore, engagement_id: Any) -> RunHandle | None:

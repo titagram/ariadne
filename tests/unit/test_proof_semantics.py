@@ -9,7 +9,9 @@ from ariadne.core.engagement import EngagementSnapshot, TargetSpec
 from ariadne.core.enums import AutonomyMode, EngagementState, EnvironmentProfile
 from ariadne.core.observations import Observation
 from ariadne.hades_adapter.handlers import (
+    _dead_end_for_state,
     _determine_engagement_state,
+    _record_dead_end_once,
     _typed_progression_observations,
 )
 from ariadne.store.run_store import Event, RunStore
@@ -162,3 +164,42 @@ def test_sanitized_events_194_to_216_replay_never_creates_foothold_or_ssh(tmp_pa
         and observation.data.get("method") == "ssh_password"
         for observation in observations
     )
+
+
+def test_new_evidence_invalidates_a_persisted_dead_end(tmp_path) -> None:
+    """An unchanged dead-end is sticky until new evidence changes its signature."""
+    store = RunStore(base_path=tmp_path)
+    run = store.create(
+        EngagementSnapshot(
+            engagement_id=uuid4(),
+            revision=1,
+            previous_snapshot_hash=None,
+            snapshot_hash="c" * 64,
+            confirmed_at=datetime.now(UTC),
+            authorization_attested=True,
+            disclaimer_version="test",
+            profile=EnvironmentProfile.HTB,
+            autonomy=AutonomyMode.CONTROLLED,
+            targets=(TargetSpec(host="192.0.2.10"),),
+            objectives=(),
+        )
+    )
+    state = EngagementState.ENVIRONMENT_PREFLIGHT
+
+    _record_dead_end_once(store, run, boundary="no_eligible_plan", state=state)
+    assert _dead_end_for_state(store, run, state) is not None
+
+    store.append_event(
+        run,
+        Event(
+            event_type="evidence_collected",
+            payload={
+                "evidence_type": "research_complete",
+                "execution_classification": "success",
+                "observation_data": {"type": "research_complete", "product": "fixture"},
+            },
+            timestamp=datetime.now(UTC),
+        ),
+    )
+
+    assert _dead_end_for_state(store, run, state) is None
