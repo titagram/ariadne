@@ -1606,7 +1606,6 @@ async def test_approved_alias_zap_attempt_is_terminal_and_falls_back(
     )
     object.__setattr__(services, "tool_card_verifier", None)
     prepare = _handler_for("ariadne_prepare_engagement", services)
-    amend = _handler_for("ariadne_amend_engagement", services)
     run = _handler_for("ariadne_run", services)
     created = json.loads(
         await prepare(
@@ -1628,17 +1627,6 @@ async def test_approved_alias_zap_attempt_is_terminal_and_falls_back(
             session_id="approved-alias-zap-failure-session",
         )
     )
-    approved = json.loads(
-        await amend(
-            {
-                "add_targets": ["orion.test"],
-                "candidate_id": boundary["candidate"]["candidate_id"],
-                "reason": "Approve the observed HTTP virtual-host alias.",
-            },
-            session_id="approved-alias-zap-failure-session",
-        )
-    )
-
     resumed = json.loads(
         await run(
             {"max_steps": 3},
@@ -1646,16 +1634,15 @@ async def test_approved_alias_zap_attempt_is_terminal_and_falls_back(
         )
     )
 
-    assert created["status"] == approved["status"] == "active"
-    assert boundary["boundary"] == "scope_amendment"
-    assert resumed["boundary"] == "safety_step_limit", resumed
-    assert [spec.argv[0] for spec in runtime.specs] == [
-        "httpx-toolkit",
-        "httpx-toolkit",
-        "zaproxy",
-        "curl",
-    ]
-    assert runtime.specs[2].environment == {
+    assert created["status"] == "active"
+    assert boundary["boundary"] == "safety_step_limit"
+    assert resumed["boundary"] == "no_eligible_plan", resumed
+    expected_tools = ["httpx-toolkit", "zaproxy"]
+    if expected_status == "failure":
+        expected_tools.append("curl")
+    assert [spec.argv[0] for spec in runtime.specs] == expected_tools
+    zap_spec = next(spec for spec in runtime.specs if spec.argv[0] == "zaproxy")
+    assert zap_spec.environment == {
         "ARIADNE_ZAP_HTTP_HOST": "orion.test",
         "ARIADNE_ZAP_NETWORK_TARGET": "192.0.2.10",
     }
@@ -1665,6 +1652,17 @@ async def test_approved_alias_zap_attempt_is_terminal_and_falls_back(
     handle = services.store.open(binding.engagement_id)
     assert handle is not None
     events = services.store.read_events(handle)
+    assert any(
+        event["event_type"] == "scope_alias_approved"
+        and event["payload"].get("http_host") == "orion.test"
+        and event["payload"].get("network_target") == "192.0.2.10"
+        for event in events
+    )
+    assert not any(
+        event["event_type"] == "scope_amendment_required"
+        and event["payload"].get("target") == "orion.test"
+        for event in events
+    )
     assert any(
         event["event_type"] == "plan_executed"
         and event["payload"]["playbook_id"] == zap.id
@@ -1676,7 +1674,7 @@ async def test_approved_alias_zap_attempt_is_terminal_and_falls_back(
         and event["payload"]["playbook_id"] == fallback.id
         and event["payload"]["status"] == "executed"
         for event in events
-    )
+    ) is (expected_status == "failure")
     assert (
         any(
             event["event_type"] == "evidence_collected"
@@ -1972,9 +1970,9 @@ async def test_builtin_catalog_researches_each_service_without_blind_validation(
         "engagement.preflight.v1",
         "network.tcp-discovery.v1",
         "network.service-fingerprint.v1",
+        "research.service-vulnerability.v1",
+        "research.service-vulnerability.v1",
         "service.protocol-routing.v1",
-        "research.service-vulnerability.v1",
-        "research.service-vulnerability.v1",
         "ssh.enumeration.v1",
         "web.fingerprint.v1",
     ]

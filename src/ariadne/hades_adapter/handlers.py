@@ -679,8 +679,6 @@ def _determine_engagement_state(
         return EngagementState.POST_EXPLOITATION, tuple(observations)
     if validated_nuclei or session_proven:
         return EngagementState.FOOTHOLD, tuple(observations)
-    if "web_paths" in evidence_types:
-        return EngagementState.ENUMERATION, tuple(observations)
     target = (
         run_handle.snapshot.targets[0]
         if run_handle.snapshot.targets
@@ -692,6 +690,8 @@ def _determine_engagement_state(
     # making the hypothesis-stage research playbook ineligible.
     if _research_fingerprint_needs_refresh(tuple(observations), target) is not None:
         return EngagementState.HYPOTHESIS, tuple(observations)
+    if "web_paths" in evidence_types:
+        return EngagementState.ENUMERATION, tuple(observations)
     if _latest_service_fingerprint(tuple(observations), target) is not None:
         return EngagementState.HYPOTHESIS, tuple(observations)
     if _persisted_research_candidates(events, run_handle, target.host):
