@@ -152,6 +152,40 @@ class TestMetasploitPlan:
                 context,
             )
 
+    def test_run_module_uses_explicit_host_published_callback(
+        self,
+        context: AdapterContext,
+    ) -> None:
+        candidate = validated_candidate()
+        spec = MetasploitAdapter().plan(
+            action(
+                "run_module",
+                module=candidate["module"],
+                validated_candidate=candidate,
+                check_status="vulnerable",
+                check_evidence_id="evidence-msf-check-1",
+                callback={
+                    "advertised_address": "10.10.14.8",
+                    "published_port": 4444,
+                    "listener_bind_address": "0.0.0.0",
+                    "listener_port": 4444,
+                },
+            ),
+            context,
+        )
+
+        assert "set LHOST 10.10.14.8" in spec.argv[-1]
+        assert "set LPORT 4444" in spec.argv[-1]
+        assert "set ReverseListenerBindAddress 0.0.0.0" in spec.argv[-1]
+        assert "set ReverseListenerBindPort 4444" in spec.argv[-1]
+        assert "DisablePayloadHandler" not in spec.argv[-1]
+        assert spec.environment == {
+            "ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS": "10.10.14.8",
+            "ARIADNE_MSF_CALLBACK_PUBLISHED_PORT": "4444",
+            "ARIADNE_MSF_CALLBACK_LISTENER_BIND_ADDRESS": "0.0.0.0",
+            "ARIADNE_MSF_CALLBACK_LISTENER_PORT": "4444",
+        }
+
     def test_unknown_operation_raises(self, context: AdapterContext) -> None:
         with pytest.raises(AdapterError):
             MetasploitAdapter().plan(action("invalid_op"), context)

@@ -67,6 +67,24 @@ _CURATED_ZAP_GUIDANCE: Final[str] = (
     "-autorun for an Automation Framework plan, -version for version "
     "output, and -help for command options."
 )
+_MSF_CALLBACK_ENV_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS",
+        "ARIADNE_MSF_CALLBACK_PUBLISHED_PORT",
+        "ARIADNE_MSF_CALLBACK_LISTENER_BIND_ADDRESS",
+        "ARIADNE_MSF_CALLBACK_LISTENER_PORT",
+    }
+)
+
+
+@dataclass(frozen=True)
+class _MetasploitCallback:
+    """Target-visible callback data kept separate from the Kali bridge."""
+
+    advertised_address: str
+    published_port: int
+    listener_bind_address: str
+    listener_port: int
 
 
 class DockerRuntime:
@@ -295,6 +313,7 @@ class OnDemandKaliRuntime:
         self._project_name = f"ariadne-{suffix}"
         self._started = False
         self._start_lock = asyncio.Lock()
+        self._metasploit_callback: _MetasploitCallback | None = None
         self._planned_target_ports: set[tuple[str, str]] = set()
         manifest = yaml.safe_load((self._compose_dir / "tool-manifest.yaml").read_text())
         self._curated_executables = frozenset(
@@ -319,6 +338,7 @@ class OnDemandKaliRuntime:
         )
 
     async def run(self, spec: ProcessSpec) -> ProcessResult:
+        self._configure_metasploit_callback(spec)
         container_environment = self._container_environment(spec)
         self._bind_planned_ports(spec)
         await self._ensure_started(
@@ -327,6 +347,8 @@ class OnDemandKaliRuntime:
                 float(self._STARTUP_TIMEOUT_SECONDS),
             )
         )
+        if self._metasploit_callback is not None and spec.argv[0] == "msfconsole":
+            await self._reject_container_bridge_callback()
         if spec.argv[0] == "nuclei":
             await self._attest_nuclei(spec)
         command = [
@@ -353,6 +375,8 @@ class OnDemandKaliRuntime:
     def _container_environment(self, spec: ProcessSpec) -> dict[str, str]:
         """Resolve a guarded ZAP vhost binding without consulting DNS."""
         environment = dict(spec.environment)
+        for key in _MSF_CALLBACK_ENV_KEYS:
+            environment.pop(key, None)
         if spec.argv[0] != "zaproxy":
             return environment
         alias = environment.pop("ARIADNE_ZAP_HTTP_HOST", None)
@@ -394,6 +418,92 @@ class OnDemandKaliRuntime:
             java_options += " -Djdk.net.hosts.file=/workspace/.ariadne/zap-hosts"
         environment["JAVA_TOOL_OPTIONS"] = java_options
         return environment
+
+    def _configure_metasploit_callback(self, spec: ProcessSpec) -> None:
+        """Bind a reverse handler to a host-published port before Kali starts.
+
+        A Kali container's bridge address is never a viable target callback.
+        The adapter therefore passes a complete, immutable binding that maps a
+        target-visible VPN address and host port to the listener inside Docker.
+        """
+        values = {
+            key: spec.environment[key]
+            for key in _MSF_CALLBACK_ENV_KEYS
+            if key in spec.environment
+        }
+        if not values:
+            return
+        if spec.argv[0] != "msfconsole" or set(values) != _MSF_CALLBACK_ENV_KEYS:
+            raise KaliRuntimeUnavailableError("Incomplete Metasploit callback binding.")
+        try:
+            advertised = ipaddress.ip_address(values["ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS"])
+            published_port = int(values["ARIADNE_MSF_CALLBACK_PUBLISHED_PORT"])
+            listener_port = int(values["ARIADNE_MSF_CALLBACK_LISTENER_PORT"])
+        except (ValueError, TypeError) as exc:
+            raise KaliRuntimeUnavailableError("Invalid Metasploit callback binding.") from exc
+        bind_address = values["ARIADNE_MSF_CALLBACK_LISTENER_BIND_ADDRESS"]
+        if (
+            not isinstance(advertised, ipaddress.IPv4Address)
+            or advertised.is_loopback
+            or advertised.is_unspecified
+            or advertised.is_multicast
+            or advertised.is_link_local
+            or bind_address != "0.0.0.0"
+            or not 1 <= published_port <= 65535
+            or not 1 <= listener_port <= 65535
+        ):
+            raise KaliRuntimeUnavailableError("Unsafe Metasploit callback binding.")
+        callback = _MetasploitCallback(
+            advertised_address=str(advertised),
+            published_port=published_port,
+            listener_bind_address=bind_address,
+            listener_port=listener_port,
+        )
+        if self._started and callback != self._metasploit_callback:
+            raise KaliRuntimeUnavailableError(
+                "Metasploit callback must be configured before the Kali stack starts."
+            )
+        if self._metasploit_callback is not None and callback != self._metasploit_callback:
+            raise KaliRuntimeUnavailableError("Metasploit callback binding cannot change mid-run.")
+        self._metasploit_callback = callback
+        self._write_callback_override()
+
+    def _write_callback_override(self) -> Path:
+        """Write the fixed Compose port mapping under the isolated run workspace."""
+        if self._metasploit_callback is None:
+            raise KaliRuntimeUnavailableError("Metasploit callback is not configured.")
+        binding_dir = self._run_root / "workspace" / ".ariadne"
+        binding_dir.mkdir(parents=True, exist_ok=True)
+        if binding_dir.resolve().parent != (self._run_root / "workspace").resolve():
+            raise KaliRuntimeUnavailableError("Callback mapping escaped the run workspace.")
+        override = binding_dir / "metasploit-callback.compose.yaml"
+        if override.is_symlink():
+            raise KaliRuntimeUnavailableError("Callback mapping cannot be a symlink.")
+        override.write_text(
+            "services:\n"
+            "  netguard:\n"
+            "    ports:\n"
+            "      - \"${ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS}:"
+            "${ARIADNE_MSF_CALLBACK_PUBLISHED_PORT}:"
+            "${ARIADNE_MSF_CALLBACK_LISTENER_PORT}/tcp\"\n",
+            encoding="utf-8",
+        )
+        override.chmod(0o644)
+        return override
+
+    async def _reject_container_bridge_callback(self) -> None:
+        """Reject an advertised LHOST that resolves to Kali's Docker bridge IP."""
+        callback = self._metasploit_callback
+        if callback is None:
+            return
+        addresses = await self._container_command(("hostname", "-i"), timeout_seconds=5)
+        if addresses.exit_code != 0:
+            raise KaliRuntimeUnavailableError("Unable to verify the Kali callback address.")
+        bridge_addresses = set(addresses.stdout.split())
+        if callback.advertised_address in bridge_addresses:
+            raise KaliRuntimeUnavailableError(
+                "Metasploit callback advertised the Kali Docker bridge address."
+            )
 
     def _container_value(self, value: str) -> str:
         """Translate only paths inside this immutable engagement run."""
@@ -700,14 +810,15 @@ class OnDemandKaliRuntime:
         *,
         docker: str | None = None,
     ) -> tuple[str, ...]:
-        return (
+        prefix = (
             docker or self._docker_path,
             "compose",
             "-f",
             str(self._compose_dir / "compose.yaml"),
-            "-p",
-            self._project_name,
         )
+        if self._metasploit_callback is not None:
+            prefix += ("-f", str(self._write_callback_override()))
+        return (*prefix, "-p", self._project_name)
 
     def _compose_environment(self) -> dict[str, str]:
         environment = {
@@ -724,6 +835,15 @@ class OnDemandKaliRuntime:
             environment["ARIADNE_KALI_IMAGE"] = self._kali_image_ref
         if self._netguard_image_ref:
             environment["ARIADNE_NETGUARD_IMAGE"] = self._netguard_image_ref
+        callback = self._metasploit_callback
+        if callback is not None:
+            environment.update(
+                {
+                    "ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS": callback.advertised_address,
+                    "ARIADNE_MSF_CALLBACK_PUBLISHED_PORT": str(callback.published_port),
+                    "ARIADNE_MSF_CALLBACK_LISTENER_PORT": str(callback.listener_port),
+                }
+            )
         return environment
 
     def _bind_planned_ports(self, spec: ProcessSpec) -> None:

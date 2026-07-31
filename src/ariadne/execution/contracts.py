@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import re
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -24,6 +25,15 @@ from ariadne.core.planner import Plan, PlannedAction
 from ariadne.core.policy import EffectivePolicy
 from ariadne.core.workflow import PlaybookLimits
 from ariadne.runtime.process import ProcessResult, ProcessSpec
+
+_MSF_CALLBACK_ENV_KEYS = frozenset(
+    {
+        "ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS",
+        "ARIADNE_MSF_CALLBACK_PUBLISHED_PORT",
+        "ARIADNE_MSF_CALLBACK_LISTENER_BIND_ADDRESS",
+        "ARIADNE_MSF_CALLBACK_LISTENER_PORT",
+    }
+)
 
 
 class ProcessAuthorizationError(RuntimeError):
@@ -242,6 +252,14 @@ class ExecutionContractRegistry:
                 ("search", "info", "check", "run_module"),
                 frozenset({"msfconsole"}),
                 "ariadne.adapters.metasploit.MetasploitAdapter",
+                allowed_environment_keys=frozenset(
+                    {
+                        "ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS",
+                        "ARIADNE_MSF_CALLBACK_PUBLISHED_PORT",
+                        "ARIADNE_MSF_CALLBACK_LISTENER_BIND_ADDRESS",
+                        "ARIADNE_MSF_CALLBACK_LISTENER_PORT",
+                    }
+                ),
             ),
             *bounded(
                 "pcap",
@@ -1171,6 +1189,8 @@ class GuardedRuntime:
                 and commands[1] == f"set RHOSTS {self._envelope.exact_target.host}"
                 and commands[-2:] == (expected_terminal, "exit")
             )
+            callback_commands: dict[str, str] = {}
+            disable_handler = False
             for command in commands[2:-2]:
                 if command.startswith("set RPORT "):
                     value = command.removeprefix("set RPORT ")
@@ -1182,9 +1202,7 @@ class GuardedRuntime:
                         and bool(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", value))
                         and not re.search(r"[;\r\n]", value)
                     )
-                elif operation == "run_module" and command.startswith(
-                    ("set PAYLOAD ", "set LHOST ")
-                ):
+                elif operation == "run_module" and command.startswith("set PAYLOAD "):
                     value = command.split(" ", 2)[-1]
                     valid = (
                         valid
@@ -1194,10 +1212,78 @@ class GuardedRuntime:
                             value,
                         )
                     )
+                elif operation == "run_module" and command.startswith(
+                    (
+                        "set LHOST ",
+                        "set LPORT ",
+                        "set ReverseListenerBindAddress ",
+                        "set ReverseListenerBindPort ",
+                    )
+                ):
+                    option, _, value = command.removeprefix("set ").partition(" ")
+                    if not value or option in callback_commands:
+                        valid = False
+                    callback_commands[option] = value
+                elif operation == "run_module" and command == "set DisablePayloadHandler true":
+                    if disable_handler:
+                        valid = False
+                    disable_handler = True
                 else:
                     valid = False
+            if operation == "run_module":
+                callback_environment = {
+                    key: value
+                    for key, value in spec.environment.items()
+                    if key in _MSF_CALLBACK_ENV_KEYS
+                }
+                if callback_environment:
+                    valid = valid and self._valid_metasploit_callback(
+                        callback_environment,
+                        callback_commands,
+                        disable_handler,
+                    )
+                else:
+                    valid = valid and not callback_commands and disable_handler
         if not valid:
             self._deny(AuthorizationReason.TEMPLATE_INVALID, spec)
+
+    @staticmethod
+    def _valid_metasploit_callback(
+        environment: Mapping[str, str],
+        commands: Mapping[str, str],
+        disable_handler: bool,
+    ) -> bool:
+        """Require an explicit target-visible callback, never an inferred bridge IP."""
+        required = _MSF_CALLBACK_ENV_KEYS
+        if set(environment) != required or disable_handler:
+            return False
+        advertised = environment["ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS"]
+        published_port = environment["ARIADNE_MSF_CALLBACK_PUBLISHED_PORT"]
+        listener_bind = environment["ARIADNE_MSF_CALLBACK_LISTENER_BIND_ADDRESS"]
+        listener_port = environment["ARIADNE_MSF_CALLBACK_LISTENER_PORT"]
+        try:
+            address = ipaddress.ip_address(advertised)
+        except ValueError:
+            return False
+        if (
+            not isinstance(address, ipaddress.IPv4Address)
+            or address.is_loopback
+            or address.is_unspecified
+            or address.is_multicast
+            or address.is_link_local
+            or listener_bind != "0.0.0.0"
+            or not published_port.isdigit()
+            or not listener_port.isdigit()
+            or not 1 <= int(published_port) <= 65535
+            or not 1 <= int(listener_port) <= 65535
+        ):
+            return False
+        return commands == {
+            "LHOST": advertised,
+            "LPORT": published_port,
+            "ReverseListenerBindAddress": listener_bind,
+            "ReverseListenerBindPort": listener_port,
+        }
 
     def _validate_screenshot(self, spec: ProcessSpec) -> None:
         target = self._envelope.exact_target.host

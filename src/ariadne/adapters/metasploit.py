@@ -14,7 +14,9 @@ safety: no shell invocation, no semicolons/newlines in option values.
 
 from __future__ import annotations
 
+import ipaddress
 import re
+from dataclasses import dataclass
 from typing import ClassVar, cast
 from uuid import uuid4
 
@@ -42,6 +44,83 @@ _INVALID_OPTION_RE = re.compile(r"[;\n\r]")
 # Regex for a valid MSF module path
 _VALID_MODULE_RE = re.compile(r"^[a-z][a-z0-9_]+/[a-z][a-z0-9_/]*[a-z0-9_]$")
 _VHOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$")
+
+_CALLBACK_ENV_KEYS = {
+    "ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS",
+    "ARIADNE_MSF_CALLBACK_PUBLISHED_PORT",
+    "ARIADNE_MSF_CALLBACK_LISTENER_BIND_ADDRESS",
+    "ARIADNE_MSF_CALLBACK_LISTENER_PORT",
+}
+
+
+@dataclass(frozen=True)
+class _CallbackBinding:
+    """Explicitly separate target-visible and Docker-internal callback data."""
+
+    advertised_address: str
+    published_port: int
+    listener_bind_address: str
+    listener_port: int
+
+    def environment(self) -> dict[str, str]:
+        return {
+            "ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS": self.advertised_address,
+            "ARIADNE_MSF_CALLBACK_PUBLISHED_PORT": str(self.published_port),
+            "ARIADNE_MSF_CALLBACK_LISTENER_BIND_ADDRESS": self.listener_bind_address,
+            "ARIADNE_MSF_CALLBACK_LISTENER_PORT": str(self.listener_port),
+        }
+
+
+def _callback_binding(inputs: dict[str, object]) -> _CallbackBinding | None:
+    """Parse a reverse callback only when all Docker boundary values are explicit.
+
+    ``LHOST`` alone is unsafe in a container: Metasploit otherwise chooses the
+    bridge address.  A callback therefore carries the target-visible VPN
+    address separately from the listener bind address and its published port.
+    """
+    raw = inputs.get("callback")
+    if raw is None:
+        if inputs.get("lhost") is not None:
+            raise AdapterError("lhost requires an explicit callback binding")
+        return None
+    if not isinstance(raw, dict) or set(raw) != {
+        "advertised_address",
+        "published_port",
+        "listener_bind_address",
+        "listener_port",
+    }:
+        raise AdapterError("callback requires advertised address, bind address, and both ports")
+    advertised = raw["advertised_address"]
+    bind_address = raw["listener_bind_address"]
+    if not isinstance(advertised, str) or not isinstance(bind_address, str):
+        raise AdapterError("callback addresses must be strings")
+    try:
+        advertised_ip = ipaddress.ip_address(advertised)
+    except ValueError as exc:
+        raise AdapterError("callback advertised address must be an IP address") from exc
+    if not isinstance(advertised_ip, ipaddress.IPv4Address) or any(
+        (
+            advertised_ip.is_loopback,
+            advertised_ip.is_unspecified,
+            advertised_ip.is_multicast,
+            advertised_ip.is_link_local,
+        )
+    ):
+        raise AdapterError("callback advertised address is not target-routable")
+    if bind_address != "0.0.0.0":
+        raise AdapterError("callback listener bind address must be Docker-internal 0.0.0.0")
+    ports: list[int] = []
+    for field in ("published_port", "listener_port"):
+        value = raw[field]
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
+            raise AdapterError(f"callback {field} must be a TCP port")
+        ports.append(value)
+    return _CallbackBinding(
+        advertised_address=str(advertised_ip),
+        published_port=ports[0],
+        listener_bind_address=bind_address,
+        listener_port=ports[1],
+    )
 
 
 def _validate_option(value: str, field_name: str) -> str:
@@ -261,7 +340,7 @@ class MetasploitAdapter:
         rport = str(inputs.get("rport", ""))
         _validate_option(rport, "rport")
         payload = inputs.get("payload")
-        lhost = str(inputs.get("lhost", "")) if inputs.get("lhost") else ""
+        callback = _callback_binding(inputs)
 
         rc_lines = [f"use {module}"]
         rc_lines.append(f"set RHOSTS {rhost}")
@@ -273,15 +352,30 @@ class MetasploitAdapter:
             payload_str = str(payload)
             _validate_option(payload_str, "payload")
             rc_lines.append(f"set PAYLOAD {payload_str}")
-        if lhost:
-            _validate_option(lhost, "lhost")
-            rc_lines.append(f"set LHOST {lhost}")
+        environment: dict[str, str] = {}
+        if callback is None:
+            # Never let a containerised Metasploit payload infer LHOST from
+            # eth0: that would advertise Docker's bridge address to the
+            # target.  Handler-less modules may still run and report their
+            # own non-session evidence.
+            rc_lines.append("set DisablePayloadHandler true")
+        else:
+            rc_lines.extend(
+                (
+                    f"set LHOST {callback.advertised_address}",
+                    f"set LPORT {callback.published_port}",
+                    f"set ReverseListenerBindAddress {callback.listener_bind_address}",
+                    f"set ReverseListenerBindPort {callback.listener_port}",
+                )
+            )
+            environment = callback.environment()
         rc_lines.append("run")
         rc_lines.append("exit")
 
         argv.extend(["-x", "; ".join(rc_lines)])
         return ProcessSpec(
             argv=tuple(argv),
+            environment=environment,
             timeout_seconds=600,
             max_output_bytes=5 * 1024 * 1024,
         )

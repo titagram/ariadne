@@ -135,6 +135,14 @@ class _ZapProbeCommandRuntime(_PinnedImageCommandRuntime):
         return await super().run(spec)
 
 
+class _BridgeCallbackRuntime(_PinnedImageCommandRuntime):
+    async def run(self, spec: ProcessSpec) -> ProcessResult:
+        if spec.argv[-2:] == ("hostname", "-i"):
+            self.calls.append(spec)
+            return ProcessResult(exit_code=0, stdout="172.29.0.2\n", stderr="")
+        return await super().run(spec)
+
+
 def test_kali_reuses_locally_available_pinned_image_without_rebuild(tmp_path) -> None:
     snapshot = EngagementSnapshot(
         engagement_id=uuid4(),
@@ -170,6 +178,47 @@ def test_kali_reuses_locally_available_pinned_image_without_rebuild(tmp_path) ->
     assert "--build" not in compose_up.argv
     assert compose_up.environment["ARIADNE_KALI_IMAGE"] == _PINNED_KALI_REF
     assert compose_up.environment["ARIADNE_NETGUARD_IMAGE"] == _PINNED_NETGUARD_REF
+
+
+def test_kali_rejects_a_container_bridge_callback_before_msfconsole_runs(tmp_path) -> None:
+    snapshot = EngagementSnapshot(
+        engagement_id=uuid4(),
+        revision=1,
+        previous_snapshot_hash=None,
+        snapshot_hash="0" * 64,
+        confirmed_at=datetime.now(UTC),
+        authorization_attested=True,
+        disclaimer_version="1.0",
+        profile=EnvironmentProfile.PRIVATE_LAB,
+        autonomy=AutonomyMode.CONTROLLED,
+        targets=(TargetSpec(host="192.0.2.10"),),
+        objectives=(Objective(kind="proof"),),
+    )
+    command_runtime = _BridgeCallbackRuntime()
+    runtime = OnDemandKaliRuntime(
+        snapshot=snapshot,
+        run_root=tmp_path,
+        command_runtime=command_runtime,
+        docker_locator=lambda _: "/usr/local/bin/docker",
+        kali_image_ref=_PINNED_KALI_REF,
+        netguard_image_ref=_PINNED_NETGUARD_REF,
+    )
+    spec = ProcessSpec(
+        argv=("msfconsole", "-q", "-x", "use exploit/test; run; exit"),
+        environment={
+            "ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS": "172.29.0.2",
+            "ARIADNE_MSF_CALLBACK_PUBLISHED_PORT": "4444",
+            "ARIADNE_MSF_CALLBACK_LISTENER_BIND_ADDRESS": "0.0.0.0",
+            "ARIADNE_MSF_CALLBACK_LISTENER_PORT": "4444",
+        },
+        timeout_seconds=30,
+        max_output_bytes=4096,
+    )
+
+    with pytest.raises(KaliRuntimeUnavailableError, match="bridge address"):
+        asyncio.run(runtime.run(spec))
+
+    assert not any(call.argv[-1] == "msfconsole" for call in command_runtime.calls)
 
 
 def test_kali_startup_is_bounded_by_the_tool_attempt_timeout(tmp_path) -> None:
