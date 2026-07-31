@@ -679,6 +679,8 @@ def _determine_engagement_state(
         return EngagementState.POST_EXPLOITATION, tuple(observations)
     if validated_nuclei or session_proven:
         return EngagementState.FOOTHOLD, tuple(observations)
+    if "web_paths" in evidence_types:
+        return EngagementState.ENUMERATION, tuple(observations)
     target = (
         run_handle.snapshot.targets[0]
         if run_handle.snapshot.targets
@@ -2669,17 +2671,25 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             }
         )
 
-    if any(
-        action.adapter in {"ssh", "postex"} and not action.inputs.get("credential_ref")
-        for action in plan.actions
-    ):
+    authenticated_actions = tuple(
+        action for action in plan.actions if action.adapter in {"ssh", "postex"}
+    )
+    if authenticated_actions:
         credential = _protected_credential(
             observations,
             plan.target,
             run_handle,
         )
         port = _observed_ssh_port(observations, plan.target)
-        if credential is None or port is None:
+        expected_ref = credential.get("credential_ref") if credential is not None else None
+        if (
+            credential is None
+            or port is None
+            or any(
+                action.inputs.get("credential_ref") not in {None, expected_ref}
+                for action in authenticated_actions
+            )
+        ):
             return {
                 "status": "blocked",
                 "boundary": "missing_protected_ssh_credential",
@@ -4380,6 +4390,13 @@ async def handle_run_engagement(
         )
         execution_lease.resume()
         state, _ = _determine_engagement_state(cmd.store, run_handle)
+        previous_dead_end = _dead_end_for_state(cmd.store, run_handle, state)
+        if previous_dead_end is not None:
+            return finish({
+                "status": "blocked",
+                "boundary": previous_dead_end["boundary"],
+                "message": "Unchanged terminal boundary already recorded; no retry was run.",
+            })
         if state in {EngagementState.REPORTING, EngagementState.COMPLETE}:
             walkthrough = await handle_render_report(
                 {"style": "walkthrough"},
@@ -4491,6 +4508,12 @@ async def handle_run_engagement(
                     ),
                 )
                 continue
+            _record_dead_end_once(
+                cmd.store,
+                run_handle,
+                boundary="execution_lease_expired",
+                state=state,
+            )
             return finish({
                 "status": "blocked",
                 "boundary": "execution_lease_expired",
@@ -4505,6 +4528,12 @@ async def handle_run_engagement(
             "plan_proposed",
         }:
             if last_provider_boundary is not None:
+                _record_dead_end_once(
+                    cmd.store,
+                    run_handle,
+                    boundary=str(last_provider_boundary.get("boundary", "provider_unavailable")),
+                    state=state,
+                )
                 return finish({
                     **last_provider_boundary,
                     "steps": step - 1,
@@ -4592,6 +4621,12 @@ async def handle_run_engagement(
                 None,
             )
             if candidate is not None:
+                _record_dead_end_once(
+                    cmd.store,
+                    run_handle,
+                    boundary="scope_candidate",
+                    state=state,
+                )
                 return finish({
                     "status": "blocked",
                     "boundary": "scope_candidate",
@@ -4619,6 +4654,13 @@ async def handle_run_engagement(
                 ),
                 "details": executed,
             })
+    if run_handle is not None:
+        _record_dead_end_once(
+            cmd.store,
+            run_handle,
+            boundary="safety_step_limit",
+            state=state,
+        )
     return finish({
         "status": "blocked",
         "boundary": "safety_step_limit",
@@ -4659,6 +4701,32 @@ def _record_dead_end_once(
             timestamp=datetime.now(UTC),
         ),
     )
+
+
+def _dead_end_for_state(
+    store: RunStore,
+    run_handle: RunHandle,
+    state: EngagementState,
+) -> dict[str, str] | None:
+    """Return an unchanged terminal boundary before attempting to replan it."""
+    for event in reversed(store.read_events(run_handle)):
+        if event.get("event_type") != "dead_end":
+            continue
+        payload = event.get("payload", {})
+        boundary = payload.get("boundary")
+        signature = payload.get("signature")
+        if not isinstance(boundary, str) or not isinstance(signature, str):
+            continue
+        expected = canonical_digest(
+            {
+                "boundary": boundary,
+                "snapshot_hash": run_handle.snapshot.snapshot_hash,
+                "state": state.value,
+            }
+        )
+        if hmac.compare_digest(signature, expected):
+            return {"boundary": boundary, "signature": signature}
+    return None
 
 
 def _get_run_handle(store: RunStore, engagement_id: Any) -> RunHandle | None:

@@ -514,6 +514,14 @@ class MetasploitAdapter:
                 confidence=0.5,
                 summary=f"Metasploit exited with code {result.exit_code}",
             )
+        if observations and all(
+            observation.source == "exploit_no_session" for observation in observations
+        ):
+            return ExecutionClassification(
+                kind="unknown",
+                confidence=0.9,
+                summary="Metasploit completed without establishing a session",
+            )
         if len(observations) > 0:
             return ExecutionClassification(
                 kind="success",

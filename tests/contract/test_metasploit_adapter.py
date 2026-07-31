@@ -260,6 +260,14 @@ class TestMetasploitParse:
 
         assert observations[0].source == "exploit_no_session"
         assert observations[0].data["session_opened"] is False
+        assert MetasploitAdapter().classify(
+            ProcessResult(
+                exit_code=0,
+                stdout="Exploit completed, but no session was created.",
+                stderr="",
+            ),
+            observations,
+        ).kind != "success"
 
     def test_run_with_observed_session_emits_session_proof(
         self,
