@@ -32,6 +32,26 @@ _DEFAULT_WORKFLOW_DIR = Path(__file__).resolve().parent.parent.parent / "workflo
 _DEFAULT_KNOWLEDGE_DIR = Path(__file__).resolve().parent.parent.parent / "knowledge"
 
 
+class _RunScopedKaliRuntimeFactory:
+    """Keep one mutable Kali lifecycle owner for each immutable run."""
+
+    def __init__(
+        self,
+        factory: Callable[[EngagementSnapshot, Path], Runtime],
+    ) -> None:
+        self._factory = factory
+        self._runtimes: dict[tuple[str, Path], Runtime] = {}
+
+    def __call__(self, snapshot: EngagementSnapshot, run_root: Path) -> Runtime:
+        resolved_root = run_root.resolve()
+        key = (snapshot.snapshot_hash, resolved_root)
+        runtime = self._runtimes.get(key)
+        if runtime is None:
+            runtime = self._factory(snapshot, resolved_root)
+            self._runtimes[key] = runtime
+        return runtime
+
+
 def _default_kali_runtime(
     snapshot: EngagementSnapshot,
     run_root: Path,
@@ -64,6 +84,11 @@ class ServiceContainer:
     def __post_init__(self) -> None:
         """Load the workflow catalog if not provided."""
         self.adapter_registry.freeze()
+        object.__setattr__(
+            self,
+            "kali_runtime_factory",
+            _RunScopedKaliRuntimeFactory(self.kali_runtime_factory),
+        )
         if self.catalog is None:
             wf_dir = _DEFAULT_WORKFLOW_DIR
             object.__setattr__(
