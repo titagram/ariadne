@@ -338,7 +338,7 @@ class OnDemandKaliRuntime:
         )
 
     async def run(self, spec: ProcessSpec) -> ProcessResult:
-        self._configure_metasploit_callback(spec)
+        await self._configure_metasploit_callback(spec)
         container_environment = self._container_environment(spec)
         self._bind_planned_ports(spec)
         await self._ensure_started(
@@ -419,7 +419,7 @@ class OnDemandKaliRuntime:
         environment["JAVA_TOOL_OPTIONS"] = java_options
         return environment
 
-    def _configure_metasploit_callback(self, spec: ProcessSpec) -> None:
+    async def _configure_metasploit_callback(self, spec: ProcessSpec) -> None:
         """Bind a reverse handler to a host-published port before Kali starts.
 
         A Kali container's bridge address is never a viable target callback.
@@ -459,14 +459,39 @@ class OnDemandKaliRuntime:
             listener_bind_address=bind_address,
             listener_port=listener_port,
         )
-        if self._started and callback != self._metasploit_callback:
+        if self._started and self._metasploit_callback is None:
+            await self._restart_for_callback()
+        elif self._started and callback != self._metasploit_callback:
             raise KaliRuntimeUnavailableError(
-                "Metasploit callback must be configured before the Kali stack starts."
+                "Metasploit callback binding cannot change after it is active."
             )
         if self._metasploit_callback is not None and callback != self._metasploit_callback:
             raise KaliRuntimeUnavailableError("Metasploit callback binding cannot change mid-run.")
         self._metasploit_callback = callback
         self._write_callback_override()
+
+    async def _restart_for_callback(self) -> None:
+        """Recreate an already-running isolated stack with its callback port.
+
+        The run workspace is a host mount and is deliberately kept intact.
+        Recreating only the Compose services is required because Docker cannot
+        add a published port to an existing netguard container.
+        """
+        stopped = await self._command_runtime.run(
+            ProcessSpec(
+                argv=(*self._compose_prefix(), "down", "--remove-orphans"),
+                cwd=self._compose_dir,
+                environment=self._compose_environment(),
+                timeout_seconds=30,
+                max_output_bytes=256 * 1024,
+            )
+        )
+        if stopped.exit_code != 0:
+            detail = (stopped.stderr or stopped.stdout).strip()
+            raise KaliRuntimeUnavailableError(
+                "Unable to recreate Kali for the Metasploit callback: " + detail[:500]
+            )
+        self._started = False
 
     def _write_callback_override(self) -> Path:
         """Write the fixed Compose port mapping under the isolated run workspace."""
@@ -842,6 +867,7 @@ class OnDemandKaliRuntime:
                     "ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS": callback.advertised_address,
                     "ARIADNE_MSF_CALLBACK_PUBLISHED_PORT": str(callback.published_port),
                     "ARIADNE_MSF_CALLBACK_LISTENER_PORT": str(callback.listener_port),
+                    "ARIADNE_MSF_CALLBACK_TARGET": self._snapshot.targets[0].host,
                 }
             )
         return environment

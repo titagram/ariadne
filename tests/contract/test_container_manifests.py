@@ -267,3 +267,19 @@ def test_netguard_entrypoint_allows_docker_dns() -> None:
     assert "53" in entrypoint or "dns" in entrypoint.lower(), (
         "Must allow Docker DNS on port 53"
     )
+
+
+def test_netguard_callback_ingress_is_limited_to_the_snapshot_target() -> None:
+    """A published Metasploit port must not create general container ingress."""
+    entrypoint = (_CONTAINERS / "netguard" / "entrypoint.sh").read_text()
+    assert 'ip saddr "$ARIADNE_MSF_CALLBACK_TARGET"' in entrypoint
+    assert 'tcp dport "$ARIADNE_MSF_CALLBACK_LISTENER_PORT" accept' in entrypoint
+    assert 'input tcp dport "$ARIADNE_MSF_CALLBACK_LISTENER_PORT" accept' not in entrypoint
+
+    compose = yaml.safe_load((_CONTAINERS / "compose.yaml").read_text())
+    environment = compose["services"]["netguard"]["environment"]
+    assert "ARIADNE_MSF_CALLBACK_TARGET=${ARIADNE_MSF_CALLBACK_TARGET:-}" in environment
+    assert (
+        "ARIADNE_MSF_CALLBACK_LISTENER_PORT=${ARIADNE_MSF_CALLBACK_LISTENER_PORT:-}"
+        in environment
+    )

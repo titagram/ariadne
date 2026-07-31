@@ -61,6 +61,16 @@ if [ -n "${ARIADNE_ALLOW_TARGETS:-}" ]; then
     done
 fi
 
+# ── Allow one explicitly published Metasploit callback ──
+# The reverse handler is opt-in and may receive traffic only from the exact
+# engagement target.  It does not widen egress or permit arbitrary ingress.
+if [ -n "${ARIADNE_MSF_CALLBACK_TARGET:-}" ] && \
+   [ -n "${ARIADNE_MSF_CALLBACK_LISTENER_PORT:-}" ]; then
+    $NFT add rule inet "$TABLE" input \
+        ip saddr "$ARIADNE_MSF_CALLBACK_TARGET" \
+        tcp dport "$ARIADNE_MSF_CALLBACK_LISTENER_PORT" accept
+fi
+
 # ── Log denied egress (no payloads) ──
 $NFT add rule inet "$TABLE" output log prefix \"ARIADNE-DENY-OUT: \" group 0 drop
 

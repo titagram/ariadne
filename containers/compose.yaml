@@ -21,6 +21,8 @@ services:
       - ./netguard/entrypoint.sh:/entrypoint.sh:ro
     environment:
       - ARIADNE_ALLOW_TARGETS=${ARIADNE_ALLOW_TARGETS:-}
+      - ARIADNE_MSF_CALLBACK_TARGET=${ARIADNE_MSF_CALLBACK_TARGET:-}
+      - ARIADNE_MSF_CALLBACK_LISTENER_PORT=${ARIADNE_MSF_CALLBACK_LISTENER_PORT:-}
     restart: "no"
 
   kali:

@@ -221,6 +221,71 @@ def test_kali_rejects_a_container_bridge_callback_before_msfconsole_runs(tmp_pat
     assert not any(call.argv[-1] == "msfconsole" for call in command_runtime.calls)
 
 
+def test_kali_recreates_started_stack_before_publishing_callback_port(tmp_path) -> None:
+    snapshot = EngagementSnapshot(
+        engagement_id=uuid4(),
+        revision=1,
+        previous_snapshot_hash=None,
+        snapshot_hash="0" * 64,
+        confirmed_at=datetime.now(UTC),
+        authorization_attested=True,
+        disclaimer_version="1.0",
+        profile=EnvironmentProfile.PRIVATE_LAB,
+        autonomy=AutonomyMode.CONTROLLED,
+        targets=(TargetSpec(host="192.0.2.10"),),
+        objectives=(Objective(kind="proof"),),
+    )
+    command_runtime = _PinnedImageCommandRuntime()
+    runtime = OnDemandKaliRuntime(
+        snapshot=snapshot,
+        run_root=tmp_path,
+        command_runtime=command_runtime,
+        docker_locator=lambda _: "/usr/local/bin/docker",
+        kali_image_ref=_PINNED_KALI_REF,
+        netguard_image_ref=_PINNED_NETGUARD_REF,
+    )
+
+    asyncio.run(
+        runtime.run(
+            ProcessSpec(
+                argv=("searchsploit", "--json", "craft", "5"),
+                timeout_seconds=30,
+                max_output_bytes=4096,
+            )
+        )
+    )
+    preserved = tmp_path / "workspace" / "preserved.txt"
+    preserved.write_text("keep", encoding="utf-8")
+
+    asyncio.run(
+        runtime.run(
+            ProcessSpec(
+                argv=("msfconsole", "-q", "-x", "use exploit/test; run; exit"),
+                environment={
+                    "ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS": "10.10.14.8",
+                    "ARIADNE_MSF_CALLBACK_PUBLISHED_PORT": "4444",
+                    "ARIADNE_MSF_CALLBACK_LISTENER_BIND_ADDRESS": "0.0.0.0",
+                    "ARIADNE_MSF_CALLBACK_LISTENER_PORT": "4444",
+                },
+                timeout_seconds=30,
+                max_output_bytes=4096,
+            )
+        )
+    )
+
+    commands = [" ".join(call.argv) for call in command_runtime.calls]
+    assert sum(" up --no-build --detach --wait " in f" {command} " for command in commands) == 2
+    assert any(" down --remove-orphans" in command for command in commands)
+    callback_start = [
+        call
+        for call in command_runtime.calls
+        if " up --no-build --detach --wait " in f" {' '.join(call.argv)} "
+    ][-1]
+    assert callback_start.environment["ARIADNE_MSF_CALLBACK_TARGET"] == "192.0.2.10"
+    assert callback_start.environment["ARIADNE_MSF_CALLBACK_LISTENER_PORT"] == "4444"
+    assert preserved.read_text(encoding="utf-8") == "keep"
+
+
 def test_kali_startup_is_bounded_by_the_tool_attempt_timeout(tmp_path) -> None:
     snapshot = EngagementSnapshot(
         engagement_id=uuid4(),
