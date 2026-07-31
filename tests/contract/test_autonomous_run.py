@@ -1125,7 +1125,7 @@ def test_sanitized_false_foothold_replay_stays_non_ssh_in_guarded_handler(
                 / "fixtures/scenarios/sanitized-events-194-216.json"
             ).read_text(encoding="utf-8")
         )
-        seed_events = (
+        seed_evidence = (
             (
                 "web_paths",
                 {"type": "web_paths", "url": "http://192.0.2.10/", "path": "/"},
@@ -1140,13 +1140,8 @@ def test_sanitized_false_foothold_replay_stays_non_ssh_in_guarded_handler(
                     "state": "open",
                 },
             ),
-            *(
-                (item["evidence_type"], item["observation_data"])
-                for item in sanitized
-                if item["event_type"] == "evidence_collected"
-            ),
         )
-        for evidence_type, observation_data in seed_events:
+        for evidence_type, observation_data in seed_evidence:
             services.store.append_event(
                 handle,
                 Event(
@@ -1161,6 +1156,28 @@ def test_sanitized_false_foothold_replay_stays_non_ssh_in_guarded_handler(
                     timestamp=datetime.now(UTC),
                 ),
             )
+        for item in sanitized:
+            if item["event_type"] == "evidence_collected":
+                payload = {
+                    "evidence_type": item["evidence_type"],
+                    "asset": "192.0.2.10",
+                    "source": "sanitized:events-194-216",
+                    "execution_classification": "success",
+                    "observation_data": item["observation_data"],
+                }
+            else:
+                payload = {
+                    "boundary": item["boundary"],
+                    "source": "sanitized:events-194-216",
+                }
+            services.store.append_event(
+                handle,
+                Event(
+                    event_type=item["event_type"],
+                    payload=payload,
+                    timestamp=datetime.now(UTC),
+                ),
+            )
         return (
             json.loads(await run({"max_steps": 1}, session_id="sanitized-proof-replay")),
             handle,
@@ -1168,6 +1185,7 @@ def test_sanitized_false_foothold_replay_stays_non_ssh_in_guarded_handler(
 
     result, handle = asyncio.run(replay())
     state, observations = _determine_engagement_state(services.store, handle)
+    events = services.store.read_events(handle)
 
     assert result["boundary"] == "safety_step_limit", result
     assert state.value == "enumeration"
@@ -1181,6 +1199,11 @@ def test_sanitized_false_foothold_replay_stays_non_ssh_in_guarded_handler(
     assert [argv[0] for argv in runtime.argv_calls] == ["curl"]
     assert runtime.specs
     assert not any(argv[0] == "ssh" for argv in runtime.argv_calls)
+    assert any(
+        event["event_type"] == "execution_boundary"
+        and event["payload"].get("boundary") == "missing_protected_ssh_credential"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio
