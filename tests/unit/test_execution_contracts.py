@@ -670,6 +670,41 @@ def test_zap_contract_accepts_only_the_exact_operation_yaml_shape(
         )
 
 
+def test_metasploit_contract_allows_target_bound_vhost(tmp_path: Path) -> None:
+    capability = "exploit.metasploit"
+    plan = _plan(
+        adapter="metasploit",
+        operation="check",
+        capability=capability,
+        inputs={},
+        limits=PlaybookLimits(
+            max_rate=1,
+            max_concurrency=1,
+            max_attempts=1,
+            max_duration_seconds=30,
+            max_output_bytes=4096,
+        ),
+    )
+    guard = _guard(
+        tmp_path,
+        RecordingRuntime(),
+        plan=plan,
+        policy=_policy(capability=capability, tools=frozenset({"msfconsole"})),
+    )
+    spec = ProcessSpec(
+        argv=(
+            "msfconsole",
+            "-q",
+            "-x",
+            "use exploit/linux/http/example; set RHOSTS 10.10.10.10; "
+            "set RPORT 80; set VHOST orion.test; check; exit",
+        ),
+        timeout_seconds=30,
+        max_output_bytes=4096,
+    )
+    guard.authorize_initial(spec)
+
+
 def test_katana_contract_rejects_a_seed_outside_the_exact_target(
     tmp_path: Path,
 ) -> None:

@@ -1175,6 +1175,13 @@ class GuardedRuntime:
                 if command.startswith("set RPORT "):
                     value = command.removeprefix("set RPORT ")
                     valid = valid and value.isdigit() and 1 <= int(value) <= 65535
+                elif command.startswith("set VHOST "):
+                    value = command.removeprefix("set VHOST ")
+                    valid = (
+                        valid
+                        and bool(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", value))
+                        and not re.search(r"[;\r\n]", value)
+                    )
                 elif operation == "run_module" and command.startswith(
                     ("set PAYLOAD ", "set LHOST ")
                 ):
