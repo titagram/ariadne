@@ -143,6 +143,24 @@ class _BridgeCallbackRuntime(_PinnedImageCommandRuntime):
         return await super().run(spec)
 
 
+class _StartupBlockingRuntime(_PinnedImageCommandRuntime):
+    """Yield during the first Compose startup to exercise lifecycle races."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.startup_entered = asyncio.Event()
+        self.allow_startup = asyncio.Event()
+        self._blocked = False
+
+    async def run(self, spec: ProcessSpec) -> ProcessResult:
+        command = " ".join(spec.argv)
+        if not self._blocked and " up --no-build --detach --wait " in f" {command} ":
+            self._blocked = True
+            self.startup_entered.set()
+            await self.allow_startup.wait()
+        return await super().run(spec)
+
+
 def test_kali_reuses_locally_available_pinned_image_without_rebuild(tmp_path) -> None:
     snapshot = EngagementSnapshot(
         engagement_id=uuid4(),
@@ -284,6 +302,62 @@ def test_kali_recreates_started_stack_before_publishing_callback_port(tmp_path) 
     assert callback_start.environment["ARIADNE_MSF_CALLBACK_TARGET"] == "192.0.2.10"
     assert callback_start.environment["ARIADNE_MSF_CALLBACK_LISTENER_PORT"] == "4444"
     assert preserved.read_text(encoding="utf-8") == "keep"
+
+
+def test_kali_serializes_callback_reconfiguration_after_concurrent_startup(tmp_path) -> None:
+    snapshot = EngagementSnapshot(
+        engagement_id=uuid4(),
+        revision=1,
+        previous_snapshot_hash=None,
+        snapshot_hash="0" * 64,
+        confirmed_at=datetime.now(UTC),
+        authorization_attested=True,
+        disclaimer_version="1.0",
+        profile=EnvironmentProfile.PRIVATE_LAB,
+        autonomy=AutonomyMode.CONTROLLED,
+        targets=(TargetSpec(host="192.0.2.10"),),
+        objectives=(Objective(kind="proof"),),
+    )
+    command_runtime = _StartupBlockingRuntime()
+    runtime = OnDemandKaliRuntime(
+        snapshot=snapshot,
+        run_root=tmp_path,
+        command_runtime=command_runtime,
+        docker_locator=lambda _: "/usr/local/bin/docker",
+        kali_image_ref=_PINNED_KALI_REF,
+        netguard_image_ref=_PINNED_NETGUARD_REF,
+    )
+    ordinary = ProcessSpec(
+        argv=("searchsploit", "--json", "craft", "5"),
+        timeout_seconds=30,
+        max_output_bytes=4096,
+    )
+    callback = ProcessSpec(
+        argv=("msfconsole", "-q", "-x", "use exploit/test; run; exit"),
+        environment={
+            "ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS": "10.10.14.8",
+            "ARIADNE_MSF_CALLBACK_PUBLISHED_PORT": "4444",
+            "ARIADNE_MSF_CALLBACK_LISTENER_BIND_ADDRESS": "0.0.0.0",
+            "ARIADNE_MSF_CALLBACK_LISTENER_PORT": "4444",
+        },
+        timeout_seconds=30,
+        max_output_bytes=4096,
+    )
+
+    async def execute() -> None:
+        first = asyncio.create_task(runtime.run(ordinary))
+        await command_runtime.startup_entered.wait()
+        second = asyncio.create_task(runtime.run(callback))
+        await asyncio.sleep(0)
+        assert not second.done()
+        command_runtime.allow_startup.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(execute())
+
+    commands = [" ".join(call.argv) for call in command_runtime.calls]
+    assert sum(" up --no-build --detach --wait " in f" {command} " for command in commands) == 2
+    assert any(" down --remove-orphans" in command for command in commands)
 
 
 def test_kali_startup_is_bounded_by_the_tool_attempt_timeout(tmp_path) -> None:

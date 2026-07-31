@@ -313,6 +313,9 @@ class OnDemandKaliRuntime:
         self._project_name = f"ariadne-{suffix}"
         self._started = False
         self._start_lock = asyncio.Lock()
+        # Serializes mutable Compose lifecycle state (ports, callback override,
+        # and startup). Command execution remains independently bounded.
+        self._lifecycle_lock = asyncio.Lock()
         self._metasploit_callback: _MetasploitCallback | None = None
         self._planned_target_ports: set[tuple[str, str]] = set()
         manifest = yaml.safe_load((self._compose_dir / "tool-manifest.yaml").read_text())
@@ -338,19 +341,20 @@ class OnDemandKaliRuntime:
         )
 
     async def run(self, spec: ProcessSpec) -> ProcessResult:
-        await self._configure_metasploit_callback(spec)
-        container_environment = self._container_environment(spec)
-        self._bind_planned_ports(spec)
-        await self._ensure_started(
-            timeout_seconds=min(
-                float(spec.timeout_seconds),
-                float(self._STARTUP_TIMEOUT_SECONDS),
+        async with self._lifecycle_lock:
+            await self._configure_metasploit_callback(spec)
+            container_environment = self._container_environment(spec)
+            self._bind_planned_ports(spec)
+            await self._ensure_started(
+                timeout_seconds=min(
+                    float(spec.timeout_seconds),
+                    float(self._STARTUP_TIMEOUT_SECONDS),
+                )
             )
-        )
-        if self._metasploit_callback is not None and spec.argv[0] == "msfconsole":
-            await self._reject_container_bridge_callback()
-        if spec.argv[0] == "nuclei":
-            await self._attest_nuclei(spec)
+            if self._metasploit_callback is not None and spec.argv[0] == "msfconsole":
+                await self._reject_container_bridge_callback()
+            if spec.argv[0] == "nuclei":
+                await self._attest_nuclei(spec)
         command = [
             *self._compose_prefix(),
             "exec",
