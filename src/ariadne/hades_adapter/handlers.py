@@ -1103,10 +1103,11 @@ def _attested_reverse_callback(
     The planner is not a network-discovery mechanism for the operator host.
     A reverse handler is therefore possible only when the already-persisted
     candidate explicitly says it needs one and carries the complete callback
-    binding plus local-attestation provenance produced earlier by bounded
-    preflight.  This prevents a container bridge address, an arbitrary
-    model-supplied address, or a partial ``LHOST`` from becoming a
-    target-visible callback.
+    binding.  The binding is freshly attested against the current local route
+    and interface ownership before it becomes target-visible; any older
+    provenance in the dossier is evidence, never authorization.  This prevents
+    a container bridge address, an arbitrary model-supplied address, or a
+    partial ``LHOST`` from becoming a target-visible callback.
     """
     if candidate.get("requires_reverse_callback") is not True:
         return None, None, None
@@ -3987,6 +3988,10 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                                 timestamp=now,
                             ),
                         )
+                        factory = context.get("kali_runtime_factory")
+                        release = getattr(factory, "release", None)
+                        if callable(release):
+                            release(run_handle.snapshot, run_handle.path)
 
         except ScopeAmendmentRequiredError as exc:
             # ``adapter.plan`` raised before a ProcessSpec exists, so no
