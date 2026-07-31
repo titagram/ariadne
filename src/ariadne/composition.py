@@ -51,6 +51,11 @@ class _RunScopedKaliRuntimeFactory:
             self._runtimes[key] = runtime
         return runtime
 
+    def release(self, snapshot: EngagementSnapshot, run_root: Path) -> Runtime | None:
+        """Evict a runtime only after its run reaches natural cleanup."""
+        key = (snapshot.snapshot_hash, run_root.resolve())
+        return self._runtimes.pop(key, None)
+
 
 def _default_kali_runtime(
     snapshot: EngagementSnapshot,

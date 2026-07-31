@@ -122,3 +122,24 @@ def test_cached_runtime_cannot_replace_an_active_callback(tmp_path: Path) -> Non
                 )
             )
         )
+
+
+def test_kali_runtime_factory_evicts_only_when_run_is_released(tmp_path: Path) -> None:
+    created: list[object] = []
+
+    def factory(snapshot: EngagementSnapshot, run_root: Path) -> object:
+        del snapshot, run_root
+        runtime = object()
+        created.append(runtime)
+        return runtime
+
+    services = ServiceContainer(profile_name="test", kali_runtime_factory=factory)
+    snapshot = _snapshot()
+    run_root = tmp_path / "run"
+
+    first = services.kali_runtime_factory(snapshot, run_root)
+    assert services.kali_runtime_factory.release(snapshot, run_root) is first  # type: ignore[attr-defined]
+    second = services.kali_runtime_factory(snapshot, run_root)
+
+    assert second is not first
+    assert created == [first, second]
