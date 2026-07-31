@@ -1,6 +1,8 @@
 """Proof promotion remains tied to independent, objective evidence."""
 
 from datetime import UTC, datetime
+import json
+from pathlib import Path
 from uuid import uuid4
 
 from ariadne.core.engagement import EngagementSnapshot, TargetSpec
@@ -11,6 +13,8 @@ from ariadne.hades_adapter.handlers import (
     _typed_progression_observations,
 )
 from ariadne.store.run_store import Event, RunStore
+
+_SANITIZED_REPLAY = Path(__file__).parents[1] / "fixtures" / "scenarios" / "sanitized-events-194-216.json"
 
 
 def _observation(source: str, data: dict[str, object]) -> Observation:
@@ -111,3 +115,16 @@ def test_stale_screenshot_foothold_evidence_cannot_advance_state(tmp_path) -> No
     state, _ = _determine_engagement_state(store, run)
 
     assert state is not EngagementState.POST_EXPLOITATION
+
+
+def test_sanitized_events_194_to_216_replay_never_creates_foothold_or_ssh(tmp_path) -> None:
+    """The failed wave remains a non-terminal evidence boundary on replay."""
+    store = RunStore(base_path=tmp_path)
+    run = store.create(EngagementSnapshot(engagement_id=uuid4(), revision=1, previous_snapshot_hash=None, snapshot_hash="b" * 64, confirmed_at=datetime.now(UTC), authorization_attested=True, disclaimer_version="test", profile=EnvironmentProfile.HTB, autonomy=AutonomyMode.CONTROLLED, targets=(TargetSpec(host="192.0.2.10"),), objectives=()))
+    for item in json.loads(_SANITIZED_REPLAY.read_text()):
+        if item["event_type"] != "evidence_collected":
+            continue
+        store.append_event(run, Event(event_type="evidence_collected", payload={"evidence_type": item["evidence_type"], "execution_classification": "success", "observation_data": item["observation_data"]}, timestamp=datetime.now(UTC)))
+    state, observations = _determine_engagement_state(store, run)
+    assert state not in {EngagementState.FOOTHOLD, EngagementState.POST_EXPLOITATION}
+    assert not any(observation.source == "foothold_established" and observation.data.get("method") == "ssh_password" for observation in observations)
