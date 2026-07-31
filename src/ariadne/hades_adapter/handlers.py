@@ -2177,10 +2177,16 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             or unfetched_web_endpoint is not None
         )
         and (
-            playbook.id != "foothold.ssh-credentials.v1"
+            not any(action.adapter in {"ssh", "postex"} for action in playbook.actions)
             or (
                 _observed_ssh_port(observations, first_target) is not None
                 and protected_credential is not None
+                and all(
+                    action.inputs.get("credential_ref")
+                    in {None, protected_credential["credential_ref"]}
+                    for action in playbook.actions
+                    if action.adapter in {"ssh", "postex"}
+                )
             )
         )
     )
@@ -4654,13 +4660,6 @@ async def handle_run_engagement(
                 ),
                 "details": executed,
             })
-    if run_handle is not None:
-        _record_dead_end_once(
-            cmd.store,
-            run_handle,
-            boundary="safety_step_limit",
-            state=state,
-        )
     return finish({
         "status": "blocked",
         "boundary": "safety_step_limit",

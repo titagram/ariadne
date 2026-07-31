@@ -22,3 +22,8 @@ Validation:
 
 The guarded-runtime replay now passes from its seeded web evidence through the real
 credential-referenced SSH session path.
+
+Follow-up: authenticated SSH and post-exploitation playbooks are filtered before
+selection unless the current target has both an observed SSH service and the exact
+persisted protected credential reference. `safety_step_limit` is no longer recorded
+as a terminal dead end, so later invocations can resume.
