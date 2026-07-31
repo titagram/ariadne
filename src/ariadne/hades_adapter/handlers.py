@@ -80,7 +80,10 @@ from ariadne.runtime.docker import (
     LocalFirstRuntime,
     OnDemandKaliRuntime,
 )
-from ariadne.runtime.preflight import CallbackAttestationError, validate_callback_attestation
+from ariadne.runtime.preflight import (
+    CallbackAttestationError,
+    attest_callback_address,
+)
 from ariadne.runtime.process import ProcessResult, ProcessRunner
 from ariadne.runtime.selection import (
     RuntimeChoice,
@@ -1093,6 +1096,7 @@ def _attested_reverse_callback(
     candidate: dict[str, Any],
     *,
     target: str,
+    callback_attestation_runner: Any = None,
 ) -> tuple[dict[str, object] | None, dict[str, object] | None, str | None]:
     """Return an explicitly attested reverse callback for one candidate.
 
@@ -1108,7 +1112,6 @@ def _attested_reverse_callback(
         return None, None, None
 
     callback = candidate.get("callback")
-    attestation = candidate.get("callback_attestation")
     if not isinstance(callback, dict) or set(callback) != {
         "advertised_address",
         "published_port",
@@ -1116,8 +1119,6 @@ def _attested_reverse_callback(
         "listener_port",
     }:
         return None, None, "missing a complete callback binding"
-    if not isinstance(attestation, dict):
-        return None, None, "missing callback attestation"
     advertised = callback.get("advertised_address")
     listener_bind = callback.get("listener_bind_address")
     ports = (callback.get("published_port"), callback.get("listener_port"))
@@ -1142,15 +1143,18 @@ def _attested_reverse_callback(
         return None, None, "contains an unsafe callback binding"
 
     try:
-        validated_attestation = validate_callback_attestation(
-            attestation,
+        # Re-attest against the current local route and interface ownership.
+        # Persisted provenance is evidence only; it must never be trusted as
+        # an authorization for a newly proposed callback.
+        fresh_attestation = attest_callback_address(
             advertised_address=str(address),
             target=target,
+            command_runner=callback_attestation_runner,
         )
     except CallbackAttestationError as exc:
         return None, None, str(exc)
 
-    return deepcopy(callback), deepcopy(dict(validated_attestation)), None
+    return deepcopy(callback), deepcopy(fresh_attestation.as_plan_data()), None
 
 
 def _latest_service_fingerprint(
@@ -2899,6 +2903,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             callback, callback_attestation, callback_error = _attested_reverse_callback(
                 selected_candidate,
                 target=plan.target.host,
+                callback_attestation_runner=context.get("callback_attestation_runner"),
             )
             if callback_error is not None:
                 return {

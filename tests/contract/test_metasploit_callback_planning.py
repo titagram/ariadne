@@ -11,6 +11,7 @@ import pytest
 
 from ariadne.core.planner import Planner
 from ariadne.core.workflow import WorkflowCatalog
+from ariadne.hades_adapter import handlers as handler_module
 from ariadne.hades_adapter.commands import AriadneCommand
 from ariadne.hades_adapter.consent import ConsentDecision
 from ariadne.hades_adapter.handlers import (
@@ -18,6 +19,7 @@ from ariadne.hades_adapter.handlers import (
     handle_propose_plan,
 )
 from ariadne.hades_adapter.session import ChallengeLedger
+from ariadne.runtime.preflight import CallbackAddressAttestation
 from ariadne.store.run_store import ArtifactInput, Event, RunStore
 
 
@@ -167,8 +169,9 @@ def _persist_checked_candidate(
 @pytest.mark.asyncio
 async def test_verified_reverse_callback_is_bound_into_the_production_msf_plan(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Removing callback injection would make the run fall back to a disabled handler."""
+    """The planner freshly attests callback ownership instead of trusting the dossier."""
     command, session_id, snapshot_hash = await _prepared_command(tmp_path)
     callback = {
         "advertised_address": "198.51.100.7",
@@ -189,6 +192,22 @@ async def test_verified_reverse_callback_is_bound_into_the_production_msf_plan(
             "ownership_sha256": "c" * 64,
         },
     )
+    fresh = CallbackAddressAttestation(
+        address="198.51.100.7",
+        target="192.0.2.19",
+        source="linux:ip-route-get+ip-addr",
+        interface="tun0",
+        route_sha256="d" * 64,
+        ownership_sha256="e" * 64,
+    )
+    calls: list[tuple[str, str]] = []
+
+    def _attest(**kwargs: object) -> CallbackAddressAttestation:
+        calls.append((str(kwargs["advertised_address"]), str(kwargs["target"])))
+        assert kwargs["command_runner"] is None
+        return fresh
+
+    monkeypatch.setattr(handler_module, "attest_callback_address", _attest)
     catalog = WorkflowCatalog.load(Path(__file__).parents[2] / "workflows")
 
     proposed = await handle_propose_plan(
@@ -209,12 +228,13 @@ async def test_verified_reverse_callback_is_bound_into_the_production_msf_plan(
     assert action.inputs["callback_attestation"] == {
         "address": "198.51.100.7",
         "target": "192.0.2.19",
-        "source": "macos:route-get+ifconfig",
-        "interface": "utun7",
-        "route_sha256": "b" * 64,
-        "ownership_sha256": "c" * 64,
+        "source": "linux:ip-route-get+ip-addr",
+        "interface": "tun0",
+        "route_sha256": "d" * 64,
+        "ownership_sha256": "e" * 64,
     }
     assert action.inputs["check_evidence_id"] == "check-cve-2099-0001"
+    assert calls == [("198.51.100.7", "192.0.2.19")]
 
 
 @pytest.mark.asyncio
