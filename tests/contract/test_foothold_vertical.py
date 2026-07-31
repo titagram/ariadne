@@ -5,6 +5,7 @@ import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -15,6 +16,7 @@ from ariadne.adapters.pcap import PcapAdapter
 from ariadne.adapters.postex import PostExAdapter
 from ariadne.adapters.ssh import SshAdapter
 from ariadne.core.engagement import TargetSpec
+from ariadne.core.observations import Observation
 from ariadne.core.planner import Plan
 from ariadne.core.planner import PlannedAction as CorePlannedAction
 from ariadne.core.policy import CapabilityRule, EffectivePolicy
@@ -25,6 +27,7 @@ from ariadne.execution.contracts import (
     GuardedRuntime,
     ProcessAuthorizationError,
 )
+from ariadne.hades_adapter.handlers import _validated_downloaded_artifact
 from ariadne.runtime.process import ProcessResult
 
 
@@ -165,6 +168,33 @@ def test_object_reference_probe_is_target_bound_and_download_is_persisted(
     assert downloaded[0].source == "web_artifact"
     assert downloaded[0].data["sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
     assert collected == (output.name,)
+
+
+def test_generic_web_artifact_cannot_trigger_pcap_inspection(
+    tmp_path: Path,
+) -> None:
+    """Packet inspection requires packet-capture evidence, not any download."""
+    artifact = tmp_path / "artifacts" / "asset.bin"
+    artifact.parent.mkdir()
+    artifact.write_bytes(b"ordinary web asset")
+    target = TargetSpec(host="192.0.2.10")
+    observation = Observation(
+        observation_id=UUID("00000000-0000-0000-0000-000000000010"),
+        target=target,
+        source="web_artifact",
+        data={
+            "type": "downloaded_artifact",
+            "artifact": artifact.name,
+            "content_type": "application/octet-stream",
+            "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        },
+    )
+
+    assert _validated_downloaded_artifact(
+        (observation,),
+        target,
+        SimpleNamespace(path=tmp_path),
+    ) is None
 
 
 def test_object_reference_probe_rejects_another_target(tmp_path: Path) -> None:

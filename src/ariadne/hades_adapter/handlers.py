@@ -1514,10 +1514,19 @@ def _validated_downloaded_artifact(
         data = observation.data
         artifact = data.get("artifact")
         digest = data.get("sha256")
+        content_type = str(data.get("content_type", "")).casefold()
+        artifact_name = artifact.casefold() if isinstance(artifact, str) else ""
+        is_packet_capture = (
+            artifact_name.endswith((".pcap", ".pcapng"))
+            or "pcap" in content_type
+            or "pcapng" in content_type
+            or content_type in {"application/vnd.tcpdump", "application/x-tcpdump"}
+        )
         if (
             observation.target != target
             or observation.source != "web_artifact"
             or data.get("type") != "downloaded_artifact"
+            or not is_packet_capture
             or not isinstance(artifact, str)
             or Path(artifact).name != artifact
             or not isinstance(digest, str)
