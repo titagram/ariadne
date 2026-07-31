@@ -18,6 +18,7 @@ from ariadne.hades_adapter.handlers import (
     handle_render_report,
     handle_run_engagement,
     handle_status,
+    handle_strategy_hint,
 )
 from ariadne.hades_adapter.schemas import ARIADNE_TOOLS
 
@@ -166,6 +167,7 @@ _HANDLER_MAP: dict[str, Any] = {
     "ariadne_status": handle_status,
     "ariadne_amend_engagement": handle_amend_engagement,
     "ariadne_propose_plan": handle_propose_plan,
+    "ariadne_strategy_hint": handle_strategy_hint,
     "ariadne_execute_plan": handle_execute_plan,
     "ariadne_run": handle_run_engagement,
     "ariadne_render_report": handle_render_report,

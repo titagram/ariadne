@@ -70,6 +70,7 @@ def test_register_exposes_namespaced_skill_tools_command_and_hook() -> None:
         "ariadne_status",
         "ariadne_amend_engagement",
         "ariadne_propose_plan",
+        "ariadne_strategy_hint",
         "ariadne_execute_plan",
         "ariadne_run",
         "ariadne_render_report",

@@ -2166,7 +2166,8 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
     )
 
     # 5. Find eligible playbooks and build the first plan
-    eligible = catalog.eligible(planning_context)
+    catalog_eligible = catalog.eligible(planning_context)
+    eligible = catalog_eligible
     provider_fallback_needed = False
     last_routing_playbook: str | None = None
     for event in reversed(events):
@@ -2218,6 +2219,48 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         observations,
         first_target,
         run_handle,
+    )
+    hint_compatible = tuple(
+        playbook
+        for playbook in catalog_eligible
+        if (
+            playbook.id not in _PROVIDER_FALLBACK_PLAYBOOKS
+            or provider_fallback_needed
+            or (playbook.id == "web.http-fallback.v1" and pending_capture_url is not None)
+        )
+        and (
+            playbook.id != "research.service-vulnerability.v1"
+            or unresearched_fingerprint is not None
+        )
+        and (
+            playbook.id != "web.object-reference.v1"
+            or bool(object_reference_urls)
+        )
+        and (
+            playbook.id != "web.observed-endpoint.v1"
+            or unfetched_web_endpoint is not None
+        )
+        and (
+            playbook.id != "web.application-surface.v1"
+            or _playbook_has_unfetched_path(playbook, observations, first_target)
+        )
+        and (
+            playbook.id != "web.asset-analysis.v1"
+            or not _observed_fetched_web_asset(observations, first_target)
+        )
+        and (
+            not any(action.adapter in {"ssh", "postex"} for action in playbook.actions)
+            or (
+                _observed_ssh_port(observations, first_target) is not None
+                and protected_credential is not None
+                and all(
+                    action.inputs.get("credential_ref")
+                    in {None, protected_credential["credential_ref"]}
+                    for action in playbook.actions
+                    if action.adapter in {"ssh", "postex"}
+                )
+            )
+        )
     )
     eligible = tuple(
         playbook
@@ -2277,11 +2320,19 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         )
         if repeated_reference_probe:
             eligible = repeated_reference_probe
+            hint_compatible = tuple(
+                playbook
+                for playbook in hint_compatible
+                if playbook.id == "web.object-reference.v1"
+            )
     elif last_routing_playbook in catalog.playbooks:
         allowed_next = catalog.playbooks[last_routing_playbook].next_playbooks
         preferred = tuple(playbook for playbook in eligible if playbook.id in allowed_next)
         if preferred:
             eligible = preferred
+            hint_compatible = tuple(
+                playbook for playbook in hint_compatible if playbook.id in allowed_next
+            )
     excluded = tuple(
         (playbook, conflict)
         for playbook in eligible
@@ -2292,6 +2343,56 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         for playbook in eligible
         if _exclusion_conflict(playbook, snapshot.exclusions) is None
     )
+
+    # A supervisor hint may only reorder a playbook that the ordinary catalog
+    # already considers compatible with the persisted observations/policy. It
+    # can reopen one previously exhausted branch, but cannot manufacture
+    # evidence, credentials, scope, or a foothold.
+    current_dead_end = _dead_end_for_state(cmd.store, run_handle, state)
+    pending_hint = _pending_strategy_hint(
+        events,
+        engagement_id=str(engagement_id),
+        snapshot_hash=snapshot.snapshot_hash,
+        session_id=input_session_id,
+        dead_end_signature=(current_dead_end or {}).get("signature"),
+    )
+    if current_dead_end is None:
+        pending_hint = None
+    if pending_hint is not None:
+        hinted = next(
+            (
+                playbook
+                for playbook in hint_compatible
+                if playbook.id == pending_hint.get("playbook_id")
+            ),
+            None,
+        )
+        if hinted is not None and _exclusion_conflict(hinted, snapshot.exclusions) is None:
+            # SSH/postex still require their protected credential and observed
+            # service exactly as the normal eligibility filter requires.
+            eligible = (hinted,) + tuple(
+                playbook for playbook in eligible if playbook.id != hinted.id
+            )
+        else:
+            # A hint accepted against the catalog may become operationally
+            # inapplicable after routing/provider checks. Consume it
+            # durably so the same dead-end cannot be reopened forever.
+            cmd.store.append_event(
+                run_handle,
+                Event(
+                    event_type="strategy_hint_rejected",
+                    payload={
+                        "hint_id": pending_hint["hint_id"],
+                        "engagement_id": str(engagement_id),
+                        "snapshot_hash": snapshot.snapshot_hash,
+                        "session_id": input_session_id,
+                        "playbook_id": pending_hint.get("playbook_id", ""),
+                        "dead_end_signature": pending_hint["dead_end_signature"],
+                        "reason": "operational_prerequisites_not_satisfied",
+                    },
+                    timestamp=datetime.now(UTC),
+                ),
+            )
     if not eligible:
         if excluded:
             return {
@@ -2975,8 +3076,6 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         )
 
     # 6. Persist the proposal before exposing it through the in-memory ledger.
-    from ariadne.store.run_store import Event
-
     capabilities = sorted(playbook.capabilities)
     approval_correlation_id = uuid4().hex
     proposal_payload = {
@@ -3012,6 +3111,23 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             "message": f"Could not persist plan proposal: {exc}",
             "plan_id": plan.plan_id,
         }
+
+    if pending_hint is not None and pending_hint.get("playbook_id") == playbook.id:
+        cmd.store.append_event(
+            run_handle,
+            Event(
+                event_type="strategy_hint_applied",
+                payload={
+                    "hint_id": pending_hint["hint_id"],
+                    "engagement_id": str(engagement_id),
+                    "snapshot_hash": snapshot.snapshot_hash,
+                    "session_id": input_session_id,
+                    "playbook_id": playbook.id,
+                    "dead_end_signature": pending_hint["dead_end_signature"],
+                },
+                timestamp=datetime.now(UTC),
+            ),
+        )
 
     # 7. Record the plan in the command's plan ledger, initially unapproved.
     cmd.add_plan(
@@ -3088,6 +3204,170 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         "manual_capabilities": list(plan.manual_capabilities),
         "approval_reasons": list(plan.approval_reasons),
         "message": message,
+    }
+
+
+async def handle_strategy_hint(args: dict[str, Any], **context: Any) -> dict[str, Any]:
+    """Accept one evidence-scoped supervisor hint after a real dead-end.
+
+    The hint is an audit instruction, never an observation.  It is bound to
+    the trusted Hades session, immutable snapshot, and the exact dead-end
+    signature.  Only a playbook already accepted by ``WorkflowCatalog`` can
+    be prioritized/reopened, and an identical hint cannot be consumed twice.
+    """
+    cmd = _get_command(context)
+    catalog = _get_catalog(context)
+    session_id = context.get("session_id", "")
+    binding = _get_binding(cmd, session_id)
+    if binding is None or binding.get("engagement_id") is None:
+        return {"status": "error", "message": "No active engagement."}
+    snapshot_hash = args.get("snapshot_hash", "")
+    if snapshot_hash != binding.get("snapshot_hash"):
+        return {
+            "status": "error",
+            "message": "Snapshot hash mismatch for strategy hint.",
+        }
+    hint = args.get("hint", "")
+    playbook_id = args.get("playbook_id", "")
+    if not isinstance(hint, str) or not hint.strip():
+        return {"status": "error", "message": "A non-empty strategy hint is required."}
+    if len(hint) > 2000:
+        return {"status": "error", "message": "Strategy hint exceeds the bounded length."}
+    if not isinstance(playbook_id, str):
+        return {"status": "error", "message": "playbook_id must be a string."}
+
+    run_handle = _get_run_handle(cmd.store, binding["engagement_id"])
+    if run_handle is None:
+        return {"status": "error", "message": "Engagement run is unavailable."}
+    events = cmd.store.read_events(run_handle)
+    state, observations = _determine_engagement_state(cmd.store, run_handle)
+    dead_end = _dead_end_for_state(cmd.store, run_handle, state)
+    if dead_end is None or dead_end.get("boundary") != "no_eligible_plan":
+        return {
+            "status": "blocked",
+            "boundary": "strategy_hint_not_at_dead_end",
+            "message": "Strategy hints require an unchanged no_eligible_plan boundary.",
+        }
+    # Hint audit records are excluded from the dead-end evidence digest below,
+    # so the original signature remains stable for replay protection.  A
+    # repeated hint is rejected independent of which compatible playbook it
+    # named; a new signature after material progress may use the same text.
+    for prior in events:
+        prior_payload = prior.get("payload", {})
+        if (
+            prior.get("event_type") == "strategy_hint_received"
+            and prior_payload.get("engagement_id") == str(binding["engagement_id"])
+            and prior_payload.get("snapshot_hash") == snapshot_hash
+            and prior_payload.get("session_id") == session_id
+            and prior_payload.get("dead_end_signature") == dead_end["signature"]
+            and prior_payload.get("hint") == hint.strip()
+        ):
+            return {
+                "status": "blocked",
+                "boundary": "strategy_hint_replay",
+                "message": "The same strategy hint was already consumed for this dead-end.",
+                "hint_id": prior_payload.get("hint_id", ""),
+            }
+    hint_id = canonical_digest(
+        {
+            "engagement_id": str(binding["engagement_id"]),
+            "snapshot_hash": snapshot_hash,
+            "session_id": session_id,
+            "dead_end_signature": dead_end["signature"],
+            "hint": hint.strip(),
+            "playbook_id": playbook_id,
+        }
+    )
+    try:
+        effective_policy = _load_engagement_policy(run_handle.snapshot)
+    except PolicyConfigurationError as exc:
+        return {"status": "blocked", "boundary": "policy_provenance", "message": str(exc)}
+    first_target = (
+        run_handle.snapshot.targets[0]
+        if run_handle.snapshot.targets
+        else TargetSpec(host="unknown")
+    )
+    assets = tuple(
+        Asset(asset_id=uuid4(), target=target, status=AssetStatus.IN_SCOPE)
+        for target in run_handle.snapshot.targets
+    )
+    candidate_context = PlanningContext(
+        snapshot=run_handle.snapshot,
+        state=state,
+        observations=observations,
+        assets=assets,
+        effective_policy=effective_policy,
+        hypothesis=Hypothesis(
+            hypothesis_id=uuid4(),
+            target=first_target,
+            statement="Supervisor strategy hint",
+            confidence=0.5,
+        ),
+        now=datetime.now(UTC),
+    )
+    compatible = catalog.eligible(candidate_context)
+    hinted_playbook = next(
+        (playbook for playbook in compatible if playbook.id == playbook_id),
+        None,
+    )
+    protected_credential = _protected_credential(
+        observations,
+        first_target,
+        run_handle,
+    )
+    ssh_ready = (
+        hinted_playbook is not None
+        and (
+            not any(
+                action.adapter in {"ssh", "postex"}
+                for action in hinted_playbook.actions
+            )
+            or (
+                _observed_ssh_port(observations, first_target) is not None
+                and protected_credential is not None
+                and all(
+                    action.inputs.get("credential_ref")
+                    in {None, protected_credential["credential_ref"]}
+                    for action in hinted_playbook.actions
+                    if action.adapter in {"ssh", "postex"}
+                )
+            )
+        )
+    )
+    if not playbook_id or hinted_playbook is None or not ssh_ready:
+        return {
+            "status": "blocked",
+            "boundary": "strategy_hint_incompatible",
+            "message": (
+                "The hint may only target a playbook whose normal stage, "
+                "evidence, policy, and capability prerequisites are satisfied."
+            ),
+        }
+
+    payload = {
+        "hint_id": hint_id,
+        "engagement_id": str(binding["engagement_id"]),
+        "snapshot_hash": snapshot_hash,
+        "session_id": session_id,
+        "dead_end_signature": dead_end["signature"],
+        "hint": hint.strip(),
+        "playbook_id": playbook_id,
+        "guidance_only": True,
+    }
+    cmd.store.append_event(
+        run_handle,
+        Event(
+            event_type="strategy_hint_received",
+            payload=payload,
+            timestamp=datetime.now(UTC),
+        ),
+    )
+    return {
+        "status": "accepted",
+        "hint_id": hint_id,
+        "playbook_id": playbook_id,
+        "dead_end_signature": dead_end["signature"],
+        "message": "Hint recorded as bounded strategy guidance; no evidence was created.",
     }
 
 
@@ -4510,8 +4790,20 @@ async def handle_run_engagement(
         )
         execution_lease.resume()
         state, _ = _determine_engagement_state(cmd.store, run_handle)
+        run_events = cmd.store.read_events(run_handle)
         previous_dead_end = _dead_end_for_state(cmd.store, run_handle, state)
-        if previous_dead_end is not None:
+        pending_hint = _pending_strategy_hint(
+            run_events,
+            engagement_id=str(binding["engagement_id"]),
+            snapshot_hash=run_handle.snapshot.snapshot_hash,
+            session_id=session_id,
+            dead_end_signature=(
+                previous_dead_end.get("signature")
+                if previous_dead_end is not None
+                else None
+            ),
+        )
+        if previous_dead_end is not None and pending_hint is None:
             return finish({
                 "status": "blocked",
                 "boundary": previous_dead_end["boundary"],
@@ -4647,6 +4939,35 @@ async def handle_run_engagement(
             "plan_auto_approved",
             "plan_proposed",
         }:
+            if (
+                pending_hint is not None
+                and proposed.get("boundary") not in {
+                    "execution_lease_expired",
+                    "kali_runtime",
+                }
+                and not any(
+                    event.get("event_type") == "strategy_hint_rejected"
+                    and event.get("payload", {}).get("hint_id")
+                    == pending_hint["hint_id"]
+                    for event in cmd.store.read_events(run_handle)
+                )
+            ):
+                cmd.store.append_event(
+                    run_handle,
+                    Event(
+                        event_type="strategy_hint_rejected",
+                        payload={
+                            "hint_id": pending_hint["hint_id"],
+                            "engagement_id": str(binding["engagement_id"]),
+                            "snapshot_hash": run_handle.snapshot.snapshot_hash,
+                            "session_id": session_id,
+                            "playbook_id": pending_hint.get("playbook_id", ""),
+                            "dead_end_signature": pending_hint["dead_end_signature"],
+                            "reason": "planner_rejected_hint_branch",
+                        },
+                        timestamp=datetime.now(UTC),
+                    ),
+                )
             if last_provider_boundary is not None:
                 _record_dead_end_once(
                     cmd.store,
@@ -4818,6 +5139,43 @@ def _record_dead_end_once(
     )
 
 
+def _pending_strategy_hint(
+    events: list[dict[str, Any]],
+    *,
+    engagement_id: str,
+    snapshot_hash: str,
+    session_id: str,
+    dead_end_signature: str | None = None,
+) -> dict[str, Any] | None:
+    """Return one unconsumed hint bound to the current run/session snapshot."""
+    applied = {
+        event.get("payload", {}).get("hint_id")
+        for event in events
+        if event.get("event_type") in {
+            "strategy_hint_applied",
+            "strategy_hint_rejected",
+        }
+    }
+    for event in reversed(events):
+        if event.get("event_type") != "strategy_hint_received":
+            continue
+        payload = event.get("payload", {})
+        if (
+            payload.get("engagement_id") == engagement_id
+            and payload.get("snapshot_hash") == snapshot_hash
+            and payload.get("session_id") == session_id
+            and (
+                dead_end_signature is None
+                or payload.get("dead_end_signature") == dead_end_signature
+            )
+            and payload.get("hint_id") not in applied
+            and isinstance(payload.get("dead_end_signature"), str)
+            and isinstance(payload.get("playbook_id"), str)
+        ):
+            return payload
+    return None
+
+
 def _dead_end_for_state(
     store: RunStore,
     run_handle: RunHandle,
@@ -4857,7 +5215,13 @@ def _dead_end_evidence_digest(events: list[dict[str, Any]]) -> str:
             "payload": event.get("payload", {}),
         }
         for event in events
-        if event.get("event_type") not in {"dead_end", "execution_time_paused"}
+        if event.get("event_type") not in {
+            "dead_end",
+            "execution_time_paused",
+            "strategy_hint_received",
+            "strategy_hint_applied",
+            "strategy_hint_rejected",
+        }
     )
     return canonical_digest(relevant)
 

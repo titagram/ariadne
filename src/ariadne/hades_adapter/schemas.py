@@ -221,6 +221,43 @@ PROPOSE_PLAN_SCHEMA = _build_schema(
     "receive trusted Hades consent.",
 )
 
+# ── ariadne_strategy_hint ──────────────────────────────────────────────
+
+
+class StrategyHintInput(BaseModel):
+    """Supervisor guidance scoped to the active dead-end snapshot."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    snapshot_hash: str = Field(
+        ...,
+        description="The immutable snapshot hash for the active engagement.",
+    )
+    hint: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description=(
+            "Sanitized strategic guidance. This is not evidence and cannot "
+            "authorize scope, credentials, vulnerabilities, or foothold."
+        ),
+    )
+    playbook_id: str = Field(
+        default="",
+        max_length=200,
+        description=(
+            "Optional catalog playbook to prioritize. It must already be "
+            "eligible from persisted evidence."
+        ),
+    )
+
+
+STRATEGY_HINT_SCHEMA = _build_schema(
+    StrategyHintInput,
+    "Submit one supervisor strategy hint after an unchanged no-eligible-plan "
+    "boundary. Hints are audit guidance only and never become evidence.",
+)
+
 # ── ariadne_execute_plan ────────────────────────────────────────────────
 
 
@@ -349,6 +386,13 @@ ARIADNE_TOOLS: dict[str, ToolRegistration] = {
         handler=None,
         description="Propose a bounded action plan for the current engagement",
         emoji="📝",
+    ),
+    "ariadne_strategy_hint": ToolRegistration(
+        name="ariadne_strategy_hint",
+        schema=STRATEGY_HINT_SCHEMA,
+        handler=None,
+        description="Apply one bounded, evidence-scoped supervisor strategy hint",
+        emoji="💡",
     ),
     "ariadne_execute_plan": ToolRegistration(
         name="ariadne_execute_plan",
