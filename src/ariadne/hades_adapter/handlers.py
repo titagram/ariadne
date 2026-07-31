@@ -2911,8 +2911,8 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             callback, callback_attestation, callback_error = _attested_reverse_callback(
                 selected_candidate,
                 target=plan.target.host,
-            callback_attestation_runner=context.get("callback_attestation_runner"),
-            callback_binding=context.get("callback_binding"),
+                callback_attestation_runner=context.get("callback_attestation_runner"),
+                callback_binding=context.get("callback_binding"),
             )
             if callback_error is not None:
                 return {
