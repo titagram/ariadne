@@ -80,6 +80,7 @@ from ariadne.runtime.docker import (
     LocalFirstRuntime,
     OnDemandKaliRuntime,
 )
+from ariadne.runtime.preflight import CallbackAttestationError, validate_callback_attestation
 from ariadne.runtime.process import ProcessResult, ProcessRunner
 from ariadne.runtime.selection import (
     RuntimeChoice,
@@ -1086,6 +1087,70 @@ def _metasploit_check_evidence(
         if hmac.compare_digest(actual, expected_digest):
             return evidence_id
     return None
+
+
+def _attested_reverse_callback(
+    candidate: dict[str, Any],
+    *,
+    target: str,
+) -> tuple[dict[str, object] | None, dict[str, object] | None, str | None]:
+    """Return an explicitly attested reverse callback for one candidate.
+
+    The planner is not a network-discovery mechanism for the operator host.
+    A reverse handler is therefore possible only when the already-persisted
+    candidate explicitly says it needs one and carries the complete callback
+    binding plus local-attestation provenance produced earlier by bounded
+    preflight.  This prevents a container bridge address, an arbitrary
+    model-supplied address, or a partial ``LHOST`` from becoming a
+    target-visible callback.
+    """
+    if candidate.get("requires_reverse_callback") is not True:
+        return None, None, None
+
+    callback = candidate.get("callback")
+    attestation = candidate.get("callback_attestation")
+    if not isinstance(callback, dict) or set(callback) != {
+        "advertised_address",
+        "published_port",
+        "listener_bind_address",
+        "listener_port",
+    }:
+        return None, None, "missing a complete callback binding"
+    if not isinstance(attestation, dict):
+        return None, None, "missing callback attestation"
+    advertised = callback.get("advertised_address")
+    listener_bind = callback.get("listener_bind_address")
+    ports = (callback.get("published_port"), callback.get("listener_port"))
+    if not isinstance(advertised, str) or not isinstance(listener_bind, str):
+        return None, None, "contains non-string callback addresses"
+    try:
+        address = ipaddress.ip_address(advertised)
+    except ValueError:
+        return None, None, "contains an invalid advertised callback address"
+    if (
+        not isinstance(address, ipaddress.IPv4Address)
+        or address.is_loopback
+        or address.is_unspecified
+        or address.is_multicast
+        or address.is_link_local
+        or listener_bind != "0.0.0.0"
+        or any(
+            isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535
+            for port in ports
+        )
+    ):
+        return None, None, "contains an unsafe callback binding"
+
+    try:
+        validated_attestation = validate_callback_attestation(
+            attestation,
+            advertised_address=str(address),
+            target=target,
+        )
+    except CallbackAttestationError as exc:
+        return None, None, str(exc)
+
+    return deepcopy(callback), deepcopy(dict(validated_attestation)), None
 
 
 def _latest_service_fingerprint(
@@ -2814,13 +2879,11 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             target=plan.target.host,
             module=selected_module,
         )
-        if (
-            any(
-                action.adapter == "metasploit" and action.operation == "run_module"
-                for action in plan.actions
-            )
-            and check_evidence_id is None
-        ):
+        runs_module = any(
+            action.adapter == "metasploit" and action.operation == "run_module"
+            for action in plan.actions
+        )
+        if runs_module and check_evidence_id is None:
             return {
                 "status": "blocked",
                 "boundary": "metasploit_check",
@@ -2830,6 +2893,24 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 ),
                 "plan_id": "",
             }
+        callback: dict[str, object] | None = None
+        callback_attestation: dict[str, object] | None = None
+        if runs_module:
+            callback, callback_attestation, callback_error = _attested_reverse_callback(
+                selected_candidate,
+                target=plan.target.host,
+            )
+            if callback_error is not None:
+                return {
+                    "status": "blocked",
+                    "boundary": "metasploit_callback",
+                    "message": (
+                        "The checked Metasploit module requires a reverse callback but "
+                        f"{callback_error}. Ariadne will not infer host or Docker bridge "
+                        "network state."
+                    ),
+                    "plan_id": "",
+                }
         plan = plan.model_copy(
             update={
                 "actions": tuple(
@@ -2852,6 +2933,16 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                                     }
                                     if action.operation == "run_module"
                                     and check_evidence_id is not None
+                                    else {}
+                                ),
+                                **(
+                                    {
+                                        "callback": callback,
+                                        "callback_attestation": callback_attestation,
+                                    }
+                                    if action.operation == "run_module"
+                                    and callback is not None
+                                    and callback_attestation is not None
                                     else {}
                                 ),
                             },
