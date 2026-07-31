@@ -1004,7 +1004,7 @@ class GuardedRuntime:
                 for path in template_paths
             )
             or argv[target_index + 1 : json_index] != (target, *header_args)
-            or argv[json_index] != "-json"
+            or argv[json_index] not in {"-json", "-jsonl"}
             or argv[json_index + 1] != "-rate-limit"
             or argv[json_index + 3] != "-timeout"
             or json_index + 5 != len(argv)

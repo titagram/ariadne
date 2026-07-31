@@ -225,8 +225,9 @@ class NucleiAdapter:
             else:
                 raise AdapterError("http_host must be an approved FQDN alias")
 
-        # JSONL output
-        argv.append("-json")
+        # JSONL output.  Current Nuclei releases use ``-jsonl``; the older
+        # ``-json`` spelling exits with code 2 and produces no observations.
+        argv.append("-jsonl")
 
         rate_limit = _positive_int(
             inputs.get(

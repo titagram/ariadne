@@ -85,6 +85,8 @@ class TestNucleiPlan:
         assert spec.argv[0] == "nuclei"
         argv_str = " ".join(spec.argv)
         assert "10.10.10.10" in argv_str
+        assert "-jsonl" in spec.argv
+        assert "-json" not in spec.argv
         assert spec.argv[spec.argv.index("-H") : spec.argv.index("-H") + 2] == (
             "-H",
             "Host: orion.test",
