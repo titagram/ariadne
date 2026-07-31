@@ -7,10 +7,234 @@ begins.
 
 from __future__ import annotations
 
+import hashlib
+import ipaddress
+import re
+import subprocess
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Final
 
-from ariadne.runtime.platform import HostOS, HostPlatform
+from ariadne.runtime.platform import HostOS, HostPlatform, detect_host
+
+
+class CallbackAttestationError(ValueError):
+    """A reverse callback could not be proven local and target-routable."""
+
+
+@dataclass(frozen=True)
+class CallbackAddressAttestation:
+    """Local, serialisable provenance for a reverse callback address.
+
+    The values are deliberately hashes of bounded local command output rather
+    than raw interface data.  They can be persisted in the durable plan and
+    evidence stream without exposing unrelated host routing details.
+    """
+
+    address: str
+    target: str
+    source: str
+    interface: str
+    route_sha256: str
+    ownership_sha256: str
+
+    def as_plan_data(self) -> dict[str, str]:
+        """Return the immutable provenance shape accepted by Metasploit plans."""
+        return {
+            "address": self.address,
+            "target": self.target,
+            "source": self.source,
+            "interface": self.interface,
+            "route_sha256": self.route_sha256,
+            "ownership_sha256": self.ownership_sha256,
+        }
+
+
+_CallbackCommandRunner = Callable[..., tuple[int, str, str]]
+_CALLBACK_TIMEOUT_SECONDS: Final[float] = 3.0
+_CALLBACK_PLAN_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "address",
+        "target",
+        "source",
+        "interface",
+        "route_sha256",
+        "ownership_sha256",
+    }
+)
+_CALLBACK_SOURCES: Final[frozenset[str]] = frozenset(
+    {"macos:route-get+ifconfig", "linux:ip-route-get+ip-addr"}
+)
+_UNSAFE_CALLBACK_INTERFACE_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:lo\d*|docker\S*|br[-\w]*|bridge\S*|veth\S*|virbr\S*|cni\S*|podman\S*)$",
+    re.IGNORECASE,
+)
+_INTERFACE_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_.:-]{1,32}$")
+_SHA256_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _run_callback_command(
+    argv: tuple[str, ...], *, timeout_seconds: float
+) -> tuple[int, str, str]:
+    """Run a short, local-only route or interface query without a shell."""
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        return 127, "", str(exc)
+    return result.returncode, result.stdout, result.stderr
+
+
+def _as_routable_ipv4(value: str, *, name: str) -> ipaddress.IPv4Address:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError as exc:
+        raise CallbackAttestationError(
+            f"callback_address_unattested: {name} must be an IPv4 address"
+        ) from exc
+    if not isinstance(address, ipaddress.IPv4Address) or any(
+        (
+            address.is_loopback,
+            address.is_unspecified,
+            address.is_multicast,
+            address.is_link_local,
+        )
+    ):
+        raise CallbackAttestationError(
+            f"callback_address_unattested: {name} is not target-routable"
+        )
+    return address
+
+
+def _command_output(
+    runner: _CallbackCommandRunner, argv: tuple[str, ...]
+) -> str:
+    code, stdout, stderr = runner(argv, timeout_seconds=_CALLBACK_TIMEOUT_SECONDS)
+    if code != 0:
+        detail = (stderr or stdout).strip().replace("\n", " ")[:160]
+        raise CallbackAttestationError(
+            "callback_address_unattested: local route/interface probe failed"
+            + (f" ({detail})" if detail else "")
+        )
+    return stdout
+
+
+def _route_interface(output: str, *, os: HostOS) -> str:
+    pattern = (
+        r"^\s*interface:\s*(\S+)\s*$"
+        if os is HostOS.MACOS
+        else r"\bdev\s+(\S+)"
+    )
+    match = re.search(pattern, output, flags=re.MULTILINE)
+    if match is None:
+        raise CallbackAttestationError(
+            "callback_address_unattested: route has no usable host interface"
+        )
+    interface = match.group(1)
+    if not _INTERFACE_RE.fullmatch(interface) or _UNSAFE_CALLBACK_INTERFACE_RE.fullmatch(interface):
+        raise CallbackAttestationError(
+            "callback_address_unattested: route resolves through a bridge or container interface"
+        )
+    return interface
+
+
+def _address_owned_by_interface(address: ipaddress.IPv4Address, output: str) -> bool:
+    return any(
+        ipaddress.ip_address(match.group(1)) == address
+        for match in re.finditer(r"\binet\s+(\d+\.\d+\.\d+\.\d+)(?:/\d+)?\b", output)
+    )
+
+
+def attest_callback_address(
+    *,
+    advertised_address: str,
+    target: str,
+    host: HostPlatform | None = None,
+    command_runner: _CallbackCommandRunner | None = None,
+) -> CallbackAddressAttestation:
+    """Prove that a callback address is host-owned on the target's route.
+
+    This performs only bounded *local* inspection.  It sends no packets to the
+    target: macOS uses ``route -n get`` and ``ifconfig``; Linux uses ``ip route
+    get`` and ``ip addr show``.  The callback is rejected unless its address is
+    owned by the non-container interface selected for the authorised target.
+    """
+    advertised = _as_routable_ipv4(advertised_address, name="advertised address")
+    target_address = _as_routable_ipv4(target, name="target")
+    platform = host or detect_host()
+    runner = command_runner or _run_callback_command
+    if platform.os is HostOS.MACOS:
+        route_argv = ("route", "-n", "get", str(target_address))
+        source = "macos:route-get+ifconfig"
+    elif platform.os is HostOS.LINUX:
+        route_argv = ("ip", "-4", "route", "get", str(target_address))
+        source = "linux:ip-route-get+ip-addr"
+    else:
+        raise CallbackAttestationError(
+            "callback_address_unattested: local callback attestation is supported on macOS/Linux"
+        )
+
+    route_output = _command_output(runner, route_argv)
+    interface = _route_interface(route_output, os=platform.os)
+    ownership_argv = (
+        ("ifconfig", interface)
+        if platform.os is HostOS.MACOS
+        else ("ip", "-4", "addr", "show", "dev", interface)
+    )
+    ownership_output = _command_output(runner, ownership_argv)
+    if not _address_owned_by_interface(advertised, ownership_output):
+        raise CallbackAttestationError(
+            "callback_address_unattested: advertised address is not owned by "
+            "the target route interface"
+        )
+    return CallbackAddressAttestation(
+        address=str(advertised),
+        target=str(target_address),
+        source=source,
+        interface=interface,
+        route_sha256=hashlib.sha256(route_output.encode("utf-8")).hexdigest(),
+        ownership_sha256=hashlib.sha256(ownership_output.encode("utf-8")).hexdigest(),
+    )
+
+
+def validate_callback_attestation(
+    value: object, *, advertised_address: str, target: str
+) -> Mapping[str, str]:
+    """Validate the durable attestation marker bound into a callback plan.
+
+    The marker is emitted by :func:`attest_callback_address`; validation here
+    keeps a hand-written or stale plan from changing its target/address after
+    attestation.  The local probe itself remains the source of truth.
+    """
+    if not isinstance(value, dict) or set(value) != _CALLBACK_PLAN_KEYS:
+        raise CallbackAttestationError(
+            "callback_address_unattested: callback requires local attestation provenance"
+        )
+    if not all(isinstance(item, str) for item in value.values()):
+        raise CallbackAttestationError(
+            "callback_address_unattested: invalid attestation provenance"
+        )
+    data = value
+    if data["address"] != advertised_address or data["target"] != target:
+        raise CallbackAttestationError(
+            "callback_address_unattested: attestation is not bound to this callback target"
+        )
+    if (
+        data["source"] not in _CALLBACK_SOURCES
+        or not _INTERFACE_RE.fullmatch(data["interface"])
+        or _UNSAFE_CALLBACK_INTERFACE_RE.fullmatch(data["interface"])
+        or not _SHA256_RE.fullmatch(data["route_sha256"])
+        or not _SHA256_RE.fullmatch(data["ownership_sha256"])
+    ):
+        raise CallbackAttestationError(
+            "callback_address_unattested: invalid local attestation provenance"
+        )
+    return data
 
 
 @dataclass(frozen=True)

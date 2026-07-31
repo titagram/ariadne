@@ -32,6 +32,7 @@ from ariadne.adapters.base import (
     ToolProbe,
 )
 from ariadne.core.observations import Observation
+from ariadne.runtime.preflight import CallbackAttestationError, validate_callback_attestation
 
 # ── Validated operations ──────────────────────────────────────────────────────
 
@@ -71,7 +72,9 @@ class _CallbackBinding:
         }
 
 
-def _callback_binding(inputs: dict[str, object]) -> _CallbackBinding | None:
+def _callback_binding(
+    inputs: dict[str, object], context: AdapterContext
+) -> _CallbackBinding | None:
     """Parse a reverse callback only when all Docker boundary values are explicit.
 
     ``LHOST`` alone is unsafe in a container: Metasploit otherwise chooses the
@@ -107,6 +110,14 @@ def _callback_binding(inputs: dict[str, object]) -> _CallbackBinding | None:
         )
     ):
         raise AdapterError("callback advertised address is not target-routable")
+    try:
+        validate_callback_attestation(
+            inputs.get("callback_attestation"),
+            advertised_address=str(advertised_ip),
+            target=context.target.host,
+        )
+    except CallbackAttestationError as exc:
+        raise AdapterError(str(exc)) from exc
     if bind_address != "0.0.0.0":
         raise AdapterError("callback listener bind address must be Docker-internal 0.0.0.0")
     ports: list[int] = []
@@ -340,7 +351,7 @@ class MetasploitAdapter:
         rport = str(inputs.get("rport", ""))
         _validate_option(rport, "rport")
         payload = inputs.get("payload")
-        callback = _callback_binding(inputs)
+        callback = _callback_binding(inputs, context)
 
         rc_lines = [f"use {module}"]
         rc_lines.append(f"set RHOSTS {rhost}")

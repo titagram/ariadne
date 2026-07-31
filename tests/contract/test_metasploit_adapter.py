@@ -170,6 +170,14 @@ class TestMetasploitPlan:
                     "listener_bind_address": "0.0.0.0",
                     "listener_port": 4444,
                 },
+                callback_attestation={
+                    "address": "10.10.14.8",
+                    "target": "10.10.10.10",
+                    "source": "linux:ip-route-get+ip-addr",
+                    "interface": "tun0",
+                    "route_sha256": "a" * 64,
+                    "ownership_sha256": "b" * 64,
+                },
             ),
             context,
         )
@@ -185,6 +193,29 @@ class TestMetasploitPlan:
             "ARIADNE_MSF_CALLBACK_LISTENER_BIND_ADDRESS": "0.0.0.0",
             "ARIADNE_MSF_CALLBACK_LISTENER_PORT": "4444",
         }
+
+    def test_run_module_rejects_callback_without_local_attestation(
+        self, context: AdapterContext
+    ) -> None:
+        candidate = validated_candidate()
+
+        with pytest.raises(AdapterError, match="attestation"):
+            MetasploitAdapter().plan(
+                action(
+                    "run_module",
+                    module=candidate["module"],
+                    validated_candidate=candidate,
+                    check_status="vulnerable",
+                    check_evidence_id="evidence-msf-check-1",
+                    callback={
+                        "advertised_address": "10.10.14.8",
+                        "published_port": 4444,
+                        "listener_bind_address": "0.0.0.0",
+                        "listener_port": 4444,
+                    },
+                ),
+                context,
+            )
 
     def test_unknown_operation_raises(self, context: AdapterContext) -> None:
         with pytest.raises(AdapterError):
