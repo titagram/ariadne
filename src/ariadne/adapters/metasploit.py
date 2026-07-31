@@ -41,6 +41,7 @@ _INVALID_OPTION_RE = re.compile(r"[;\n\r]")
 
 # Regex for a valid MSF module path
 _VALID_MODULE_RE = re.compile(r"^[a-z][a-z0-9_]+/[a-z][a-z0-9_/]*[a-z0-9_]$")
+_VHOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$")
 
 
 def _validate_option(value: str, field_name: str) -> str:
@@ -56,6 +57,13 @@ def _validate_option(value: str, field_name: str) -> str:
             f"Metasploit option values"
         )
     return value
+
+
+def _validate_vhost(value: object) -> str:
+    """Validate an HTTP virtual-host selector without changing RHOSTS."""
+    if not isinstance(value, str) or not value or not _VHOST_RE.fullmatch(value):
+        raise AdapterError("vhost must be a hostname selector")
+    return _validate_option(value, "vhost")
 
 
 def _validated_candidate(
@@ -224,6 +232,8 @@ class MetasploitAdapter:
         rc_lines.append(f"set RHOSTS {rhost}")
         if rport:
             rc_lines.append(f"set RPORT {rport}")
+        if inputs.get("vhost") is not None:
+            rc_lines.append(f"set VHOST {_validate_vhost(inputs['vhost'])}")
         rc_lines.append("check")
         rc_lines.append("exit")
 
@@ -257,6 +267,8 @@ class MetasploitAdapter:
         rc_lines.append(f"set RHOSTS {rhost}")
         if rport:
             rc_lines.append(f"set RPORT {rport}")
+        if inputs.get("vhost") is not None:
+            rc_lines.append(f"set VHOST {_validate_vhost(inputs['vhost'])}")
         if payload:
             payload_str = str(payload)
             _validate_option(payload_str, "payload")

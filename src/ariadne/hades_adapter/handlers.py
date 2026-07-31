@@ -2309,11 +2309,22 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                         update={
                             "inputs": {
                                 **action.inputs,
-                                "http_host": http_host,
+                                **(
+                                    {"vhost": http_host}
+                                    if action.adapter == "metasploit"
+                                    else {"http_host": http_host}
+                                ),
                             }
                         }
                     )
-                    if action.adapter in {"httpx", "katana", "curl", "zap", "nuclei"}
+                    if action.adapter in {
+                        "httpx",
+                        "katana",
+                        "curl",
+                        "zap",
+                        "nuclei",
+                        "metasploit",
+                    }
                     else action
                     for action in plan.actions
                 ),

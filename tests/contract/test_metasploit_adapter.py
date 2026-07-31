@@ -101,6 +101,26 @@ class TestMetasploitPlan:
         assert "check" in spec.argv[-1]
         assert "run" not in {item.strip() for item in spec.argv[-1].split(";")}
 
+    def test_check_plan_binds_approved_vhost_without_changing_rhosts(
+        self,
+        context: AdapterContext,
+    ) -> None:
+        candidate = validated_candidate()
+        spec = MetasploitAdapter().plan(
+            action(
+                "check",
+                module=candidate["module"],
+                rhost="10.10.10.10",
+                rport=80,
+                vhost="orion.test",
+                validated_candidate=candidate,
+            ),
+            context,
+        )
+        command = spec.argv[-1]
+        assert "set RHOSTS 10.10.10.10" in command
+        assert "set VHOST orion.test" in command
+
     def test_run_module_rejects_semicolons_in_options(self, context: AdapterContext) -> None:
         """Shell injection via semicolons in option values is rejected."""
         candidate = validated_candidate()
