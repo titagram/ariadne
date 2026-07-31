@@ -268,6 +268,12 @@ class LocalFirstRuntime:
 class OnDemandKaliRuntime:
     """Async Runtime that starts the bounded Kali service on first use only."""
 
+    # Container startup is setup overhead, not an unbounded extension of a
+    # tool attempt.  Pinned images should start well within this bound; a
+    # stalled Docker daemon must return control to the planner so a fallback
+    # can be considered.
+    _STARTUP_TIMEOUT_SECONDS = 60
+
     def __init__(
         self,
         *,
@@ -315,7 +321,12 @@ class OnDemandKaliRuntime:
     async def run(self, spec: ProcessSpec) -> ProcessResult:
         container_environment = self._container_environment(spec)
         self._bind_planned_ports(spec)
-        await self._ensure_started()
+        await self._ensure_started(
+            timeout_seconds=min(
+                float(spec.timeout_seconds),
+                float(self._STARTUP_TIMEOUT_SECONDS),
+            )
+        )
         if spec.argv[0] == "nuclei":
             await self._attest_nuclei(spec)
         command = [
@@ -491,7 +502,7 @@ class OnDemandKaliRuntime:
             return ""
         return version.stdout.strip()
 
-    async def _ensure_started(self) -> None:
+    async def _ensure_started(self, *, timeout_seconds: float | None = None) -> None:
         if self._started:
             return
         async with self._start_lock:
@@ -553,7 +564,11 @@ class OnDemandKaliRuntime:
                     ),
                     cwd=self._compose_dir,
                     environment=self._compose_environment(),
-                    timeout_seconds=600,
+                    timeout_seconds=(
+                        self._STARTUP_TIMEOUT_SECONDS
+                        if timeout_seconds is None
+                        else max(1.0, min(float(timeout_seconds), self._STARTUP_TIMEOUT_SECONDS))
+                    ),
                     max_output_bytes=2 * 1024 * 1024,
                 )
             )

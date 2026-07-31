@@ -172,6 +172,52 @@ def test_kali_reuses_locally_available_pinned_image_without_rebuild(tmp_path) ->
     assert compose_up.environment["ARIADNE_NETGUARD_IMAGE"] == _PINNED_NETGUARD_REF
 
 
+def test_kali_startup_is_bounded_by_the_tool_attempt_timeout(tmp_path) -> None:
+    snapshot = EngagementSnapshot(
+        engagement_id=uuid4(),
+        revision=1,
+        previous_snapshot_hash=None,
+        snapshot_hash="0" * 64,
+        confirmed_at=datetime.now(UTC),
+        authorization_attested=True,
+        disclaimer_version="1.0",
+        profile=EnvironmentProfile.PRIVATE_LAB,
+        autonomy=AutonomyMode.CONTROLLED,
+        targets=(TargetSpec(host="192.0.2.10"),),
+        objectives=(Objective(kind="proof"),),
+    )
+    command_runtime = _PinnedImageCommandRuntime()
+    runtime = OnDemandKaliRuntime(
+        snapshot=snapshot,
+        run_root=tmp_path,
+        command_runtime=command_runtime,
+        docker_locator=lambda _: "/usr/local/bin/docker",
+        kali_image_ref=_PINNED_KALI_REF,
+        netguard_image_ref=_PINNED_NETGUARD_REF,
+    )
+
+    asyncio.run(
+        runtime.run(
+            ProcessSpec(
+                argv=(
+                    "nuclei",
+                    "-t",
+                    "/opt/nuclei-templates/http/cves/example.yaml",
+                    "-target",
+                    "192.0.2.10",
+                ),
+                timeout_seconds=7,
+                max_output_bytes=4096,
+            )
+        )
+    )
+
+    compose_up = next(
+        call for call in command_runtime.calls if " up " in f" {' '.join(call.argv)} "
+    )
+    assert compose_up.timeout_seconds <= 7
+
+
 def test_kali_uses_package_metadata_when_tool_has_no_version_flag(tmp_path) -> None:
     snapshot = EngagementSnapshot(
         engagement_id=uuid4(),
