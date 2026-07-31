@@ -1200,10 +1200,10 @@ async def test_post_execution_scope_candidate_persists_amendment_boundary(
     events = services.store.read_events(handle)
     assert created["status"] == "active"
     assert result["status"] == "blocked"
-    assert result["boundary"] == "scope_amendment"
-    assert result["candidate"]["target"] == "orion.test"
+    assert result["boundary"] == "safety_step_limit"
     assert any(event["event_type"] == "scope_candidate_discovered" for event in events)
-    assert any(event["event_type"] == "scope_amendment_required" for event in events)
+    assert any(event["event_type"] == "scope_alias_approved" for event in events)
+    assert not any(event["event_type"] == "scope_amendment_required" for event in events)
     assert runtime.calls == 1
     assert (tmp_path / "canonical-knowledge" / "tools" / "httpx-toolkit.md").is_file()
 
@@ -1283,7 +1283,6 @@ async def test_approved_http_alias_uses_host_header_with_original_network_target
     )
     object.__setattr__(services, "tool_card_verifier", None)
     prepare = _handler_for("ariadne_prepare_engagement", services)
-    amend = _handler_for("ariadne_amend_engagement", services)
     run = _handler_for("ariadne_run", services)
     created = json.loads(
         await prepare(
@@ -1302,28 +1301,15 @@ async def test_approved_http_alias_uses_host_header_with_original_network_target
 
     boundary = json.loads(await run({"max_steps": 1}, session_id="approved-http-alias-session"))
     assert created["status"] == "active"
-    assert boundary["boundary"] == "scope_amendment"
+    assert boundary["boundary"] == "safety_step_limit"
     assert runtime.calls == 1
-
-    approved = json.loads(
-        await amend(
-            {
-                "add_targets": ["orion.test"],
-                "candidate_id": boundary["candidate"]["candidate_id"],
-                "reason": "Approve the observed HTTP virtual-host alias.",
-            },
-            session_id="approved-http-alias-session",
-        )
-    )
-    assert approved["status"] == "active"
 
     resumed = json.loads(await run({"max_steps": 2}, session_id="approved-http-alias-session"))
 
-    assert resumed["boundary"] == "safety_step_limit", resumed
-    assert len(runtime.specs) == 3
+    assert resumed["boundary"] == "no_eligible_plan", resumed
+    assert len(runtime.specs) == 2
     assert "Host: orion.test" in runtime.specs[1].argv
-    assert "Host: orion.test" in runtime.specs[2].argv
-    assert runtime.specs[2].argv[-1] == "http://192.0.2.10:80/"
+    assert runtime.specs[1].argv[-1] == "http://192.0.2.10:80/"
     binding = services.command.get_session_binding("approved-http-alias-session")
     assert binding is not None and binding.engagement_id is not None
     handle = services.store.open(binding.engagement_id)

@@ -3495,6 +3495,7 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                     if action.adapter == "httpx"
                     else "lateral_host"
                 )
+                candidate_payloads: list[dict[str, Any]] = []
                 for observation in candidate_observations:
                     reason = str(
                         observation.data.get("summary")
@@ -3524,41 +3525,99 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                             timestamp=datetime.now(UTC),
                         ),
                     )
-                candidate_payload = next(
-                    event.get("payload", {})
-                    for event in reversed(cmd.store.read_events(run_handle))
-                    if event.get("event_type") == "scope_candidate_discovered"
-                )
-                cmd.store.append_event(
-                    run_handle,
-                    Event(
-                        event_type="scope_amendment_required",
-                        payload={
-                            "plan_id": plan_id,
-                            "playbook_id": record.plan.playbook_id,
-                            "adapter": action.adapter,
-                            "operation": action.operation,
-                            "target": candidate_payload.get("target", ""),
-                            "candidate_id": candidate_payload.get("candidate_id", ""),
-                            "reason": candidate_payload.get("reason", ""),
-                        },
-                        timestamp=datetime.now(UTC),
-                    ),
-                )
-                return {
-                    "status": "blocked",
-                    "boundary": "scope_amendment",
-                    "plan_id": plan_id,
-                    "candidate": candidate_payload,
-                    "message": (
-                        f"Discovered distinct target "
-                        f"{candidate_payload.get('target')} from local evidence. "
-                        "A targeted amendment is required before sending traffic."
-                    ),
-                    "actions_executed": actions_executed,
-                    "actions_failed": actions_failed,
-                    "evidence_artifacts": evidence_artifacts,
-                }
+                    candidate_payloads.append(
+                        {
+                            "candidate_id": str(candidate.candidate_id),
+                            "target": candidate.target.host,
+                            "source_target": candidate.source_target.host,
+                            "reason": candidate.reason,
+                            "relation": candidate.relation,
+                            "evidence_artifact": candidate_artifact.path.name,
+                            "status": candidate.status.value,
+                        }
+                    )
+
+                # Network scope is IP-bound. A hostname learned from an HTTP
+                # redirect is an application selector when the source target
+                # is an authorized IP; persist the alias for Host/SNI binding
+                # and continue without widening the network scope.
+                auto_aliases: list[dict[str, str]] = []
+                if relation == "redirect":
+                    try:
+                        ipaddress.ip_address(record.plan.target.host)
+                    except ValueError:
+                        pass
+                    else:
+                        for candidate_payload in candidate_payloads:
+                            alias = ""
+                            try:
+                                alias = TargetSpec(
+                                    host=str(candidate_payload.get("target", ""))
+                                ).host
+                                ipaddress.ip_address(alias)
+                            except (TypeError, ValueError):
+                                auto_aliases.append(
+                                    {
+                                        "candidate_id": str(
+                                            candidate_payload.get("candidate_id", "")
+                                        ),
+                                        "http_host": alias,
+                                    }
+                                )
+                if auto_aliases and len(auto_aliases) == len(candidate_payloads):
+                    for alias in auto_aliases:
+                        cmd.store.append_event(
+                            run_handle,
+                            Event(
+                                event_type="scope_alias_approved",
+                                payload={
+                                    **alias,
+                                    "network_target": record.plan.target.host,
+                                    "reason": (
+                                        "HTTP redirect hostname treated as an application "
+                                        "selector; network scope remains the authorized IP."
+                                    ),
+                                },
+                                timestamp=datetime.now(UTC),
+                            ),
+                        )
+                    observations = tuple(
+                        observation
+                        for observation in observations
+                        if observation not in candidate_observations
+                    )
+                else:
+                    candidate_payload = candidate_payloads[0]
+                    cmd.store.append_event(
+                        run_handle,
+                        Event(
+                            event_type="scope_amendment_required",
+                            payload={
+                                "plan_id": plan_id,
+                                "playbook_id": record.plan.playbook_id,
+                                "adapter": action.adapter,
+                                "operation": action.operation,
+                                "target": candidate_payload.get("target", ""),
+                                "candidate_id": candidate_payload.get("candidate_id", ""),
+                                "reason": candidate_payload.get("reason", ""),
+                            },
+                            timestamp=datetime.now(UTC),
+                        ),
+                    )
+                    return {
+                        "status": "blocked",
+                        "boundary": "scope_amendment",
+                        "plan_id": plan_id,
+                        "candidate": candidate_payload,
+                        "message": (
+                            f"Discovered distinct target "
+                            f"{candidate_payload.get('target')} from local evidence. "
+                            "A targeted amendment is required before sending traffic."
+                        ),
+                        "actions_executed": actions_executed,
+                        "actions_failed": actions_failed,
+                        "evidence_artifacts": evidence_artifacts,
+                    }
 
             # Classify the result
             classification = adapter.classify(process_result, observations)
