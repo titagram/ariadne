@@ -39,6 +39,21 @@ class RecordingRuntime:
         return self._results.pop(0)
 
 
+class ClockAdvancingRuntime(RecordingRuntime):
+    def __init__(self, clock: list[float], advances: list[float]) -> None:
+        super().__init__([
+            ProcessResult(exit_code=124, stdout="", stderr=""),
+            ProcessResult(exit_code=0, stdout="", stderr=""),
+        ])
+        self._clock = clock
+        self._advances = iter(advances)
+
+    async def run(self, spec: ProcessSpec) -> ProcessResult:
+        self.calls.append(spec)
+        self._clock[0] += next(self._advances)
+        return self._results.pop(0)
+
+
 class ScreenshotRuntime(RecordingRuntime):
     async def run(self, spec: ProcessSpec) -> ProcessResult:
         self.calls.append(spec)
@@ -815,7 +830,7 @@ async def test_nested_results_consume_combined_output_budget(
 
 
 @pytest.mark.asyncio
-async def test_elapsed_time_reduces_nested_timeout_budget(
+async def test_setup_overhead_caps_nested_timeout_instead_of_blocking(
     tmp_path: Path,
 ) -> None:
     now = [0.0]
@@ -840,10 +855,41 @@ async def test_elapsed_time_reduces_nested_timeout_budget(
     guard.authorize_initial(spec)
     now[0] = 5.0
 
-    with pytest.raises(ProcessAuthorizationError, match="timeout"):
-        await guard.run(spec)
+    await guard.run(spec)
 
-    assert runtime.calls == []
+    assert len(runtime.calls) == 1
+    assert runtime.calls[0].timeout_seconds == 25
+
+
+@pytest.mark.asyncio
+async def test_tool_timeout_starts_a_fresh_local_timer_for_fallback(
+    tmp_path: Path,
+) -> None:
+    clock = [0.0]
+    runtime = ClockAdvancingRuntime(clock, [20.0, 5.0])
+    envelope = _envelope(tmp_path)
+    contract = ExecutionContractRegistry.curated().require(
+        envelope.adapter,
+        envelope.operation,
+    )
+    guard = GuardedRuntime(
+        runtime=runtime,
+        envelope=envelope,
+        contract=contract,
+        policy=_policy(),
+        clock=lambda: clock[0],
+    )
+    spec = _nmap_spec()
+    guard.authorize_initial(spec)
+
+    first = await guard.run(spec)
+    second = await guard.run(spec)
+
+    assert first.exit_code == 124
+    assert second.exit_code == 0
+    assert [call.timeout_seconds for call in runtime.calls] == [30, 10]
+    assert guard.attempts == 2
+    assert guard.attempt_elapsed_seconds == 0.0
 
 
 @pytest.mark.asyncio

@@ -49,6 +49,7 @@ from ariadne.core.observations import (
 )
 from ariadne.core.planner import Planner
 from ariadne.core.policy import EffectivePolicy
+from ariadne.core.timing import admitted_duration_seconds
 from ariadne.core.workflow import PlanningContext, Playbook, WorkflowCatalog
 from ariadne.evidence.collector import EvidenceCollector
 from ariadne.execution.contracts import (
@@ -1654,6 +1655,13 @@ async def handle_prepare_engagement(args: dict[str, Any], **context: Any) -> dic
         }
 
     answers = validated.model_dump()
+    if answers["time_window_minutes"] is None:
+        answers["time_window_minutes"] = (
+            120
+            if answers["profile"] in {"htb", "ctf"}
+            and answers["autonomy"] == "full"
+            else 60
+        )
     default_rate, default_concurrency = intensity_default_limits(answers["intensity"])
     answers["max_requests_per_second"] = default_rate
     answers["max_concurrent_checks"] = default_concurrency
@@ -2263,6 +2271,34 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             "message": f"Plan construction failed: {exc}",
             "plan_id": "",
         }
+
+    # Admission control: a plan may be shortened to the active lease that is
+    # actually available.  This is a decrease-only operation; policy and
+    # scope ceilings remain unchanged and GuardedRuntime reauthorizes every
+    # resulting ProcessSpec.
+    execution_lease = cmd.execution_lease(engagement_id, snapshot)
+    admitted_duration = admitted_duration_seconds(
+        plan.limits.max_duration_seconds,
+        execution_lease.remaining_active_seconds,
+    )
+    if admitted_duration is None:
+        return {
+            "status": "blocked",
+            "boundary": "execution_lease_expired",
+            "message": (
+                "The selected playbook does not fit the active lease and no "
+                "execution window remains for this invocation."
+            ),
+            "plan_id": "",
+        }
+    if plan.limits.max_duration_seconds != admitted_duration:
+        plan = plan.model_copy(
+            update={
+                "limits": plan.limits.model_copy(
+                    update={"max_duration_seconds": admitted_duration}
+                )
+            }
+        )
 
     http_host = _approved_http_alias(events, plan.target)
     if http_host is not None:
@@ -4241,13 +4277,44 @@ async def handle_run_engagement(
     if not isinstance(max_steps, int) or not 1 <= max_steps <= 100:
         return {"status": "error", "message": "max_steps must be between 1 and 100"}
     last_provider_boundary: dict[str, Any] | None = None
+    execution_lease = None
+    run_handle: RunHandle | None = None
+
+    def finish(response: dict[str, Any]) -> dict[str, Any]:
+        # Returning control to Hades is a suspended interval, not active
+        # execution time.  The next invocation resumes the same lease.
+        if execution_lease is not None:
+            execution_lease.pause("session_suspended")
+            if run_handle is not None:
+                cmd.store.append_event(
+                    run_handle,
+                    Event(
+                        event_type="execution_time_paused",
+                        payload={
+                            "reason": "session_suspended",
+                            "active_time_seconds": execution_lease.historical_active_seconds,
+                            "current_lease_active_seconds": (
+                                execution_lease.current_lease_active_seconds
+                            ),
+                            "wall_clock_seconds": execution_lease.wall_clock_seconds,
+                        },
+                        timestamp=datetime.now(UTC),
+                    ),
+                )
+        return response
+
     for step in range(1, max_steps + 1):
         binding = _get_binding(cmd, session_id)
         if binding is None or binding["engagement_id"] is None:
-            return {"status": "error", "message": "No active engagement."}
+            return finish({"status": "error", "message": "No active engagement."})
         run_handle = _get_run_handle(cmd.store, binding["engagement_id"])
         if run_handle is None:
-            return {"status": "error", "message": "Engagement run is unavailable."}
+            return finish({"status": "error", "message": "Engagement run is unavailable."})
+        execution_lease = cmd.execution_lease(
+            binding["engagement_id"],
+            run_handle.snapshot,
+        )
+        execution_lease.resume()
         state, _ = _determine_engagement_state(cmd.store, run_handle)
         if state in {EngagementState.REPORTING, EngagementState.COMPLETE}:
             walkthrough = await handle_render_report(
@@ -4262,7 +4329,7 @@ async def handle_run_engagement(
                 walkthrough.get("status") != "report_rendered"
                 or professional.get("status") != "report_rendered"
             ):
-                return {
+                return finish({
                     "status": "blocked",
                     "boundary": "report_quality_gate",
                     "message": (
@@ -4270,7 +4337,7 @@ async def handle_run_engagement(
                         f"{walkthrough.get('message')}; "
                         f"{professional.get('message')}"
                     ),
-                }
+                })
             objective_flags: dict[str, str] = {}
             if walkthrough.get("include_flags"):
                 dossier = DossierBuilder().build(
@@ -4294,7 +4361,7 @@ async def handle_run_engagement(
                         else "",
                     )
                 )
-            return {
+            return finish({
                 "status": "complete",
                 "steps": step - 1,
                 "walkthrough_path": walkthrough["path"],
@@ -4303,7 +4370,7 @@ async def handle_run_engagement(
                 "message": (
                     "Objectives, cleanup, and both offline reports completed." + flag_summary
                 ),
-            }
+            })
 
         proposed = await handle_propose_plan(
             {
@@ -4312,12 +4379,69 @@ async def handle_run_engagement(
             },
             **context,
         )
+        if proposed.get("boundary") == "execution_lease_expired":
+            # handle_propose_plan reached a real eligible playbook, but the
+            # current lease was too short.  Renew only that operational lease;
+            # no scope or policy decision is inferred here.
+            events = cmd.store.read_events(run_handle)
+            completed = {
+                event.get("payload", {}).get("objective_kind")
+                for event in events
+                if event.get("event_type") == "objective_completed"
+            }
+            objectives_incomplete = any(
+                objective.kind not in completed
+                for objective in run_handle.snapshot.objectives
+            )
+            last_progress = next(
+                (
+                    str(event.get("event_type", ""))
+                    for event in reversed(events)
+                    if event.get("event_type") in {
+                        "evidence_collected",
+                        "finding_candidate",
+                        "plan_executed",
+                    }
+                ),
+                "eligible_playbook",
+            )
+            renewal = execution_lease.ensure_available(
+                objectives_incomplete=objectives_incomplete,
+                branch_available=True,
+                reason="an eligible playbook remains within the workflow",
+                evidence=last_progress,
+            )
+            if renewal is not None:
+                cmd.store.append_event(
+                    run_handle,
+                    Event(
+                        event_type="execution_lease_renewed",
+                        payload={
+                            **renewal.event_payload(),
+                            "engagement_id": str(binding["engagement_id"]),
+                            "snapshot_hash": run_handle.snapshot.snapshot_hash,
+                            "active_time_seconds": execution_lease.historical_active_seconds,
+                            "wall_clock_seconds": execution_lease.wall_clock_seconds,
+                        },
+                        timestamp=datetime.now(UTC),
+                    ),
+                )
+                continue
+            return finish({
+                "status": "blocked",
+                "boundary": "execution_lease_expired",
+                "steps": step - 1,
+                "message": (
+                    "Active execution lease expired and cannot be renewed without "
+                    "changing scope, policy, or leaving no eligible branch."
+                ),
+            })
         if proposed.get("status") not in {
             "plan_auto_approved",
             "plan_proposed",
         }:
             if last_provider_boundary is not None:
-                return {
+                return finish({
                     **last_provider_boundary,
                     "steps": step - 1,
                     "message": (
@@ -4325,13 +4449,13 @@ async def handle_run_engagement(
                         "No eligible fallback provider remains."
                     ),
                     "fallback_details": proposed,
-                }
-            return {
+                })
+            return finish({
                 "status": "blocked",
                 "boundary": proposed.get("boundary", "no_eligible_plan"),
                 "message": proposed.get("message", "No eligible plan."),
                 "details": proposed,
-            }
+            })
         executed = await handle_execute_plan(
             {"plan_id": proposed["plan_id"]},
             **context,
@@ -4347,11 +4471,11 @@ async def handle_run_engagement(
             ):
                 last_provider_boundary = executed
                 continue
-            return {
+            return finish({
                 **executed,
                 "boundary": executed.get("boundary", "manual_choice"),
                 "steps": step,
-            }
+            })
         last_provider_boundary = None
         if executed.get("status") != "executed":
             events = cmd.store.read_events(run_handle)
@@ -4390,7 +4514,7 @@ async def handle_run_engagement(
                 None,
             )
             if candidate is not None:
-                return {
+                return finish({
                     "status": "blocked",
                     "boundary": "scope_candidate",
                     "candidate": candidate,
@@ -4400,8 +4524,8 @@ async def handle_run_engagement(
                         f"from local evidence: {candidate.get('reason')}. "
                         "A targeted amendment is required before sending traffic."
                     ),
-                }
-            return {
+                })
+            return finish({
                 "status": "blocked",
                 "boundary": "execution_failure",
                 "steps": step,
@@ -4410,13 +4534,13 @@ async def handle_run_engagement(
                     "A plan could not complete safely.",
                 ),
                 "details": executed,
-            }
-    return {
+            })
+    return finish({
         "status": "blocked",
         "boundary": "safety_step_limit",
         "steps": max_steps,
         "message": "Safety step limit reached; inspect status before continuing.",
-    }
+    })
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────

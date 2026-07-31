@@ -493,10 +493,18 @@ class GuardedRuntime:
         self._output_bytes = 0
         self._initial_digest: str | None = None
         self._attempts = 0
+        self._attempt_started_at: float | None = None
 
     @property
     def attempts(self) -> int:
         return self._attempts
+
+    @property
+    def attempt_elapsed_seconds(self) -> float:
+        """Elapsed time for the current tool attempt only."""
+        if self._attempt_started_at is None:
+            return 0.0
+        return max(0.0, self._clock() - self._attempt_started_at)
 
     def authorize_initial(self, spec: ProcessSpec) -> None:
         self._authorize(spec, next_attempt=1)
@@ -512,12 +520,32 @@ class GuardedRuntime:
                 "First runtime ProcessSpec differs from the authorized initial spec",
                 spec,
             )
-        self._prepare_runtime_workspace(spec)
+        duration_bound = _tight_bound(
+            self._envelope.limits.max_duration_seconds,
+            self._contract.max_duration_seconds,
+        )
+        elapsed = int(self._clock() - self._started_at)
+        remaining = duration_bound - elapsed
+        if remaining < 1:
+            self._deny(AuthorizationReason.TIMEOUT_LIMIT, spec)
+        # ProcessSpec's timeout is a local tool limit.  The envelope remains
+        # the immutable playbook/policy ceiling, while setup overhead is
+        # reserved by capping the actual invocation to the remaining budget.
+        effective_spec = spec
+        if spec.timeout_seconds > remaining:
+            effective_spec = spec.model_copy(update={"timeout_seconds": remaining})
+        self._prepare_runtime_workspace(effective_spec)
         self._attempts = next_attempt
-        async with self._coordinator.slot():
-            result = await self._runtime.run(spec)
-        self._output_bytes += len(result.stdout.encode()) + len(result.stderr.encode())
-        return result
+        self._attempt_started_at = self._clock()
+        try:
+            async with self._coordinator.slot():
+                result = await self._runtime.run(effective_spec)
+            self._output_bytes += len(result.stdout.encode()) + len(result.stderr.encode())
+            return result
+        finally:
+            # A timeout/failure closes only this local attempt timer.  The
+            # playbook/lease budget remains independently accounted for.
+            self._attempt_started_at = None
 
     def _authorize(self, spec: ProcessSpec, *, next_attempt: int) -> None:
         contract = self._contract
@@ -538,7 +566,7 @@ class GuardedRuntime:
             envelope.limits.max_output_bytes,
             contract.max_output_bytes,
         )
-        if elapsed >= duration_bound or spec.timeout_seconds > (duration_bound - elapsed):
+        if elapsed >= duration_bound:
             self._deny(AuthorizationReason.TIMEOUT_LIMIT, spec)
         if (
             self._output_bytes >= output_bound

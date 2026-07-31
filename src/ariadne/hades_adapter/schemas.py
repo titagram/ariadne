@@ -100,11 +100,14 @@ class PrepareEngagementInput(BaseModel):
         max_length=50,
         description="Explicitly excluded techniques, services, or actions.",
     )
-    time_window_minutes: int = Field(
-        default=60,
+    time_window_minutes: int | None = Field(
+        default=None,
         ge=1,
         le=1440,
-        description="Maximum engagement duration in minutes.",
+        description=(
+            "Maximum engagement duration in minutes. If omitted, HTB/CTF "
+            "training with full autonomy uses a 120-minute active lease."
+        ),
     )
     notes: str = Field(
         default="",

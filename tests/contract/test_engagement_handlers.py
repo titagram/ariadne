@@ -569,10 +569,86 @@ def test_prepare_persists_adjacent_correlated_transaction_events(
     assert [event["event_type"] for event in events] == [
         "engagement_locked",
         "session_bound",
+        "execution_lease_started",
     ]
     transaction_id = events[0]["payload"]["transaction_id"]
     assert transaction_id
     assert events[1]["payload"]["transaction_id"] == transaction_id
+    assert events[2]["payload"]["transaction_id"] == transaction_id
+
+
+def test_htb_training_full_uses_renewable_120_minute_default(
+    command: AriadneCommand,
+) -> None:
+    answers = {
+        "authorization_attested": True,
+        "disclaimer_version": CURRENT_DISCLAIMER_VERSION,
+        "profile": "htb",
+        "target_host": "10.0.0.5",
+        "objectives": ["user_flag", "root_flag"],
+        "autonomy": "full",
+    }
+    created = command.prepare(
+        answers,
+        session_id="htb-default-session",
+        trusted_confirmation_digest="b" * 64,
+    )
+    handle = command.store.open(created.engagement_id)
+    assert handle is not None
+    assert handle.snapshot.constraints.max_duration_minutes == 120
+
+
+def test_recreated_command_restores_lease_history_from_events(
+    command: AriadneCommand,
+    valid_answers: dict,
+) -> None:
+    from datetime import UTC, datetime
+
+    valid_answers.update(
+        {
+            "profile": "htb",
+            "autonomy": "full",
+            "time_window_minutes": 1,
+        }
+    )
+    created = command.prepare(
+        valid_answers,
+        session_id="lease-recovery-session",
+        trusted_confirmation_digest="c" * 64,
+    )
+    handle = command.store.open(created.engagement_id)
+    assert handle is not None
+    command.store.append_event(
+        handle,
+        Event(
+            event_type="execution_lease_renewed",
+            payload={
+                "new_lease_minutes": 31,
+                "active_time_seconds": 61.0,
+            },
+            timestamp=datetime.now(UTC),
+        ),
+    )
+    command.store.append_event(
+        handle,
+        Event(
+            event_type="execution_time_paused",
+            payload={
+                "active_time_seconds": 70.0,
+                "current_lease_active_seconds": 9.0,
+            },
+            timestamp=datetime.now(UTC),
+        ),
+    )
+
+    replacement = AriadneCommand(ledger=ChallengeLedger(), store=command.store)
+    lease = replacement.execution_lease(created.engagement_id, handle.snapshot)
+
+    assert lease.paused is True
+    assert lease.lease_minutes == 31
+    assert lease.historical_active_seconds == 70.0
+    assert lease.current_lease_active_seconds == 9.0
+    assert lease.renewals == 1
 
 
 @pytest.mark.asyncio

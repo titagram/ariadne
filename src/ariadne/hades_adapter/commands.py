@@ -27,6 +27,7 @@ from ariadne.core.engagement import (
 from ariadne.core.enums import AutonomyMode, EnvironmentProfile
 from ariadne.core.planner import Plan
 from ariadne.core.policy import build_effective_policy
+from ariadne.core.timing import ActiveTimeLease
 from ariadne.hades_adapter.session import ChallengeLedger
 from ariadne.store.run_store import RunStore
 
@@ -137,6 +138,52 @@ class AriadneCommand:
         self._plan_ledger: dict[str, PlanRecord] = {}
         self._plan_locks: dict[str, RLock] = {}
         self._plan_locks_guard = Lock()
+        self._execution_leases: dict[UUID, ActiveTimeLease] = {}
+
+    def execution_lease(self, engagement_id: UUID, snapshot: Any) -> ActiveTimeLease:
+        """Return the process-local lease for an engagement.
+
+        The immutable snapshot remains the source of policy and scope.  This
+        small runtime clock only tracks active execution time and is rebuilt
+        lazily after a Hades process restart.
+        """
+        lease = self._execution_leases.get(engagement_id)
+        if lease is None:
+            lease_minutes = snapshot.constraints.max_duration_minutes
+            historical_active = 0.0
+            current_active = 0.0
+            renewals = 0
+            handle = self.store.open(engagement_id)
+            if handle is not None:
+                for event in self.store.read_events(handle):
+                    payload = event.get("payload", {})
+                    if event.get("event_type") == "execution_lease_started":
+                        lease_minutes = int(payload.get("lease_minutes", lease_minutes))
+                    elif event.get("event_type") == "execution_lease_renewed":
+                        lease_minutes = int(payload.get("new_lease_minutes", lease_minutes))
+                        historical_active = float(
+                            payload.get("active_time_seconds", historical_active)
+                        )
+                        current_active = 0.0
+                        renewals += 1
+                    elif event.get("event_type") == "execution_time_paused":
+                        historical_active = float(
+                            payload.get("active_time_seconds", historical_active)
+                        )
+                        current_active = float(
+                            payload.get("current_lease_active_seconds", current_active)
+                        )
+            lease = ActiveTimeLease(
+                profile=snapshot.profile,
+                autonomy=snapshot.autonomy,
+                lease_minutes=lease_minutes,
+                start_paused=True,
+                historical_active_seconds=historical_active,
+                current_lease_active_seconds=current_active,
+                renewals=renewals,
+            )
+            self._execution_leases[engagement_id] = lease
+        return lease
 
     def _plan_lock(self, plan_id: str) -> RLock:
         """Return the process-local serialization lock for one plan."""
@@ -239,10 +286,18 @@ class AriadneCommand:
             exclusions=tuple(answers.get("exclusions", ())),
         )
 
+        requested_duration = answers.get("time_window_minutes")
+        if requested_duration is None:
+            requested_duration = (
+                120
+                if profile in {EnvironmentProfile.HTB, EnvironmentProfile.CTF}
+                and autonomy is AutonomyMode.FULL
+                else 60
+            )
         constraints = EngagementConstraints(
             max_concurrent_checks=answers.get("max_concurrent_checks", 5),
             max_requests_per_second=answers.get("max_requests_per_second", 10),
-            max_duration_minutes=answers.get("time_window_minutes", 60),
+            max_duration_minutes=requested_duration,
         )
         effective_policy = build_effective_policy(profile, constraints)
         snapshot = lock_attested_engagement(
@@ -281,6 +336,12 @@ class AriadneCommand:
                 timestamp=now,
             ),
         )
+        self._execution_leases[snapshot.engagement_id] = ActiveTimeLease(
+            profile=snapshot.profile,
+            autonomy=snapshot.autonomy,
+            lease_minutes=snapshot.constraints.max_duration_minutes,
+            start_paused=True,
+        )
         self.store.append_event(
             handle,
             Event(
@@ -293,6 +354,25 @@ class AriadneCommand:
                 timestamp=now,
             ),
         )
+        self.store.append_event(
+            handle,
+            Event(
+                event_type="execution_lease_started",
+                payload={
+                    "lease_minutes": snapshot.constraints.max_duration_minutes,
+                    "transaction_id": transaction_id,
+                    "wall_clock_started_at": now.isoformat(),
+                    "active_time_seconds": 0,
+                    "profile": snapshot.profile.value,
+                    "autonomy": snapshot.autonomy.value,
+                },
+                timestamp=now,
+            ),
+        )
+        # Returning from prepare hands control back to Hades; the Q/A/session
+        # interval is not active engagement time.  run_engagement resumes it
+        # only while advancing an approved plan.
+        self._execution_leases[snapshot.engagement_id].pause("session_suspended")
         binding_key = f"atomic:{snapshot.engagement_id}"
         self.ledger.bind_session(
             challenge_id=binding_key,
