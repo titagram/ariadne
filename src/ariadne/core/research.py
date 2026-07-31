@@ -130,6 +130,7 @@ class ResearchCandidate(BaseModel):
     metasploit_modules: tuple[str, ...] = ()
     check_supported: bool = False
     requires_reverse_callback: bool = False
+    reverse_callback_modules: tuple[str, ...] = ()
     compatible: bool = False
     applicability_evidence: tuple[str, ...] = ()
     validation_status: Literal["candidate", "validated"] = "candidate"

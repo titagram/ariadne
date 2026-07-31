@@ -11,6 +11,7 @@ import pytest
 
 from ariadne.adapters import build_default_registry
 from ariadne.adapters.base import ProcessResult, ProcessSpec
+from ariadne.composition import build_services
 from ariadne.core.planner import Planner
 from ariadne.core.workflow import WorkflowCatalog
 from ariadne.execution.contracts import ExecutionContractRegistry, ExecutionCoordinator
@@ -22,6 +23,7 @@ from ariadne.hades_adapter.handlers import (
     handle_prepare_engagement,
     handle_propose_plan,
 )
+from ariadne.hades_adapter.registration import _handler_for
 from ariadne.hades_adapter.session import ChallengeLedger
 from ariadne.runtime.docker import OnDemandKaliRuntime
 from ariadne.runtime.preflight import CallbackAddressAttestation
@@ -37,8 +39,9 @@ class _AcceptingConsent:
 class _OfflineDockerRuntime:
     """Command runtime for a deterministic Kali/Compose replay."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, session_opened: bool = True) -> None:
         self.calls: list[ProcessSpec] = []
+        self.session_opened = session_opened
 
     async def run(self, spec: ProcessSpec) -> ProcessResult:
         self.calls.append(spec)
@@ -51,7 +54,12 @@ class _OfflineDockerRuntime:
                 stderr="",
             )
         if "msfconsole" in spec.argv:
-            return ProcessResult(exit_code=0, stdout="Command shell session 1 opened", stderr="")
+            stdout = (
+                "Command shell session 1 opened"
+                if self.session_opened
+                else "Exploit completed, but no session was created"
+            )
+            return ProcessResult(exit_code=0, stdout=stdout, stderr="")
         return ProcessResult(exit_code=0, stdout="", stderr="")
 
 
@@ -72,7 +80,7 @@ async def _prepared_command(tmp_path: Path) -> tuple[AriadneCommand, str, str]:
         ariadne_command=command,
         consent_gateway=_AcceptingConsent(),
     )
-    assert prepared["status"] == "active"
+    assert prepared["status"] == "active", prepared
     return command, session_id, prepared["snapshot_hash"]
 
 
@@ -291,9 +299,11 @@ async def test_reverse_callback_candidate_without_attested_binding_blocks_before
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("session_opened", [True, False])
 async def test_callback_plan_replays_through_guarded_ondemand_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    session_opened: bool,
 ) -> None:
     command, session_id, snapshot_hash = await _prepared_command(tmp_path)
     callback = {
@@ -337,7 +347,7 @@ async def test_callback_plan_replays_through_guarded_ondemand_runtime(
     )
     assert proposed["status"] == "plan_auto_approved"
 
-    docker_runtime = _OfflineDockerRuntime()
+    docker_runtime = _OfflineDockerRuntime(session_opened=session_opened)
     binding = command.get_session_binding(session_id)
     assert binding is not None and binding.engagement_id is not None
     run = command.store.open(binding.engagement_id)
@@ -365,8 +375,16 @@ async def test_callback_plan_replays_through_guarded_ondemand_runtime(
         catalog=catalog,
     )
 
-    assert result["status"] == "executed"
+    assert result["status"] == ("executed" if session_opened else "partial")
     assert any("msfconsole" in spec.argv for spec in docker_runtime.calls)
+    events = command.store.read_events(run)
+    sources = {
+        event.get("payload", {}).get("observation_data", {}).get("type")
+        for event in events
+        if event.get("event_type") == "evidence_collected"
+    }
+    assert ("exploit_succeeded" if session_opened else "exploit_no_session") in sources
+    assert "foothold_established" not in sources
 
 
 @pytest.mark.asyncio
@@ -413,3 +431,63 @@ async def test_callback_binding_can_be_supplied_by_trusted_composition_context(
         "listener_bind_address": "0.0.0.0",
         "listener_port": 4444,
     }
+
+
+@pytest.mark.asyncio
+async def test_build_services_exposes_bounded_callback_to_installed_handler(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS", "198.51.100.7")
+    monkeypatch.setenv("ARIADNE_MSF_CALLBACK_PUBLISHED_PORT", "4444")
+    monkeypatch.setenv("ARIADNE_MSF_CALLBACK_LISTENER_BIND_ADDRESS", "0.0.0.0")
+    monkeypatch.setenv("ARIADNE_MSF_CALLBACK_LISTENER_PORT", "4444")
+    services = build_services("test", store=RunStore(base_path=tmp_path))
+    assert services.callback_binding == {
+        "advertised_address": "198.51.100.7",
+        "published_port": 4444,
+        "listener_bind_address": "0.0.0.0",
+        "listener_port": 4444,
+    }
+    session_id = "composition-callback"
+    prepared = await handle_prepare_engagement(
+        {
+            "profile": "htb",
+            "target_host": "192.0.2.19",
+            "objectives": ["proof"],
+            "autonomy": "full",
+        },
+        session_id=session_id,
+        ariadne_command=services.command,
+        consent_gateway=_AcceptingConsent(),
+    )
+    assert prepared["status"] == "active", prepared
+    _persist_checked_candidate(
+        services.command,
+        session_id,
+        callback=None,
+        callback_attestation=None,
+    )
+    monkeypatch.setattr(
+        handler_module,
+        "attest_callback_address",
+        lambda **_: CallbackAddressAttestation(
+            address="198.51.100.7",
+            target="192.0.2.19",
+            source="linux:ip-route-get+ip-addr",
+            interface="tun0",
+            route_sha256="1" * 64,
+            ownership_sha256="2" * 64,
+        ),
+    )
+    propose = _handler_for("ariadne_propose_plan", services)
+    proposed = json.loads(
+        await propose(
+            {"snapshot_hash": prepared["snapshot_hash"], "hypothesis": "checked exploit"},
+            session_id=session_id,
+        )
+    )
+    assert proposed["status"] == "plan_auto_approved"
+    record = services.command.get_plan_record(proposed["plan_id"])
+    assert record is not None
+    assert record.plan.actions[0].inputs["callback"] == services.callback_binding

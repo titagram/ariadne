@@ -1096,6 +1096,7 @@ def _attested_reverse_callback(
     candidate: dict[str, Any],
     *,
     target: str,
+    module: str,
     callback_attestation_runner: Any = None,
     callback_binding: dict[str, object] | None = None,
 ) -> tuple[dict[str, object] | None, dict[str, object] | None, str | None]:
@@ -1111,6 +1112,9 @@ def _attested_reverse_callback(
     partial ``LHOST`` from becoming a target-visible callback.
     """
     if candidate.get("requires_reverse_callback") is not True:
+        return None, None, None
+    reverse_modules = candidate.get("reverse_callback_modules")
+    if isinstance(reverse_modules, list) and reverse_modules and module not in reverse_modules:
         return None, None, None
 
     callback = candidate.get("callback") or callback_binding
@@ -2911,6 +2915,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             callback, callback_attestation, callback_error = _attested_reverse_callback(
                 selected_candidate,
                 target=plan.target.host,
+                module=selected_module,
                 callback_attestation_runner=context.get("callback_attestation_runner"),
                 callback_binding=context.get("callback_binding"),
             )

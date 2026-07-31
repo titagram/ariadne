@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -122,10 +123,35 @@ class ServiceContainer:
             )
 
 
-def build_services(profile_name: str) -> ServiceContainer:
+def build_services(
+    profile_name: str,
+    *,
+    store: RunStore | None = None,
+    ledger: ChallengeLedger | None = None,
+) -> ServiceContainer:
+    callback_values = {
+        "advertised_address": os.environ.get("ARIADNE_MSF_CALLBACK_ADVERTISED_ADDRESS"),
+        "published_port": os.environ.get("ARIADNE_MSF_CALLBACK_PUBLISHED_PORT"),
+        "listener_bind_address": os.environ.get(
+            "ARIADNE_MSF_CALLBACK_LISTENER_BIND_ADDRESS"
+        ),
+        "listener_port": os.environ.get("ARIADNE_MSF_CALLBACK_LISTENER_PORT"),
+    }
+    callback_binding = (
+        {
+            key: (int(value) if key.endswith("port") and value.isdigit() else value)
+            for key, value in callback_values.items()
+            if value is not None
+        }
+        if any(value is not None for value in callback_values.values())
+        else None
+    )
     return ServiceContainer(
         profile_name=profile_name,
+        store=store or RunStore(),
+        ledger=ledger or ChallengeLedger(),
         consent_gateway=load_hades_consent_gateway(),
+        callback_binding=callback_binding,
     )
 
 

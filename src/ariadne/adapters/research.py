@@ -774,6 +774,13 @@ class ResearchPipeline:
             modules = tuple(
                 dict.fromkeys(hit.metasploit_module for hit in group if hit.metasploit_module)
             )
+            reverse_callback_modules = tuple(
+                dict.fromkeys(
+                    hit.metasploit_module
+                    for hit in group
+                    if hit.requires_reverse_callback and hit.metasploit_module
+                )
+            )
             authoritative = bool(
                 set(sources)
                 & {
@@ -819,6 +826,7 @@ class ResearchPipeline:
                     requires_reverse_callback=any(
                         hit.requires_reverse_callback for hit in group
                     ),
+                    reverse_callback_modules=reverse_callback_modules,
                     compatible=compatible,
                     applicability_evidence=applicability_evidence,
                     validation_status=(
