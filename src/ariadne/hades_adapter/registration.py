@@ -154,6 +154,7 @@ def _handler_for(tool_name: str, services: ServiceContainer) -> object:
         context["execution_coordinator"] = services.execution_coordinator
         context["tool_card_verifier"] = services.tool_card_verifier
         context["kali_runtime_factory"] = services.kali_runtime_factory
+        context["callback_binding"] = services.callback_binding
         result = await raw(args, **context)
         return json.dumps(result)
 

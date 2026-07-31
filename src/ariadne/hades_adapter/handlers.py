@@ -1097,6 +1097,7 @@ def _attested_reverse_callback(
     *,
     target: str,
     callback_attestation_runner: Any = None,
+    callback_binding: dict[str, object] | None = None,
 ) -> tuple[dict[str, object] | None, dict[str, object] | None, str | None]:
     """Return an explicitly attested reverse callback for one candidate.
 
@@ -1112,7 +1113,7 @@ def _attested_reverse_callback(
     if candidate.get("requires_reverse_callback") is not True:
         return None, None, None
 
-    callback = candidate.get("callback")
+    callback = candidate.get("callback") or callback_binding
     if not isinstance(callback, dict) or set(callback) != {
         "advertised_address",
         "published_port",
@@ -1155,7 +1156,13 @@ def _attested_reverse_callback(
     except CallbackAttestationError as exc:
         return None, None, str(exc)
 
-    return deepcopy(callback), deepcopy(fresh_attestation.as_plan_data()), None
+    immutable_callback = {
+        "advertised_address": str(advertised),
+        "published_port": int(ports[0]),
+        "listener_bind_address": str(listener_bind),
+        "listener_port": int(ports[1]),
+    }
+    return immutable_callback, deepcopy(fresh_attestation.as_plan_data()), None
 
 
 def _latest_service_fingerprint(
@@ -2904,7 +2911,8 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             callback, callback_attestation, callback_error = _attested_reverse_callback(
                 selected_candidate,
                 target=plan.target.host,
-                callback_attestation_runner=context.get("callback_attestation_runner"),
+            callback_attestation_runner=context.get("callback_attestation_runner"),
+            callback_binding=context.get("callback_binding"),
             )
             if callback_error is not None:
                 return {

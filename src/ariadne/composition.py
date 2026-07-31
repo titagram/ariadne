@@ -79,6 +79,7 @@ class ServiceContainer:
         default_factory=lambda: ExecutionCoordinator(max_concurrency=1)
     )
     tool_card_verifier: ToolCardVerifier | None = None
+    callback_binding: dict[str, object] | None = None
     kali_runtime_factory: Callable[
         [EngagementSnapshot, Path],
         Runtime,

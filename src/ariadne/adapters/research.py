@@ -63,6 +63,7 @@ class _ResearchHit:
     exploit_path: str = ""
     metasploit_module: str = ""
     check_supported: bool = False
+    requires_reverse_callback: bool = False
     applicability_evidence: tuple[str, ...] = ()
 
     def evidence(self) -> ResearchEvidence:
@@ -343,6 +344,13 @@ class ResearchPipeline:
                             or bool(
                                 re.search(
                                     r"^\s*Check supported:\s*Yes",
+                                    info.stdout,
+                                    re.IGNORECASE | re.MULTILINE,
+                                )
+                            ),
+                            requires_reverse_callback=bool(
+                                re.search(
+                                    r"^\s*LHOST\s+",
                                     info.stdout,
                                     re.IGNORECASE | re.MULTILINE,
                                 )
@@ -808,6 +816,9 @@ class ResearchPipeline:
                     exploit_paths=exploit_paths,
                     metasploit_modules=modules,
                     check_supported=any(hit.check_supported for hit in group),
+                    requires_reverse_callback=any(
+                        hit.requires_reverse_callback for hit in group
+                    ),
                     compatible=compatible,
                     applicability_evidence=applicability_evidence,
                     validation_status=(

@@ -129,6 +129,7 @@ class ResearchCandidate(BaseModel):
     exploit_paths: tuple[str, ...] = ()
     metasploit_modules: tuple[str, ...] = ()
     check_supported: bool = False
+    requires_reverse_callback: bool = False
     compatible: bool = False
     applicability_evidence: tuple[str, ...] = ()
     validation_status: Literal["candidate", "validated"] = "candidate"

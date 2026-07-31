@@ -9,16 +9,21 @@ from pathlib import Path
 
 import pytest
 
+from ariadne.adapters import build_default_registry
+from ariadne.adapters.base import ProcessResult, ProcessSpec
 from ariadne.core.planner import Planner
 from ariadne.core.workflow import WorkflowCatalog
+from ariadne.execution.contracts import ExecutionContractRegistry, ExecutionCoordinator
 from ariadne.hades_adapter import handlers as handler_module
 from ariadne.hades_adapter.commands import AriadneCommand
 from ariadne.hades_adapter.consent import ConsentDecision
 from ariadne.hades_adapter.handlers import (
+    handle_execute_plan,
     handle_prepare_engagement,
     handle_propose_plan,
 )
 from ariadne.hades_adapter.session import ChallengeLedger
+from ariadne.runtime.docker import OnDemandKaliRuntime
 from ariadne.runtime.preflight import CallbackAddressAttestation
 from ariadne.store.run_store import ArtifactInput, Event, RunStore
 
@@ -27,6 +32,27 @@ class _AcceptingConsent:
     async def request_contract(self, summary: object) -> ConsentDecision:
         del summary
         return ConsentDecision.ACCEPT
+
+
+class _OfflineDockerRuntime:
+    """Command runtime for a deterministic Kali/Compose replay."""
+
+    def __init__(self) -> None:
+        self.calls: list[ProcessSpec] = []
+
+    async def run(self, spec: ProcessSpec) -> ProcessResult:
+        self.calls.append(spec)
+        command = " ".join(spec.argv)
+        if " image inspect " in f" {command} ":
+            image_ref = spec.argv[-1]
+            return ProcessResult(
+                exit_code=0,
+                stdout=image_ref.rsplit("sha256:", 1)[1] + "\n",
+                stderr="",
+            )
+        if "msfconsole" in spec.argv:
+            return ProcessResult(exit_code=0, stdout="Command shell session 1 opened", stderr="")
+        return ProcessResult(exit_code=0, stdout="", stderr="")
 
 
 async def _prepared_command(tmp_path: Path) -> tuple[AriadneCommand, str, str]:
@@ -262,3 +288,128 @@ async def test_reverse_callback_candidate_without_attested_binding_blocks_before
     assert proposed["status"] == "blocked"
     assert proposed["boundary"] == "metasploit_callback"
     assert proposed["plan_id"] == ""
+
+
+@pytest.mark.asyncio
+async def test_callback_plan_replays_through_guarded_ondemand_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command, session_id, snapshot_hash = await _prepared_command(tmp_path)
+    callback = {
+        "advertised_address": "198.51.100.7",
+        "published_port": 4444,
+        "listener_bind_address": "0.0.0.0",
+        "listener_port": 4444,
+    }
+    _persist_checked_candidate(
+        command,
+        session_id,
+        callback=callback,
+        callback_attestation={
+            "address": "198.51.100.7",
+            "target": "192.0.2.19",
+            "source": "linux:ip-route-get+ip-addr",
+            "interface": "tun0",
+            "route_sha256": "a" * 64,
+            "ownership_sha256": "b" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        handler_module,
+        "attest_callback_address",
+        lambda **_: CallbackAddressAttestation(
+            address="198.51.100.7",
+            target="192.0.2.19",
+            source="linux:ip-route-get+ip-addr",
+            interface="tun0",
+            route_sha256="c" * 64,
+            ownership_sha256="d" * 64,
+        ),
+    )
+    catalog = WorkflowCatalog.load(Path(__file__).parents[2] / "workflows")
+    proposed = await handle_propose_plan(
+        {"snapshot_hash": snapshot_hash, "hypothesis": "checked exploit"},
+        session_id=session_id,
+        ariadne_command=command,
+        planner=Planner(catalog),
+        catalog=catalog,
+    )
+    assert proposed["status"] == "plan_auto_approved"
+
+    docker_runtime = _OfflineDockerRuntime()
+    binding = command.get_session_binding(session_id)
+    assert binding is not None and binding.engagement_id is not None
+    run = command.store.open(binding.engagement_id)
+    assert run is not None
+    runtime = OnDemandKaliRuntime(
+        snapshot=run.snapshot,
+        run_root=run.path,
+        command_runtime=docker_runtime,
+        docker_locator=lambda _: "/usr/local/bin/docker",
+        kali_image_ref=(
+            "ariadne-kali@sha256:38348d7ab556982555ffcea3fcfd0aa9ffaa30286ce4fcc3802cb92aa2c15b67"
+        ),
+        netguard_image_ref=(
+            "ariadne-netguard@sha256:0da048944617b30d54d330d8fd983924ccc2bef45205e901f467229808a95789"
+        ),
+    )
+    result = await handle_execute_plan(
+        {"plan_id": proposed["plan_id"]},
+        session_id=session_id,
+        ariadne_command=command,
+        adapter_registry=build_default_registry(),
+        runtime=runtime,
+        execution_contract_registry=ExecutionContractRegistry.curated(),
+        execution_coordinator=ExecutionCoordinator(1),
+        catalog=catalog,
+    )
+
+    assert result["status"] == "executed"
+    assert any("msfconsole" in spec.argv for spec in docker_runtime.calls)
+
+
+@pytest.mark.asyncio
+async def test_callback_binding_can_be_supplied_by_trusted_composition_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command, session_id, snapshot_hash = await _prepared_command(tmp_path)
+    _persist_checked_candidate(command, session_id, callback=None, callback_attestation=None)
+    monkeypatch.setattr(
+        handler_module,
+        "attest_callback_address",
+        lambda **_: CallbackAddressAttestation(
+            address="198.51.100.7",
+            target="192.0.2.19",
+            source="linux:ip-route-get+ip-addr",
+            interface="tun0",
+            route_sha256="e" * 64,
+            ownership_sha256="f" * 64,
+        ),
+    )
+    catalog = WorkflowCatalog.load(Path(__file__).parents[2] / "workflows")
+    proposed = await handle_propose_plan(
+        {"snapshot_hash": snapshot_hash, "hypothesis": "checked exploit"},
+        session_id=session_id,
+        ariadne_command=command,
+        planner=Planner(catalog),
+        catalog=catalog,
+        callback_binding={
+            "advertised_address": "198.51.100.7",
+            "published_port": 4444,
+            "listener_bind_address": "0.0.0.0",
+            "listener_port": 4444,
+        },
+    )
+
+    assert proposed["status"] == "plan_auto_approved"
+    record = command.get_plan_record(proposed["plan_id"])
+    assert record is not None
+    action = record.plan.actions[0]
+    assert action.inputs["callback"] == {
+        "advertised_address": "198.51.100.7",
+        "published_port": 4444,
+        "listener_bind_address": "0.0.0.0",
+        "listener_port": 4444,
+    }
