@@ -34,7 +34,10 @@ from ariadne.core.workflow import (
 )
 from ariadne.hades_adapter.commands import CURRENT_DISCLAIMER_VERSION
 from ariadne.hades_adapter.consent import ConsentDecision
-from ariadne.hades_adapter.handlers import _exclusion_conflict
+from ariadne.hades_adapter.handlers import (
+    _determine_engagement_state,
+    _exclusion_conflict,
+)
 from ariadne.hades_adapter.registration import _handler_for
 from ariadne.knowledge import (
     KnowledgeIndex,
@@ -235,9 +238,11 @@ class FilteredDiscoveryRuntime(DryRunRuntime):
 class ProviderFallbackRuntime(ProcessRunner):
     def __init__(self) -> None:
         self.argv_calls: list[tuple[str, ...]] = []
+        self.specs: list[object] = []
 
     async def run(self, spec) -> ProcessResult:
         self.argv_calls.append(tuple(spec.argv))
+        self.specs.append(spec)
         if spec.argv[0] == "curl":
             return ProcessResult(
                 exit_code=0,
@@ -982,6 +987,13 @@ def test_evidence_driven_foothold_replay_uses_guarded_runtime_end_to_end(
         "nmap",
     ]
     assert not any(event["event_type"] == "process_authorization_blocked" for event in events)
+    assert any(
+        event["event_type"] == "evidence_collected"
+        and event["payload"]["evidence_type"] == "foothold_established"
+        and event["payload"]["observation_data"].get("method") == "ssh_password"
+        and isinstance(event["payload"]["observation_data"].get("uid"), int)
+        for event in events
+    )
     assert {
         event["payload"]["objective_kind"]
         for event in events
@@ -1027,6 +1039,148 @@ def test_evidence_driven_foothold_replay_uses_guarded_runtime_end_to_end(
     assert root_flag.encode() not in generic_content
     assert user_flag in (handle.path / "walkthrough.md").read_text(encoding="utf-8")
     assert root_flag in (handle.path / "professional.html").read_text(encoding="utf-8")
+
+
+def test_sanitized_false_foothold_replay_stays_non_ssh_in_guarded_handler(
+    tmp_path: Path,
+) -> None:
+    """False Metasploit/Nuclei/browser evidence must not invoke SSH on replay."""
+    def replay_playbook(
+        identifier: str,
+        capability: str,
+        adapter: str,
+        operation: str,
+        inputs: dict[str, object],
+    ) -> Playbook:
+        return Playbook(
+            id=identifier,
+            version=1,
+            stage="enumeration",
+            triggers=(Trigger(kind="observation_type", types=("web_paths",)),),
+            required_evidence_types=frozenset({"web_paths"}),
+            capabilities=frozenset({capability}),
+            actions=(PlaybookAction(adapter=adapter, operation=operation, inputs=inputs),),
+            limits=PlaybookLimits(
+                max_rate=5,
+                max_concurrency=1,
+                max_attempts=1,
+                max_duration_seconds=30,
+                max_output_bytes=64 * 1024,
+            ),
+            stop_conditions=("synthetic_replay",),
+            success_emits=(),
+            next_playbooks=(),
+            report_sections=("evidence",),
+        )
+
+    fallback = replay_playbook(
+        "web.safe-fallback.v1",
+        "web.content_discovery",
+        "curl",
+        "fetch",
+        {"timeout": 5, "max_output": 64 * 1024},
+    )
+    ssh = replay_playbook(
+        "foothold.ssh-credentials.v1", "foothold.ssh", "ssh", "authenticate", {}
+    )
+    runtime = ProviderFallbackRuntime()
+    registry = AdapterRegistry()
+    registry.register("curl", CurlAdapter())
+    registry.register("ssh", SshAdapter())
+    registry.default_runtime = runtime
+    services = ServiceContainer(
+        profile_name="proof-replay",
+        store=RunStore(base_path=tmp_path),
+        catalog=WorkflowCatalog(playbooks={fallback.id: fallback, ssh.id: ssh}),
+        adapter_registry=registry,
+        consent_gateway=AcceptContract(),
+    )
+    object.__setattr__(services, "tool_card_verifier", None)
+    prepare = _handler_for("ariadne_prepare_engagement", services)
+    run = _handler_for("ariadne_run", services)
+
+    async def replay() -> tuple[dict[str, object], object]:
+        created = json.loads(
+            await prepare(
+                {
+                    "profile": "htb",
+                    "target_host": "192.0.2.10",
+                    "objectives": ["user_flag", "root_flag"],
+                    "autonomy": "controlled",
+                    "intensity": "normal",
+                    "exclusions": ["dos"],
+                    "time_window_minutes": 30,
+                },
+                session_id="sanitized-proof-replay",
+            )
+        )
+        assert created["status"] == "active"
+        binding = services.command.get_session_binding("sanitized-proof-replay")
+        assert binding is not None and binding.engagement_id is not None
+        handle = services.store.open(binding.engagement_id)
+        assert handle is not None
+        sanitized = json.loads(
+            (
+                Path(__file__).parents[1]
+                / "fixtures/scenarios/sanitized-events-194-216.json"
+            ).read_text(encoding="utf-8")
+        )
+        seed_events = (
+            (
+                "web_paths",
+                {"type": "web_paths", "url": "http://192.0.2.10/", "path": "/"},
+            ),
+            (
+                "service_fingerprinted",
+                {
+                    "type": "service_fingerprinted",
+                    "service": "ssh",
+                    "protocol": "tcp",
+                    "port": 22,
+                    "state": "open",
+                },
+            ),
+            *(
+                (item["evidence_type"], item["observation_data"])
+                for item in sanitized
+                if item["event_type"] == "evidence_collected"
+            ),
+        )
+        for evidence_type, observation_data in seed_events:
+            services.store.append_event(
+                handle,
+                Event(
+                    event_type="evidence_collected",
+                    payload={
+                        "evidence_type": evidence_type,
+                        "asset": "192.0.2.10",
+                        "source": "sanitized:events-194-216",
+                        "execution_classification": "success",
+                        "observation_data": observation_data,
+                    },
+                    timestamp=datetime.now(UTC),
+                ),
+            )
+        return (
+            json.loads(await run({"max_steps": 1}, session_id="sanitized-proof-replay")),
+            handle,
+        )
+
+    result, handle = asyncio.run(replay())
+    state, observations = _determine_engagement_state(services.store, handle)
+
+    assert result["boundary"] == "safety_step_limit", result
+    assert state.value == "enumeration"
+    assert not any(observation.source == "exploit_succeeded" for observation in observations)
+    assert not any(observation.source == "vulnerability_validated" for observation in observations)
+    assert not any(
+        observation.source == "foothold_established"
+        and observation.data.get("method") == "ssh_password"
+        for observation in observations
+    )
+    assert [argv[0] for argv in runtime.argv_calls] == ["curl"]
+    assert runtime.specs
+    assert not any(argv[0] == "ssh" for argv in runtime.argv_calls)
 
 
 @pytest.mark.asyncio
