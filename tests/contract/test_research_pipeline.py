@@ -94,6 +94,7 @@ class _StructuredResearchRuntime:
                         "Name: Apache Normalization Path Traversal\n"
                         "Module: exploit/multi/http/apache_normalize_path\n"
                         "Check supported: Yes\n"
+                        "LHOST                    0.0.0.0\n"
                         "References:\n  CVE-2021-41773\n"
                     ),
                     stderr="",
@@ -238,6 +239,7 @@ class TestResearchOrderAndPrivacy:
         assert candidate.compatible is True
         assert candidate.applicability_evidence == ("nvd-description:version=2.4.49",)
         assert candidate.metasploit_modules == ("exploit/multi/http/apache_normalize_path",)
+        assert candidate.requires_reverse_callback is True
         assert set(candidate.sources) == {
             ResearchSource.LOCAL_SEARCHSPLOIT,
             ResearchSource.NVD,
