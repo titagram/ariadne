@@ -314,7 +314,9 @@ class OnDemandKaliRuntime:
         self._started = False
         self._start_lock = asyncio.Lock()
         # Serializes mutable Compose lifecycle state (ports, callback override,
-        # and startup). Command execution remains independently bounded.
+        # and startup). Reverse-handler execution also holds this lock for the
+        # lifetime of the msfconsole process so inspection cannot reconfigure
+        # the stack while a callback listener is in flight.
         self._lifecycle_lock = asyncio.Lock()
         self._metasploit_callback: _MetasploitCallback | None = None
         self._planned_target_ports: set[tuple[str, str]] = set()
@@ -341,20 +343,46 @@ class OnDemandKaliRuntime:
         )
 
     async def run(self, spec: ProcessSpec) -> ProcessResult:
+        # Validate and materialize guarded environment bindings before any
+        # Docker lifecycle work, preserving the fail-closed preflight path.
+        container_environment = self._container_environment(spec)
+        # A callback handler changes the published Compose port and must remain
+        # mutually exclusive with inspection/reconfiguration until msfconsole
+        # exits. Ordinary commands retain the previous setup-only lock scope.
+        holds_lifecycle_lock = self._is_callback_execution(spec)
+        if holds_lifecycle_lock:
+            async with self._lifecycle_lock:
+                await self._prepare_run(spec)
+                return await self._execute(spec, container_environment)
         async with self._lifecycle_lock:
-            await self._configure_metasploit_callback(spec)
-            container_environment = self._container_environment(spec)
-            self._bind_planned_ports(spec)
-            await self._ensure_started(
-                timeout_seconds=min(
-                    float(spec.timeout_seconds),
-                    float(self._STARTUP_TIMEOUT_SECONDS),
-                )
+            await self._prepare_run(spec)
+        return await self._execute(spec, container_environment)
+
+    @staticmethod
+    def _is_callback_execution(spec: ProcessSpec) -> bool:
+        return bool(spec.argv) and spec.argv[0] == "msfconsole" and all(
+            key in spec.environment for key in _MSF_CALLBACK_ENV_KEYS
+        )
+
+    async def _prepare_run(self, spec: ProcessSpec) -> None:
+        await self._configure_metasploit_callback(spec)
+        self._bind_planned_ports(spec)
+        await self._ensure_started(
+            timeout_seconds=min(
+                float(spec.timeout_seconds),
+                float(self._STARTUP_TIMEOUT_SECONDS),
             )
-            if self._metasploit_callback is not None and spec.argv[0] == "msfconsole":
-                await self._reject_container_bridge_callback()
-            if spec.argv[0] == "nuclei":
-                await self._attest_nuclei(spec)
+        )
+        if self._metasploit_callback is not None and spec.argv[0] == "msfconsole":
+            await self._reject_container_bridge_callback()
+        if spec.argv[0] == "nuclei":
+            await self._attest_nuclei(spec)
+
+    async def _execute(
+        self,
+        spec: ProcessSpec,
+        container_environment: dict[str, str],
+    ) -> ProcessResult:
         command = [
             *self._compose_prefix(),
             "exec",
