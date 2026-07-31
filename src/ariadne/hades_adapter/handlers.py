@@ -657,9 +657,27 @@ def _determine_engagement_state(
         or "postex_complete" in evidence_types
     ):
         return EngagementState.PRIVILEGE_ESCALATION, tuple(observations)
-    if "foothold_established" in evidence_types:
+    validated_nuclei = any(
+        observation.source == "vulnerability_validated"
+        and str(observation.data.get("severity", "")).casefold()
+        in {"critical", "high", "medium", "low"}
+        for observation in observations
+    )
+    session_proven = any(
+        observation.source == "exploit_succeeded"
+        and observation.data.get("session_opened") is True
+        for observation in observations
+    )
+    ssh_foothold_proven = any(
+        observation.source == "foothold_established"
+        and observation.data.get("method") == "ssh_password"
+        and isinstance(observation.data.get("username"), str)
+        and isinstance(observation.data.get("uid"), int)
+        for observation in observations
+    )
+    if ssh_foothold_proven:
         return EngagementState.POST_EXPLOITATION, tuple(observations)
-    if "vulnerability_validated" in evidence_types or "exploit_succeeded" in evidence_types:
+    if validated_nuclei or session_proven:
         return EngagementState.FOOTHOLD, tuple(observations)
     target = (
         run_handle.snapshot.targets[0]
@@ -792,6 +810,8 @@ def _typed_progression_observations(
                 and observation.data.get("template_id") in validated_templates
                 and isinstance(observation.data.get("matched_at"), str)
                 and bool(observation.data.get("matched_at"))
+                and str(observation.data.get("severity", "")).casefold()
+                in {"critical", "high", "medium", "low"}
             ):
                 add("vulnerability_validated", observation)
 
@@ -829,22 +849,6 @@ def _typed_progression_observations(
             parameters = observation.data.get("parameters")
             if isinstance(parameters, (list, tuple)) and parameters:
                 add("web_parameters", observation)
-
-    if (
-        playbook_id == "foothold.confirmation.v1"
-        and adapter == "screenshot"
-        and operation == "capture"
-        and action_inputs.get("proof_kind") == "initial_access"
-    ):
-        for observation in observations:
-            proof_path = observation.data.get("path")
-            if (
-                observation.target == target
-                and observation.source == "screenshot"
-                and isinstance(proof_path, str)
-                and Path(proof_path).is_file()
-            ):
-                add("foothold_established", observation)
 
     if adapter == "postex":
         for observation in observations:
@@ -2127,6 +2131,11 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         observations,
         first_target,
     )
+    protected_credential = _protected_credential(
+        observations,
+        first_target,
+        run_handle,
+    )
     eligible = tuple(
         playbook
         for playbook in eligible
@@ -2167,7 +2176,10 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         )
         and (
             playbook.id != "foothold.ssh-credentials.v1"
-            or _observed_ssh_port(observations, first_target) is not None
+            or (
+                _observed_ssh_port(observations, first_target) is not None
+                and protected_credential is not None
+            )
         )
     )
     if "web.object-reference.v1" in executed_playbooks and object_reference_urls:
@@ -3650,33 +3662,6 @@ async def handle_execute_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 observations=observations,
                 classification_kind=classification.kind,
             )
-            if (
-                action.adapter == "screenshot"
-                and classification.kind == "success"
-                and isinstance(action.inputs.get("proof_kind"), str)
-                and action.inputs["proof_kind"].strip()
-            ):
-                observations = tuple(
-                    observation.model_copy(
-                        update={
-                            "data": {
-                                **observation.data,
-                                "objective_proof": {
-                                    "kind": action.inputs["proof_kind"],
-                                    "description": str(
-                                        action.inputs.get(
-                                            "proof_description",
-                                            "",
-                                        )
-                                    ),
-                                    "proof": str(observation.data.get("path", "")),
-                                },
-                            },
-                        },
-                    )
-                    for observation in observations
-                )
-
             # Collect evidence
             evidence_collector = EvidenceCollector(
                 snapshot_hash=record.snapshot_hash,
@@ -4529,9 +4514,16 @@ async def handle_run_engagement(
                     ),
                     "fallback_details": proposed,
                 })
+            boundary = str(proposed.get("boundary", "no_eligible_plan"))
+            _record_dead_end_once(
+                cmd.store,
+                run_handle,
+                boundary=boundary,
+                state=state,
+            )
             return finish({
                 "status": "blocked",
-                "boundary": proposed.get("boundary", "no_eligible_plan"),
+                "boundary": boundary,
                 "message": proposed.get("message", "No eligible plan."),
                 "details": proposed,
             })
@@ -4550,9 +4542,16 @@ async def handle_run_engagement(
             ):
                 last_provider_boundary = executed
                 continue
+            boundary = str(executed.get("boundary", "manual_choice"))
+            _record_dead_end_once(
+                cmd.store,
+                run_handle,
+                boundary=boundary,
+                state=state,
+            )
             return finish({
                 **executed,
-                "boundary": executed.get("boundary", "manual_choice"),
+                "boundary": boundary,
                 "steps": step,
             })
         last_provider_boundary = None
@@ -4604,6 +4603,12 @@ async def handle_run_engagement(
                         "A targeted amendment is required before sending traffic."
                     ),
                 })
+            _record_dead_end_once(
+                cmd.store,
+                run_handle,
+                boundary="execution_failure",
+                state=state,
+            )
             return finish({
                 "status": "blocked",
                 "boundary": "execution_failure",
@@ -4623,6 +4628,37 @@ async def handle_run_engagement(
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────
+
+
+def _record_dead_end_once(
+    store: RunStore,
+    run_handle: RunHandle,
+    *,
+    boundary: str,
+    state: EngagementState,
+) -> None:
+    """Persist one terminal record for an unchanged workflow boundary."""
+    signature = canonical_digest(
+        {
+            "boundary": boundary,
+            "snapshot_hash": run_handle.snapshot.snapshot_hash,
+            "state": state.value,
+        }
+    )
+    if any(
+        event.get("event_type") == "dead_end"
+        and event.get("payload", {}).get("signature") == signature
+        for event in store.read_events(run_handle)
+    ):
+        return
+    store.append_event(
+        run_handle,
+        Event(
+            event_type="dead_end",
+            payload={"boundary": boundary, "signature": signature, "state": state.value},
+            timestamp=datetime.now(UTC),
+        ),
+    )
 
 
 def _get_run_handle(store: RunStore, engagement_id: Any) -> RunHandle | None:

@@ -352,12 +352,12 @@ class MetasploitAdapter:
         if "run" in commands:
             succeeded = bool(
                 re.search(
-                    r"(?:meterpreter|command shell|session \d+) session "
-                    r"(?:opened|created)",
+                    r"(?:(?:meterpreter|command shell)(?: session \d+)?|session \d+) "
+                    r"(?:session )?(?:opened|created)",
                     output,
                 )
             )
-            source = "exploit_succeeded" if succeeded else "metasploit_run"
+            source = "exploit_succeeded" if succeeded else "exploit_no_session"
             return (
                 Observation(
                     observation_id=uuid4(),

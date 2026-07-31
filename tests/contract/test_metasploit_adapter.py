@@ -231,6 +231,62 @@ class TestMetasploitParse:
         obs = MetasploitAdapter().parse(result)
         assert obs == ()
 
+    def test_run_without_a_session_is_explicitly_not_an_exploit_success(
+        self,
+        context: AdapterContext,
+    ) -> None:
+        """Classifying a no-session run as success would falsely advance foothold."""
+        candidate = validated_candidate()
+        spec = MetasploitAdapter().plan(
+            action(
+                "run_module",
+                module=candidate["module"],
+                validated_candidate=candidate,
+                check_status="vulnerable",
+                check_evidence_id="evidence-msf-check-1",
+            ),
+            context,
+        )
+
+        observations = MetasploitAdapter().parse_for_spec(
+            ProcessResult(
+                exit_code=0,
+                stdout="Exploit completed, but no session was created.",
+                stderr="",
+            ),
+            context.target,
+            spec,
+        )
+
+        assert observations[0].source == "exploit_no_session"
+        assert observations[0].data["session_opened"] is False
+
+    def test_run_with_observed_session_emits_session_proof(
+        self,
+        context: AdapterContext,
+    ) -> None:
+        """Removing session evidence must prevent the exploit progression branch."""
+        candidate = validated_candidate()
+        spec = MetasploitAdapter().plan(
+            action(
+                "run_module",
+                module=candidate["module"],
+                validated_candidate=candidate,
+                check_status="vulnerable",
+                check_evidence_id="evidence-msf-check-1",
+            ),
+            context,
+        )
+
+        observations = MetasploitAdapter().parse_for_spec(
+            ProcessResult(exit_code=0, stdout="Command shell session 1 opened", stderr=""),
+            context.target,
+            spec,
+        )
+
+        assert observations[0].source == "exploit_succeeded"
+        assert observations[0].data["session_opened"] is True
+
     def test_parse_search_results(self) -> None:
         stdout = (
             "\n"
