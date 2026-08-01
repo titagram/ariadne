@@ -18,6 +18,8 @@ ARIADNE_TOOLS: frozenset[str] = frozenset({
     "ariadne_status",
     "ariadne_amend_engagement",
     "ariadne_propose_plan",
+    "ariadne_list_capabilities",
+    "ariadne_execute_action",
     "ariadne_strategy_hint",
     "ariadne_execute_plan",
     "ariadne_run",

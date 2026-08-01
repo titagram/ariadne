@@ -11,6 +11,6 @@ provenance:
   - source.nmap.official
 ---
 
-Start with the least invasive bounded discovery needed to identify reachable
+Start with the most effective discovery needed to identify reachable
 services on the locked target. Preserve evidence before selecting a narrower
 enumeration technique.

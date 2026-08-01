@@ -12,7 +12,9 @@ from typing import Any
 from ariadne.composition import ServiceContainer
 from ariadne.hades_adapter.handlers import (
     handle_amend_engagement,
+    handle_execute_action,
     handle_execute_plan,
+    handle_list_capabilities,
     handle_prepare_engagement,
     handle_propose_plan,
     handle_render_report,
@@ -167,6 +169,8 @@ _HANDLER_MAP: dict[str, Any] = {
     "ariadne_status": handle_status,
     "ariadne_amend_engagement": handle_amend_engagement,
     "ariadne_propose_plan": handle_propose_plan,
+    "ariadne_list_capabilities": handle_list_capabilities,
+    "ariadne_execute_action": handle_execute_action,
     "ariadne_strategy_hint": handle_strategy_hint,
     "ariadne_execute_plan": handle_execute_plan,
     "ariadne_run": handle_run_engagement,

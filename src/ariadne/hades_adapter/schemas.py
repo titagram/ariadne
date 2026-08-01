@@ -221,6 +221,51 @@ PROPOSE_PLAN_SCHEMA = _build_schema(
     "receive trusted Hades consent.",
 )
 
+
+class ListCapabilitiesInput(BaseModel):
+    """Request the currently registered curated capability inventory."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+LIST_CAPABILITIES_SCHEMA = _build_schema(
+    ListCapabilitiesInput,
+    "List real curated adapter operations available for in-scope JIT composition. "
+    "Inventory is not execution authorization.",
+)
+
+
+class ExecuteActionInput(BaseModel):
+    """A typed request for one in-scope JIT action envelope."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    snapshot_hash: str = Field(..., min_length=64, max_length=64)
+    target: str | None = Field(default=None, min_length=1, max_length=255)
+    service_ref: str | None = Field(default=None, min_length=1, max_length=255)
+    capability: str = Field(..., min_length=1, max_length=120)
+    adapter: str = Field(..., min_length=1, max_length=120)
+    operation: str = Field(..., min_length=1, max_length=120)
+    inputs: dict[str, object] = Field(default_factory=dict)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=100)
+    expected_evidence: list[str] = Field(default_factory=list, max_length=50)
+    stop_conditions: list[str] = Field(default_factory=list, max_length=50)
+    limits: dict[str, int] = Field(default_factory=dict)
+    rationale: str = Field(..., min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def _requires_target_reference(self) -> ExecuteActionInput:
+        if self.target is None and self.service_ref is None:
+            raise ValueError("target or service_ref is required")
+        return self
+
+
+EXECUTE_ACTION_SCHEMA = _build_schema(
+    ExecuteActionInput,
+    "Create, auto-approve, and execute one typed in-scope JIT action through "
+    "a curated adapter and GuardedRuntime. Raw shell and argv are not accepted.",
+)
+
 # ── ariadne_strategy_hint ──────────────────────────────────────────────
 
 
@@ -386,6 +431,20 @@ ARIADNE_TOOLS: dict[str, ToolRegistration] = {
         handler=None,
         description="Propose a bounded action plan for the current engagement",
         emoji="📝",
+    ),
+    "ariadne_list_capabilities": ToolRegistration(
+        name="ariadne_list_capabilities",
+        schema=LIST_CAPABILITIES_SCHEMA,
+        handler=None,
+        description="List curated adapter capabilities for JIT composition",
+        emoji="🧰",
+    ),
+    "ariadne_execute_action": ToolRegistration(
+        name="ariadne_execute_action",
+        schema=EXECUTE_ACTION_SCHEMA,
+        handler=None,
+        description="Execute one typed, in-policy JIT action",
+        emoji="⚙️",
     ),
     "ariadne_strategy_hint": ToolRegistration(
         name="ariadne_strategy_hint",

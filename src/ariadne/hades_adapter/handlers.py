@@ -16,7 +16,7 @@ import json
 import re
 import shutil
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urljoin, urlsplit
@@ -47,10 +47,10 @@ from ariadne.core.observations import (
     create_scope_candidate,
     discovered_asset_status,
 )
-from ariadne.core.planner import Planner
+from ariadne.core.planner import Plan, PlannedAction, Planner
 from ariadne.core.policy import EffectivePolicy
 from ariadne.core.timing import admitted_duration_seconds
-from ariadne.core.workflow import PlanningContext, Playbook, WorkflowCatalog
+from ariadne.core.workflow import PlanningContext, Playbook, PlaybookLimits, WorkflowCatalog
 from ariadne.evidence.collector import EvidenceCollector
 from ariadne.execution.contracts import (
     AuthorizationReason,
@@ -668,8 +668,7 @@ def _determine_engagement_state(
         for observation in observations
     )
     session_proven = any(
-        observation.source == "exploit_succeeded"
-        and observation.data.get("session_opened") is True
+        observation.source == "exploit_succeeded" and observation.data.get("session_opened") is True
         for observation in observations
     )
     ssh_foothold_proven = any(
@@ -1377,9 +1376,7 @@ def _observed_fetched_web_asset(
         observation.target == target
         and observation.data.get("fetched") is True
         and isinstance(observation.data.get("path"), str)
-        and observation.data["path"].casefold().endswith(
-            (".js", ".json", ".map", ".xml")
-        )
+        and observation.data["path"].casefold().endswith((".js", ".json", ".map", ".xml"))
         for observation in observations
     )
 
@@ -1753,10 +1750,7 @@ async def handle_prepare_engagement(args: dict[str, Any], **context: Any) -> dic
     answers = validated.model_dump()
     if answers["time_window_minutes"] is None:
         answers["time_window_minutes"] = (
-            120
-            if answers["profile"] in {"htb", "ctf"}
-            and answers["autonomy"] == "full"
-            else 60
+            120 if answers["profile"] in {"htb", "ctf"} and answers["autonomy"] == "full" else 60
         )
     default_rate, default_concurrency = intensity_default_limits(answers["intensity"])
     answers["max_requests_per_second"] = default_rate
@@ -2024,6 +2018,311 @@ async def handle_status(args: dict[str, Any], **context: Any) -> dict[str, Any]:
     }
 
 
+_CAPABILITY_OPERATION_METADATA: dict[tuple[str, str], dict[str, Any]] = {
+    ("nmap", "tcp_discovery"): {
+        "capability": "scan.tcp",
+        "required_inputs": ("ports",),
+        "expected_evidence": ("port_open",),
+        "service_compatibility": ("any_tcp",),
+    },
+    ("nmap", "service_fingerprint"): {
+        "capability": "service.enum",
+        "required_inputs": ("ports",),
+        "expected_evidence": ("service_fingerprinted",),
+        "service_compatibility": ("observed_tcp",),
+    },
+    ("nmap", "udp_targeted"): {
+        "capability": "scan.udp",
+        "required_inputs": ("ports",),
+        "expected_evidence": ("port_open",),
+        "service_compatibility": ("known_udp",),
+    },
+    ("research", "investigate"): {
+        "capability": "research.vulnerability",
+        "required_inputs": ("fingerprint",),
+        "expected_evidence": ("research_complete",),
+        "service_compatibility": ("fingerprinted_service",),
+    },
+    ("httpx", "scan"): {
+        "capability": "web.fingerprint",
+        "required_inputs": ("ports",),
+        "expected_evidence": ("web_technologies",),
+        "service_compatibility": ("http", "https"),
+    },
+    ("curl", "fetch"): {
+        "capability": "web.content_discovery",
+        "required_inputs": (),
+        "expected_evidence": ("web_paths",),
+        "service_compatibility": ("http", "https"),
+    },
+    ("katana", "crawl"): {
+        "capability": "web.crawl",
+        "required_inputs": (),
+        "expected_evidence": ("web_paths",),
+        "service_compatibility": ("http", "https"),
+    },
+    ("nuclei", "scan"): {
+        "capability": "exploit.validation",
+        "required_inputs": (),
+        "expected_evidence": ("validated_finding",),
+        "service_compatibility": ("fingerprinted_service",),
+    },
+}
+
+_ADAPTER_TOOL_CARDS: dict[str, str] = {
+    "nmap": "tool.nmap",
+    "research": "tool.searchsploit",
+    "httpx": "tool.httpx-toolkit",
+    "curl": "tool.curl",
+    "nuclei": "tool.nuclei",
+}
+
+
+async def handle_list_capabilities(args: dict[str, Any], **context: Any) -> dict[str, Any]:
+    """Expose registered curated operations for playbook-independent composition."""
+    if args:
+        return {"status": "error", "message": "Capability inventory takes no arguments."}
+    registry = _get_adapter_registry(context)
+    contracts = context.get("execution_contract_registry")
+    if not isinstance(contracts, ExecutionContractRegistry):
+        contracts = ExecutionContractRegistry.curated()
+    tool_status: dict[str, bool] = {}
+    try:
+        from ariadne.knowledge import KnowledgeIndex
+
+        index = KnowledgeIndex.load(Path(__file__).resolve().parents[3] / "knowledge")
+        tool_status = {
+            node_id: node.status == "runtime_verified"
+            for node_id, node in index.nodes.items()
+            if node.kind.value == "tool"
+        }
+    except Exception:
+        # Knowledge state is reported, never used to widen executable surface.
+        pass
+
+    capabilities: list[dict[str, Any]] = []
+    for (adapter_name, operation), contract in sorted(contracts.contracts.items()):
+        if registry.get(adapter_name) is None:
+            continue
+        metadata = _CAPABILITY_OPERATION_METADATA.get((adapter_name, operation))
+        if metadata is None:
+            continue
+        tool_card_id = _ADAPTER_TOOL_CARDS.get(adapter_name, "")
+        capabilities.append(
+            {
+                "capability": metadata["capability"],
+                "adapter": adapter_name,
+                "operation": operation,
+                "runtime": "local_or_kali",
+                "tool_card_id": tool_card_id,
+                "runtime_verified": tool_status.get(tool_card_id, False),
+                "required_inputs": list(metadata["required_inputs"]),
+                "limits": {
+                    "max_rate": contract.max_rate,
+                    "max_concurrency": contract.max_concurrency,
+                    "max_attempts": contract.max_attempts,
+                    "max_duration_seconds": contract.max_duration_seconds,
+                    "max_output_bytes": contract.max_output_bytes,
+                },
+                "expected_evidence": list(metadata["expected_evidence"]),
+                "hard_constraints": [
+                    "target_must_match_snapshot",
+                    "adapter_operation_must_match_execution_contract",
+                    "typed_inputs_only",
+                    "evidence_refs_must_be_persisted",
+                ],
+                "service_compatibility": list(metadata["service_compatibility"]),
+            }
+        )
+    return {"status": "ok", "capabilities": capabilities}
+
+
+async def handle_execute_action(args: dict[str, Any], **context: Any) -> dict[str, Any]:
+    """Create one durable, guarded JIT plan from a typed capability request."""
+    forbidden = {"argv", "shell", "command"} & set(args)
+    if forbidden:
+        return {
+            "status": "error",
+            "message": f"Raw execution fields are forbidden: {sorted(forbidden)}",
+        }
+    from ariadne.hades_adapter.schemas import ExecuteActionInput
+
+    try:
+        request = ExecuteActionInput.model_validate(args)
+    except ValidationError as exc:
+        return {"status": "error", "message": f"Invalid JIT action: {exc}"}
+    if {"argv", "shell", "command"} & set(request.inputs):
+        return {"status": "error", "message": "Raw execution fields are forbidden in inputs."}
+
+    cmd = _get_command(context)
+    session_id = context.get("session_id", "")
+    binding = _get_binding(cmd, session_id)
+    if binding is None or binding["engagement_id"] is None:
+        return {"status": "error", "message": "No active engagement."}
+    if request.snapshot_hash != binding["snapshot_hash"]:
+        return {"status": "error", "message": "Snapshot hash does not match the active engagement."}
+    run_handle = _get_run_handle(cmd.store, binding["engagement_id"])
+    if run_handle is None:
+        return {"status": "error", "message": "Active engagement is unavailable."}
+    target = run_handle.snapshot.targets[0]
+    if request.target is not None and request.target != target.host:
+        return {
+            "status": "blocked",
+            "boundary": "target_scope",
+            "message": "Target must match snapshot.",
+        }
+    if request.service_ref is not None and request.service_ref != target.host:
+        return {
+            "status": "blocked",
+            "boundary": "service_scope",
+            "message": "service_ref must resolve to the snapshot target.",
+        }
+    metadata = _CAPABILITY_OPERATION_METADATA.get((request.adapter, request.operation))
+    if metadata is None or request.capability != metadata["capability"]:
+        return {
+            "status": "blocked",
+            "boundary": "capability_unavailable",
+            "message": "No curated capability operation matches this request.",
+        }
+    contracts = _get_execution_contract_registry(context)
+    contract = contracts.get(request.adapter, request.operation)
+    registry = _get_adapter_registry(context)
+    if contract is None or registry.get(request.adapter) is None:
+        return {
+            "status": "blocked",
+            "boundary": "capability_unavailable",
+            "message": "Adapter operation is not curated and registered.",
+        }
+    for value in request.inputs.values():
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            parsed = urlsplit(value)
+            if (
+                parsed.hostname != target.host
+                or parsed.username
+                or parsed.password
+                or parsed.fragment
+            ):
+                return {
+                    "status": "blocked",
+                    "boundary": "target_scope",
+                    "message": "URLs must be target-bound.",
+                }
+    events = cmd.store.read_events(run_handle)
+    persisted_refs = {
+        str(value)
+        for event in events
+        for value in (
+            event.get("payload", {}).get("evidence_id"),
+            event.get("payload", {}).get("artifact"),
+        )
+        if value
+    }
+    if any(reference not in persisted_refs for reference in request.evidence_refs):
+        return {
+            "status": "blocked",
+            "boundary": "evidence_reference",
+            "message": "Evidence references must be persisted in this run.",
+        }
+    try:
+        policy = _load_engagement_policy(run_handle.snapshot)
+    except PolicyConfigurationError as exc:
+        return {"status": "error", "message": f"Policy provenance check failed: {exc}"}
+    rule = policy.capabilities.get(request.capability)
+    if rule is None or not rule.allowed:
+        return {
+            "status": "blocked",
+            "boundary": "policy",
+            "message": "Capability is not allowed by effective policy.",
+        }
+    limits = Planner._intersect_limits(  # noqa: SLF001 - same policy intersection as catalog plans
+        PlaybookLimits(
+            max_rate=request.limits.get("max_rate", contract.max_rate),
+            max_concurrency=request.limits.get("max_concurrency", contract.max_concurrency),
+            max_attempts=request.limits.get("max_attempts", contract.max_attempts),
+            max_duration_seconds=request.limits.get(
+                "max_duration_seconds", contract.max_duration_seconds
+            ),
+            max_output_bytes=request.limits.get("max_output_bytes", contract.max_output_bytes),
+        ),
+        policy,
+        frozenset({request.capability}),
+    )
+    now = datetime.now(UTC)
+    plan = Plan(
+        plan_id=str(uuid4()),
+        snapshot_hash=run_handle.snapshot.snapshot_hash,
+        target=target,
+        hypothesis=request.rationale,
+        playbook_id=f"jit.{request.adapter}.{request.operation}",
+        capabilities=(request.capability,),
+        actions=(
+            PlannedAction(
+                adapter=request.adapter, operation=request.operation, inputs=dict(request.inputs)
+            ),
+        ),
+        limits=limits,
+        expected_evidence=tuple(request.expected_evidence or metadata["expected_evidence"]),
+        stop_conditions=tuple(request.stop_conditions),
+        cleanup=(),
+        requires_manual_approval=bool(rule.always_manual),
+        manual_capabilities=(request.capability,) if rule.always_manual else (),
+        approval_reasons=(f"effective policy requires manual approval for {request.capability}",)
+        if rule.always_manual
+        else (),
+        created_at=now,
+        expires_at=now + timedelta(minutes=15),
+    )
+    correlation_id = uuid4().hex
+    cmd.store.append_event(
+        run_handle,
+        Event(
+            event_type="plan_proposed",
+            payload={
+                "plan_id": plan.plan_id,
+                "playbook_id": plan.playbook_id,
+                "snapshot_hash": plan.snapshot_hash,
+                "session_id": session_id,
+                "trusted_session_id": session_id,
+                "plan": plan.model_dump(mode="json"),
+                "expires_at": plan.expires_at.isoformat(),
+                "approval_state": "pending",
+                "approval_correlation_id": correlation_id,
+                "autonomy": run_handle.snapshot.autonomy.value,
+                "capabilities": list(plan.capabilities),
+                "requires_manual_approval": plan.requires_manual_approval,
+                "manual_capabilities": list(plan.manual_capabilities),
+                "approval_reasons": list(plan.approval_reasons),
+                "jit": True,
+                "evidence_refs": request.evidence_refs,
+            },
+            timestamp=now,
+        ),
+    )
+    cmd.add_plan(plan, plan.snapshot_hash, session_id, approval_correlation_id=correlation_id)
+    if not plan.requires_manual_approval:
+        cmd.store.append_event(
+            run_handle,
+            Event(
+                event_type="plan_auto_approved",
+                payload={
+                    "plan_id": plan.plan_id,
+                    "snapshot_hash": plan.snapshot_hash,
+                    "trusted_session_id": session_id,
+                    "approval_correlation_id": correlation_id,
+                    "approval_state": "approved",
+                    "approval_source": "curated_in_policy",
+                    "approved_at": now.isoformat(),
+                    "capabilities": list(plan.capabilities),
+                    "reason": "curated_jit_action",
+                },
+                timestamp=now,
+            ),
+        )
+        cmd.auto_approve_plan(plan.plan_id)
+    result = await handle_execute_plan({"plan_id": plan.plan_id}, **context)
+    return {**result, "jit_plan_id": plan.plan_id, "soft_warnings": []}
+
+
 async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str, Any]:
     """Propose a bounded action plan.
 
@@ -2192,10 +2491,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                         catalog,
                         str(last_routing_playbook or ""),
                     )
-                    or bool(
-                        set(failed_playbook.next_playbooks)
-                        & _PROVIDER_FALLBACK_PLAYBOOKS
-                    )
+                    or bool(set(failed_playbook.next_playbooks) & _PROVIDER_FALLBACK_PLAYBOOKS)
                 )
             )
             break
@@ -2232,14 +2528,8 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             playbook.id != "research.service-vulnerability.v1"
             or unresearched_fingerprint is not None
         )
-        and (
-            playbook.id != "web.object-reference.v1"
-            or bool(object_reference_urls)
-        )
-        and (
-            playbook.id != "web.observed-endpoint.v1"
-            or unfetched_web_endpoint is not None
-        )
+        and (playbook.id != "web.object-reference.v1" or bool(object_reference_urls))
+        and (playbook.id != "web.observed-endpoint.v1" or unfetched_web_endpoint is not None)
         and (
             playbook.id != "web.application-surface.v1"
             or _playbook_has_unfetched_path(playbook, observations, first_target)
@@ -2278,10 +2568,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             )
             or (playbook.id == "web.http-fallback.v1" and pending_capture_url is not None)
             or (playbook.id == "web.object-reference.v1" and bool(object_reference_urls))
-            or (
-                playbook.id == "web.observed-endpoint.v1"
-                and unfetched_web_endpoint is not None
-            )
+            or (playbook.id == "web.observed-endpoint.v1" and unfetched_web_endpoint is not None)
             or (
                 playbook.id == "web.application-surface.v1"
                 and _playbook_has_unfetched_path(
@@ -2296,10 +2583,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
             )
         )
         and (playbook.id != "web.object-reference.v1" or bool(object_reference_urls))
-        and (
-            playbook.id != "web.observed-endpoint.v1"
-            or unfetched_web_endpoint is not None
-        )
+        and (playbook.id != "web.observed-endpoint.v1" or unfetched_web_endpoint is not None)
         and (
             not any(action.adapter in {"ssh", "postex"} for action in playbook.actions)
             or (
@@ -2321,9 +2605,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         if repeated_reference_probe:
             eligible = repeated_reference_probe
             hint_compatible = tuple(
-                playbook
-                for playbook in hint_compatible
-                if playbook.id == "web.object-reference.v1"
+                playbook for playbook in hint_compatible if playbook.id == "web.object-reference.v1"
             )
     elif last_routing_playbook in catalog.playbooks:
         allowed_next = catalog.playbooks[last_routing_playbook].next_playbooks
@@ -2429,19 +2711,31 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                 ),
                 "plan_id": "",
             }
-        # No eligible playbooks — check if any playbook exists at all
-        if not catalog.playbooks:
-            return {
-                "status": "error",
-                "message": "No playbooks configured in the workflow catalog.",
-                "plan_id": "",
-            }
         return {
-            "status": "error",
-            "message": (
-                "No eligible playbooks for the current engagement state and evidence. "
-                "Try collecting more evidence first."
+            "status": "strategy_needed",
+            "boundary": "strategy_needed",
+            "dossier": {
+                "target": first_target.host,
+                "state": state.value,
+                "evidence_types": sorted(
+                    {observation.source for observation in observations if observation.source}
+                ),
+            },
+            "open_questions": ["Which in-scope capability yields the next useful evidence?"],
+            "frontier": [
+                {"playbook_id": playbook.id, "reason": "not currently eligible"}
+                for playbook in catalog.playbooks.values()
+            ],
+            "relevant_capabilities": sorted(
+                {
+                    capability
+                    for playbook in catalog.playbooks.values()
+                    for capability in playbook.capabilities
+                    if effective_policy.capabilities.get(capability)
+                    and effective_policy.capabilities[capability].allowed
+                }
             ),
+            "message": "Static recipes are exhausted; compose the next in-scope action.",
             "plan_id": "",
         }
 
@@ -2505,9 +2799,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
     if plan.limits.max_duration_seconds != admitted_duration:
         plan = plan.model_copy(
             update={
-                "limits": plan.limits.model_copy(
-                    update={"max_duration_seconds": admitted_duration}
-                )
+                "limits": plan.limits.model_copy(update={"max_duration_seconds": admitted_duration})
             }
         )
 
@@ -2528,7 +2820,8 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                             }
                         }
                     )
-                    if action.adapter in {
+                    if action.adapter
+                    in {
                         "httpx",
                         "katana",
                         "curl",
@@ -2543,13 +2836,16 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
         )
 
     asset_urls = _observed_web_asset_urls(observations, plan.target)
-    if any(
-        action.adapter == "curl"
-        and action.operation == "fetch"
-        and action.inputs.get("path_from_evidence") == "static_asset"
-        and not action.inputs.get("url")
-        for action in plan.actions
-    ) and not asset_urls:
+    if (
+        any(
+            action.adapter == "curl"
+            and action.operation == "fetch"
+            and action.inputs.get("path_from_evidence") == "static_asset"
+            and not action.inputs.get("url")
+            for action in plan.actions
+        )
+        and not asset_urls
+    ):
         return {
             "status": "blocked",
             "boundary": "missing_evidence",
@@ -2588,8 +2884,7 @@ async def handle_propose_plan(args: dict[str, Any], **context: Any) -> dict[str,
                     if (
                         action.adapter == "curl"
                         and action.operation == "fetch"
-                        and action.inputs.get("path_from_evidence")
-                        == "observed_endpoint"
+                        and action.inputs.get("path_from_evidence") == "observed_endpoint"
                         and not action.inputs.get("url")
                     )
                     else action
@@ -3242,11 +3537,14 @@ async def handle_strategy_hint(args: dict[str, Any], **context: Any) -> dict[str
     events = cmd.store.read_events(run_handle)
     state, observations = _determine_engagement_state(cmd.store, run_handle)
     dead_end = _dead_end_for_state(cmd.store, run_handle, state)
-    if dead_end is None or dead_end.get("boundary") != "no_eligible_plan":
+    if dead_end is None or dead_end.get("boundary") not in {
+        "no_eligible_plan",
+        "strategy_needed",
+    }:
         return {
             "status": "blocked",
             "boundary": "strategy_hint_not_at_dead_end",
-            "message": "Strategy hints require an unchanged no_eligible_plan boundary.",
+            "message": "Strategy hints require an unchanged strategy-needed boundary.",
         }
     # Hint audit records are excluded from the dead-end evidence digest below,
     # so the original signature remains stable for replay protection.  A
@@ -3315,22 +3613,16 @@ async def handle_strategy_hint(args: dict[str, Any], **context: Any) -> dict[str
         first_target,
         run_handle,
     )
-    ssh_ready = (
-        hinted_playbook is not None
-        and (
-            not any(
-                action.adapter in {"ssh", "postex"}
+    ssh_ready = hinted_playbook is not None and (
+        not any(action.adapter in {"ssh", "postex"} for action in hinted_playbook.actions)
+        or (
+            _observed_ssh_port(observations, first_target) is not None
+            and protected_credential is not None
+            and all(
+                action.inputs.get("credential_ref")
+                in {None, protected_credential["credential_ref"]}
                 for action in hinted_playbook.actions
-            )
-            or (
-                _observed_ssh_port(observations, first_target) is not None
-                and protected_credential is not None
-                and all(
-                    action.inputs.get("credential_ref")
-                    in {None, protected_credential["credential_ref"]}
-                    for action in hinted_playbook.actions
-                    if action.adapter in {"ssh", "postex"}
-                )
+                if action.adapter in {"ssh", "postex"}
             )
         )
     )
@@ -4798,17 +5090,17 @@ async def handle_run_engagement(
             snapshot_hash=run_handle.snapshot.snapshot_hash,
             session_id=session_id,
             dead_end_signature=(
-                previous_dead_end.get("signature")
-                if previous_dead_end is not None
-                else None
+                previous_dead_end.get("signature") if previous_dead_end is not None else None
             ),
         )
         if previous_dead_end is not None and pending_hint is None:
-            return finish({
-                "status": "blocked",
-                "boundary": previous_dead_end["boundary"],
-                "message": "Unchanged terminal boundary already recorded; no retry was run.",
-            })
+            return finish(
+                {
+                    "status": "blocked",
+                    "boundary": previous_dead_end["boundary"],
+                    "message": "Unchanged terminal boundary already recorded; no retry was run.",
+                }
+            )
         if state in {EngagementState.REPORTING, EngagementState.COMPLETE}:
             walkthrough = await handle_render_report(
                 {"style": "walkthrough"},
@@ -4822,15 +5114,17 @@ async def handle_run_engagement(
                 walkthrough.get("status") != "report_rendered"
                 or professional.get("status") != "report_rendered"
             ):
-                return finish({
-                    "status": "blocked",
-                    "boundary": "report_quality_gate",
-                    "message": (
-                        f"Offline report could not complete: "
-                        f"{walkthrough.get('message')}; "
-                        f"{professional.get('message')}"
-                    ),
-                })
+                return finish(
+                    {
+                        "status": "blocked",
+                        "boundary": "report_quality_gate",
+                        "message": (
+                            f"Offline report could not complete: "
+                            f"{walkthrough.get('message')}; "
+                            f"{professional.get('message')}"
+                        ),
+                    }
+                )
             objective_flags: dict[str, str] = {}
             if walkthrough.get("include_flags"):
                 dossier = DossierBuilder().build(
@@ -4854,16 +5148,18 @@ async def handle_run_engagement(
                         else "",
                     )
                 )
-            return finish({
-                "status": "complete",
-                "steps": step - 1,
-                "walkthrough_path": walkthrough["path"],
-                "professional_path": professional["path"],
-                "objective_flags": objective_flags,
-                "message": (
-                    "Objectives, cleanup, and both offline reports completed." + flag_summary
-                ),
-            })
+            return finish(
+                {
+                    "status": "complete",
+                    "steps": step - 1,
+                    "walkthrough_path": walkthrough["path"],
+                    "professional_path": professional["path"],
+                    "objective_flags": objective_flags,
+                    "message": (
+                        "Objectives, cleanup, and both offline reports completed." + flag_summary
+                    ),
+                }
+            )
 
         proposed = await handle_propose_plan(
             {
@@ -4883,14 +5179,14 @@ async def handle_run_engagement(
                 if event.get("event_type") == "objective_completed"
             }
             objectives_incomplete = any(
-                objective.kind not in completed
-                for objective in run_handle.snapshot.objectives
+                objective.kind not in completed for objective in run_handle.snapshot.objectives
             )
             last_progress = next(
                 (
                     str(event.get("event_type", ""))
                     for event in reversed(events)
-                    if event.get("event_type") in {
+                    if event.get("event_type")
+                    in {
                         "evidence_collected",
                         "finding_candidate",
                         "plan_executed",
@@ -4926,29 +5222,31 @@ async def handle_run_engagement(
                 boundary="execution_lease_expired",
                 state=state,
             )
-            return finish({
-                "status": "blocked",
-                "boundary": "execution_lease_expired",
-                "steps": step - 1,
-                "message": (
-                    "Active execution lease expired and cannot be renewed without "
-                    "changing scope, policy, or leaving no eligible branch."
-                ),
-            })
+            return finish(
+                {
+                    "status": "blocked",
+                    "boundary": "execution_lease_expired",
+                    "steps": step - 1,
+                    "message": (
+                        "Active execution lease expired and cannot be renewed without "
+                        "changing scope, policy, or leaving no eligible branch."
+                    ),
+                }
+            )
         if proposed.get("status") not in {
             "plan_auto_approved",
             "plan_proposed",
         }:
             if (
                 pending_hint is not None
-                and proposed.get("boundary") not in {
+                and proposed.get("boundary")
+                not in {
                     "execution_lease_expired",
                     "kali_runtime",
                 }
                 and not any(
                     event.get("event_type") == "strategy_hint_rejected"
-                    and event.get("payload", {}).get("hint_id")
-                    == pending_hint["hint_id"]
+                    and event.get("payload", {}).get("hint_id") == pending_hint["hint_id"]
                     for event in cmd.store.read_events(run_handle)
                 )
             ):
@@ -4975,15 +5273,17 @@ async def handle_run_engagement(
                     boundary=str(last_provider_boundary.get("boundary", "provider_unavailable")),
                     state=state,
                 )
-                return finish({
-                    **last_provider_boundary,
-                    "steps": step - 1,
-                    "message": (
-                        f"{last_provider_boundary.get('message', 'Provider unavailable')} "
-                        "No eligible fallback provider remains."
-                    ),
-                    "fallback_details": proposed,
-                })
+                return finish(
+                    {
+                        **last_provider_boundary,
+                        "steps": step - 1,
+                        "message": (
+                            f"{last_provider_boundary.get('message', 'Provider unavailable')} "
+                            "No eligible fallback provider remains."
+                        ),
+                        "fallback_details": proposed,
+                    }
+                )
             boundary = str(proposed.get("boundary", "no_eligible_plan"))
             _record_dead_end_once(
                 cmd.store,
@@ -4991,12 +5291,14 @@ async def handle_run_engagement(
                 boundary=boundary,
                 state=state,
             )
-            return finish({
-                "status": "blocked",
-                "boundary": boundary,
-                "message": proposed.get("message", "No eligible plan."),
-                "details": proposed,
-            })
+            return finish(
+                {
+                    "status": "blocked",
+                    "boundary": boundary,
+                    "message": proposed.get("message", "No eligible plan."),
+                    "details": proposed,
+                }
+            )
         executed = await handle_execute_plan(
             {"plan_id": proposed["plan_id"]},
             **context,
@@ -5019,11 +5321,13 @@ async def handle_run_engagement(
                 boundary=boundary,
                 state=state,
             )
-            return finish({
-                **executed,
-                "boundary": boundary,
-                "steps": step,
-            })
+            return finish(
+                {
+                    **executed,
+                    "boundary": boundary,
+                    "steps": step,
+                }
+            )
         last_provider_boundary = None
         if executed.get("status") != "executed":
             events = cmd.store.read_events(run_handle)
@@ -5044,8 +5348,7 @@ async def handle_run_engagement(
                         catalog,
                         str(last_failed_playbook or ""),
                     )
-                    or set(failed_playbook.next_playbooks)
-                    & _PROVIDER_FALLBACK_PLAYBOOKS
+                    or set(failed_playbook.next_playbooks) & _PROVIDER_FALLBACK_PLAYBOOKS
                 )
                 and step < max_steps
             ):
@@ -5056,8 +5359,7 @@ async def handle_run_engagement(
                     event.get("payload", {})
                     for event in reversed(events)
                     if event.get("event_type") == "scope_candidate_discovered"
-                    and event.get("payload", {}).get("candidate_id")
-                    not in resolved_candidate_ids
+                    and event.get("payload", {}).get("candidate_id") not in resolved_candidate_ids
                 ),
                 None,
             )
@@ -5068,39 +5370,45 @@ async def handle_run_engagement(
                     boundary="scope_candidate",
                     state=state,
                 )
-                return finish({
-                    "status": "blocked",
-                    "boundary": "scope_candidate",
-                    "candidate": candidate,
-                    "steps": step,
-                    "message": (
-                        f"Discovered distinct target {candidate.get('target')} "
-                        f"from local evidence: {candidate.get('reason')}. "
-                        "A targeted amendment is required before sending traffic."
-                    ),
-                })
+                return finish(
+                    {
+                        "status": "blocked",
+                        "boundary": "scope_candidate",
+                        "candidate": candidate,
+                        "steps": step,
+                        "message": (
+                            f"Discovered distinct target {candidate.get('target')} "
+                            f"from local evidence: {candidate.get('reason')}. "
+                            "A targeted amendment is required before sending traffic."
+                        ),
+                    }
+                )
             _record_dead_end_once(
                 cmd.store,
                 run_handle,
                 boundary="execution_failure",
                 state=state,
             )
-            return finish({
-                "status": "blocked",
-                "boundary": "execution_failure",
-                "steps": step,
-                "message": executed.get(
-                    "message",
-                    "A plan could not complete safely.",
-                ),
-                "details": executed,
-            })
-    return finish({
-        "status": "blocked",
-        "boundary": "safety_step_limit",
-        "steps": max_steps,
-        "message": "Safety step limit reached; inspect status before continuing.",
-    })
+            return finish(
+                {
+                    "status": "blocked",
+                    "boundary": "execution_failure",
+                    "steps": step,
+                    "message": executed.get(
+                        "message",
+                        "A plan could not complete safely.",
+                    ),
+                    "details": executed,
+                }
+            )
+    return finish(
+        {
+            "status": "blocked",
+            "boundary": "safety_step_limit",
+            "steps": max_steps,
+            "message": "Safety step limit reached; inspect status before continuing.",
+        }
+    )
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────
@@ -5151,7 +5459,8 @@ def _pending_strategy_hint(
     applied = {
         event.get("payload", {}).get("hint_id")
         for event in events
-        if event.get("event_type") in {
+        if event.get("event_type")
+        in {
             "strategy_hint_applied",
             "strategy_hint_rejected",
         }
@@ -5215,7 +5524,8 @@ def _dead_end_evidence_digest(events: list[dict[str, Any]]) -> str:
             "payload": event.get("payload", {}),
         }
         for event in events
-        if event.get("event_type") not in {
+        if event.get("event_type")
+        not in {
             "dead_end",
             "execution_time_paused",
             "strategy_hint_received",
